@@ -1,5 +1,6 @@
 import os
 import importlib.util
+import sys
 from pathlib import Path
 
 import gradio as gr
@@ -9,6 +10,7 @@ module_spec = importlib.util.spec_from_file_location("morph_relay_api", Path(__f
 if module_spec is None or module_spec.loader is None:
     raise RuntimeError("Unable to load the relay API")
 module = importlib.util.module_from_spec(module_spec)
+sys.modules[module_spec.name] = module
 module_spec.loader.exec_module(module)
 api = module.app
 
