@@ -167,31 +167,36 @@ async def monitor(job_id: str) -> None:
                     if not uploaded:
                         raise RuntimeError("See-Through did not return an uploaded file reference")
                     input_file = file_data(uploaded, source.name, "image/png") if isinstance(uploaded, str) else uploaded
-                    session_hash = str(uuid.uuid4())
-                    join = await client.post(
-                        f"{UPSTREAM}/gradio_api/queue/join",
+                    call = await client.post(
+                        f"{UPSTREAM}/gradio_api/call/inference",
                         headers={**headers, "Content-Type": "application/json"},
-                        json={"data": [input_file, 1024, 42, True], "fn_index": 0, "session_hash": session_hash},
+                        json={"data": [input_file, 1024, 42, True]},
                     )
-                    if not join.is_success:
-                        raise RuntimeError(await upstream_error(join))
-                    async with client.stream("GET", f"{UPSTREAM}/gradio_api/queue/data", headers={**headers, "Accept": "text/event-stream"}, params={"session_hash": session_hash}) as stream:
+                    if not call.is_success:
+                        raise RuntimeError(await upstream_error(call))
+                    event_id = (call.json() or {}).get("event_id")
+                    if not isinstance(event_id, str) or not event_id:
+                        raise RuntimeError("See-Through did not return a Gradio event id")
+                    update_job(job_id, status="running", message="See-Through 正在拆分图层…", queue_rank=None, queue_eta_seconds=None)
+                    async with client.stream(
+                        "GET",
+                        f"{UPSTREAM}/gradio_api/call/inference/{event_id}",
+                        headers={**headers, "Accept": "text/event-stream"},
+                    ) as stream:
                         if not stream.is_success:
                             raise RuntimeError(await upstream_error(stream))
+                        event_type = ""
                         async for line in stream.aiter_lines():
+                            if line.startswith("event:"):
+                                event_type = line[6:].strip()
+                                continue
                             if not line.startswith("data:"):
                                 continue
                             raw = line[5:].strip()
                             if not raw or raw == "null":
                                 continue
-                            event = json.loads(raw)
-                            kind = event.get("msg")
-                            if kind == "estimation":
-                                update_job(job_id, status="queued", message=f"排队中：第 {event.get('rank', '?')} 位", queue_rank=event.get("rank"), queue_eta_seconds=event.get("rank_eta"))
-                            elif kind == "process_starts":
-                                update_job(job_id, status="running", message="See-Through 正在拆分图层…", queue_rank=None, queue_eta_seconds=None)
-                            elif kind == "process_completed":
-                                output = (event.get("output") or {}).get("data")
+                            if event_type == "complete":
+                                output = json.loads(raw)
                                 output_url = find_psd_output(output)
                                 if not output_url:
                                     snapshot = json.dumps(output, ensure_ascii=False, default=str)[:1200]
@@ -203,9 +208,9 @@ async def monitor(job_id: str) -> None:
                                 output_file.write_bytes(response.content)
                                 update_job(job_id, status="succeeded", message="PSD 已生成", output_psd=str(output_file), queue_rank=None, queue_eta_seconds=None)
                                 return
-                            elif kind in {"process_failed", "unexpected_error"}:
-                                raise RuntimeError(event.get("message") or "See-Through task failed")
-                raise RuntimeError("See-Through closed the queue stream before completion")
+                            if event_type == "error":
+                                raise RuntimeError(f"See-Through returned an error: {raw}")
+                raise RuntimeError("See-Through closed the event stream before completion")
             except Exception as error:
                 if attempt == MAX_ATTEMPTS:
                     update_job(job_id, status="failed", message="See-Through 任务失败", error=str(error))
