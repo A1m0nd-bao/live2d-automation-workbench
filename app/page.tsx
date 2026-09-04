@@ -11,7 +11,7 @@ const initialSteps: PipelineStep[] = [
   { name: '状态图生成', description: '生成 5 个可驱动表情 / 待机状态', state: 'done', output: 'states_v2.zip', tool: '动作规划 Skill' },
   { name: '图层拆分', description: '将全身图拆为可绑定的 PSD 图层', state: 'working', output: 'seethrough_output.psd', tool: 'See-Through API' },
   { name: '图层质检', description: '检查遮挡、缺失层、透明边与嘴部层级', state: 'queued', output: 'qa_report.json', tool: 'QA 规则集' },
-  { name: '自动绑定', description: '生成 Cubism 结构、参数与基础动作', state: 'queued', output: 'model3.json', tool: 'image2live2d' },
+  { name: '网格绑定与动画', description: '自动映射骨架、生成网格并建立基础动作', state: 'queued', output: 'aira_rig.stretch', tool: 'Stretchy Studio · Auto-Rig' },
   { name: '预览验收', description: '验证口型、呼吸、转头与动作幅度', state: 'queued', output: 'preview_bundle.zip', tool: '验收脚本' },
 ];
 const taskRows = [
