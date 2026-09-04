@@ -237,8 +237,13 @@ app = FastAPI(title="Morph See-Through Relay", lifespan=lifespan)
 
 
 @app.get("/health")
-async def health() -> dict[str, bool]:
-    return {"ok": bool(MODELSCOPE_TOKEN)}
+async def health() -> dict[str, bool | str | int]:
+    return {
+        "ok": bool(MODELSCOPE_TOKEN),
+        "upstream": UPSTREAM,
+        "resolution": INFERENCE_RESOLUTION,
+        "split_limbs": SPLIT_LIMBS,
+    }
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)
