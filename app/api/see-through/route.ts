@@ -126,8 +126,11 @@ export async function POST(request: Request) {
   if (!upload.ok) return json({ error: await errorText(upload) }, upload.status);
   const uploaded = extractUploadedFile(await upload.json());
   if (!uploaded) return json({ error: 'ModelScope 未返回可用的上传文件标识。' }, 502);
+  const imageInput = typeof uploaded === 'string'
+    ? { path: uploaded, orig_name: image.name, mime_type: image.type, meta: { _type: 'gradio.FileData' } }
+    : uploaded;
 
-  const data = inputTemplate().map((value) => value === '$image' ? uploaded : value);
+  const data = inputTemplate().map((value) => value === '$image' ? imageInput : value);
   const job = await remote(`/gradio_api/call/${encodeURIComponent(configuredApiName)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
