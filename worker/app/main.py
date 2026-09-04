@@ -35,7 +35,7 @@ class JobStatus(BaseModel):
     status: Literal["queued", "running", "succeeded", "failed"]
     message: str
     queue_rank: int | None = None
-    queue_eta_seconds: int | None = None
+    queue_eta_seconds: float | None = None
     output_psd: str | None = None
     error: str | None = None
     attempts: int
