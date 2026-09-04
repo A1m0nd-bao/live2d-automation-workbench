@@ -26,6 +26,8 @@ DB_PATH = DATA_ROOT / "jobs.sqlite3"
 UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.api-inference.modelscope.net").rstrip("/")
 MODELSCOPE_TOKEN = os.environ.get("MODELSCOPE_API_TOKEN", "")
 RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
+INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
+SPLIT_LIMBS = os.environ.get("SEE_THROUGH_SPLIT_LIMBS", "true").lower() in {"1", "true", "yes"}
 MAX_ATTEMPTS = 3
 ACTIVE: set[str] = set()
 
@@ -170,7 +172,7 @@ async def monitor(job_id: str) -> None:
                     call = await client.post(
                         f"{UPSTREAM}/gradio_api/call/inference",
                         headers={**headers, "Content-Type": "application/json"},
-                        json={"data": [input_file, 1024, 42, True]},
+                        json={"data": [input_file, INFERENCE_RESOLUTION, 42, SPLIT_LIMBS]},
                     )
                     if not call.is_success:
                         raise RuntimeError(await upstream_error(call))
