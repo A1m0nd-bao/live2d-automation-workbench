@@ -11,8 +11,8 @@ const initialSteps: PipelineStep[] = [
   { name: '状态图生成', description: '生成 5 个可驱动表情 / 待机状态', state: 'done', output: 'states_v2.zip', tool: '动作规划 Skill' },
   { name: '图层拆分', description: '将全身图拆为可绑定的 PSD 图层', state: 'working', output: 'seethrough_output.psd', tool: 'See-Through API' },
   { name: '图层质检', description: '检查遮挡、缺失层、透明边与嘴部层级', state: 'queued', output: 'qa_report.json', tool: 'QA 规则集' },
-  { name: '网格绑定与动画', description: '自动映射骨架、生成网格并建立基础动作', state: 'queued', output: 'aira_rig.stretch', tool: 'Stretchy Studio · Auto-Rig' },
-  { name: '预览验收', description: '验证口型、呼吸、转头与动作幅度', state: 'queued', output: 'preview_bundle.zip', tool: '验收脚本' },
+  { name: 'Cubism 工程导出', description: '自动映射骨架与网格，并导出可编辑的 Cubism 工程', state: 'queued', output: 'aira.cmo3', tool: 'Stretchy Studio · CMO3 Export' },
+  { name: 'Cubism 编译与验收', description: '编译运行模型，验证口型、呼吸、转头与动作幅度', state: 'queued', output: 'aira.moc3 + model3.json', tool: 'Cubism Editor · 验收脚本' },
 ];
 const taskRows = [
   { id: 'L2D-024', name: '霓虹机甲 · 艾拉', state: '执行中', progress: 48, updated: '刚刚' },
