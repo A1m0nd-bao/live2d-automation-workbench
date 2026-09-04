@@ -26,6 +26,11 @@ function inputTemplate() {
   }
 }
 
+function fnIndex() {
+  const value = Number(process.env.SEE_THROUGH_FN_INDEX ?? '0');
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
 async function remote(path: string, init: RequestInit = {}) {
   return fetch(`${API_BASE}${path}`, {
     ...init,
@@ -82,12 +87,12 @@ export async function GET(request: Request) {
   }
 
   const url = new URL(request.url);
-  const eventId = url.searchParams.get('eventId');
+  const sessionHash = url.searchParams.get('sessionHash');
   const configuredApiName = apiName();
 
-  if (eventId) {
+  if (sessionHash) {
     if (!configuredApiName) return json({ ready: false, reason: 'missing_api_name' }, 503);
-    const response = await remote(`/gradio_api/call/${encodeURIComponent(configuredApiName)}/${encodeURIComponent(eventId)}`, {
+    const response = await remote(`/gradio_api/queue/data?session_hash=${encodeURIComponent(sessionHash)}`, {
       headers: { Accept: 'text/event-stream' },
     });
     if (!response.ok) return json({ error: await errorText(response) }, response.status);
@@ -131,14 +136,15 @@ export async function POST(request: Request) {
     : uploaded;
 
   const data = inputTemplate().map((value) => value === '$image' ? imageInput : value);
-  const job = await remote(`/gradio_api/call/${encodeURIComponent(configuredApiName)}`, {
+  const sessionHash = crypto.randomUUID();
+  const job = await remote('/gradio_api/queue/join', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data }),
+    body: JSON.stringify({ data, fn_index: fnIndex(), session_hash: sessionHash }),
   });
   if (!job.ok) return json({ error: await errorText(job) }, job.status);
   const result = await job.json() as JsonRecord;
   const eventId = result.event_id ?? result.eventId;
   if (typeof eventId !== 'string') return json({ error: 'ModelScope 未返回任务编号。', provider: result }, 502);
-  return json({ eventId, status: 'submitted', message: '已提交到 See-Through，完成后可登记生成的 PSD。' }, 202);
+  return json({ eventId, sessionHash, status: 'submitted', message: '已提交到 See-Through 队列，完成后可登记生成的 PSD。' }, 202);
 }
