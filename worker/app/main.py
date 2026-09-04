@@ -14,6 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -93,6 +94,40 @@ def file_data(path: str, name: str, content_type: str) -> dict[str, Any]:
     return {"path": path, "orig_name": name, "mime_type": content_type, "meta": {"_type": "gradio.FileData"}}
 
 
+def find_psd_output(value: Any) -> str | None:
+    """Find the PSD file in Gradio's nested File/Gallery output payload.
+
+    Different Gradio releases serialize a File component as a FileData object,
+    a URL string, or inside a list.  The upstream endpoint also includes a
+    preview gallery after the PSD, so inspect the full payload instead of
+    assuming that the first item is the download file.
+    """
+    if isinstance(value, dict):
+        for key in ("url", "path"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and ".psd" in candidate.lower():
+                return candidate
+        for nested in value.values():
+            candidate = find_psd_output(nested)
+            if candidate:
+                return candidate
+    elif isinstance(value, list):
+        for nested in value:
+            candidate = find_psd_output(nested)
+            if candidate:
+                return candidate
+    elif isinstance(value, str) and ".psd" in value.lower():
+        return value
+    return None
+
+
+def upstream_file_url(value: str) -> str:
+    """Turn a FileData path into Gradio's authenticated download URL."""
+    if value.startswith(("http://", "https://")):
+        return value
+    return f"{UPSTREAM}/gradio_api/file={quote(value, safe='/')}"
+
+
 async def upstream_error(response: httpx.Response) -> str:
     body = response.text
     try:
@@ -156,12 +191,13 @@ async def monitor(job_id: str) -> None:
                             elif kind == "process_starts":
                                 update_job(job_id, status="running", message="See-Through 正在拆分图层…", queue_rank=None, queue_eta_seconds=None)
                             elif kind == "process_completed":
-                                output = ((event.get("output") or {}).get("data") or [{}])[0]
-                                output_url = output.get("url") or output.get("path")
+                                output = (event.get("output") or {}).get("data")
+                                output_url = find_psd_output(output)
                                 if not output_url:
-                                    raise RuntimeError("See-Through completed without a PSD output")
+                                    snapshot = json.dumps(output, ensure_ascii=False, default=str)[:1200]
+                                    raise RuntimeError(f"See-Through completed without a PSD output: {snapshot}")
                                 output_file = DATA_ROOT / job_id / "output.psd"
-                                response = await client.get(output_url, headers=headers)
+                                response = await client.get(upstream_file_url(output_url), headers=headers)
                                 if not response.is_success:
                                     raise RuntimeError(await upstream_error(response))
                                 output_file.write_bytes(response.content)
