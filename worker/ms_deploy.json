@@ -1,0 +1,6 @@
+{
+  "$schema": "https://modelscope.cn/api/v1/studios/deploy_schema.json",
+  "sdk_type": "gradio",
+  "sdk_version": "6.17.3",
+  "resource_configuration": "platform/2v-cpu-16g-mem"
+}

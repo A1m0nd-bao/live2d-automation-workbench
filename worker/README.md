@@ -1,29 +1,31 @@
-# Morph See-Through Worker
+---
+domain: multi-modal
+tags:
+  - live2d
+  - workflow
+license: apache-2.0
+---
 
-This is the compute service behind the static GitHub Pages UI. It invokes the
-official See-Through `inference/scripts/inference_psd.py` script and returns a
-job id immediately.
+# Morph See-Through Relay
 
-## Prerequisites
+Deploy this small CPU-only service as a private ModelScope Studio. It does not
+run See-Through locally: the upstream See-Through Studio still handles GPU
+inference. The relay owns the Gradio SSE connection, persists tasks and input
+images under `/mnt/data`, retries interrupted sessions, and resumes unfinished
+work after its process restarts.
 
-1. Provision an NVIDIA GPU machine. The official See-Through full pipeline
-   needs about 12–16 GB VRAM at 1280px; the quantized variant can run around
-   8 GB VRAM.
-2. Clone `https://github.com/shitagaki-lab/see-through` beside this folder and
-   complete its official Python, CUDA, model, and dependency installation.
-3. Install this service's requirements in the same Python environment.
+## Required secrets
 
-## Run
+- `MODELSCOPE_API_TOKEN`: calls the upstream See-Through Studio
+- `MORPH_RELAY_TOKEN`: accepted only from the workbench proxy
+
+## Run locally
 
 ```bash
-export SEE_THROUGH_REPO=/absolute/path/to/see-through
-export CORS_ORIGINS=https://tianrongbao.github.io,http://localhost:3000
-uvicorn app.main:app --host 0.0.0.0 --port 8787
+export MODELSCOPE_API_TOKEN=ms-...
+export MORPH_RELAY_TOKEN=replace-with-a-random-secret
+uvicorn app.main:app --host 0.0.0.0 --port 7860
 ```
 
-In the workbench, open **设置 → 连接 See-Through Worker** and enter the
-publicly reachable HTTPS URL of this service. Do not expose a private GPU
-machine to the internet without authentication and a reverse proxy.
-
-The in-memory job registry is deliberately minimal. Replace it with Redis or a
-database before using it for multi-user or restart-safe production workloads.
+Configure the workbench with the deployed relay URL and the same
+`MORPH_RELAY_TOKEN`. Never send this token to the browser.

@@ -1,150 +1,91 @@
 export const runtime = 'edge';
 
-const API_BASE = 'https://studio-ljsabc-see-through.api-inference.modelscope.net';
+type RelayJob = {
+  id: string;
+  name: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  message: string;
+  queue_rank?: number | null;
+  queue_eta_seconds?: number | null;
+  output_psd?: string | null;
+  error?: string | null;
+  attempts: number;
+};
 
-type JsonRecord = Record<string, unknown>;
+function relayUrl() {
+  return (process.env.SEE_THROUGH_RELAY_URL ?? '').replace(/\/$/, '');
+}
+
+function relayToken() {
+  return process.env.MORPH_RELAY_TOKEN ?? '';
+}
+
+function modelScopeToken() {
+  return process.env.MODELSCOPE_API_TOKEN ?? process.env.MODELSCOPE_TOKEN ?? '';
+}
 
 function json(body: unknown, status = 200) {
   return Response.json(body, { status, headers: { 'Cache-Control': 'no-store' } });
 }
 
-function token() {
-  return process.env.MODELSCOPE_API_TOKEN ?? process.env.MODELSCOPE_TOKEN ?? '';
-}
-
-function apiName() {
-  return process.env.SEE_THROUGH_API_NAME ?? '';
-}
-
-function inputTemplate() {
-  const raw = process.env.SEE_THROUGH_INPUT_TEMPLATE ?? '["$image"]';
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : ['$image'];
-  } catch {
-    return ['$image'];
-  }
-}
-
-function fnIndex() {
-  const value = Number(process.env.SEE_THROUGH_FN_INDEX ?? '0');
-  return Number.isInteger(value) && value >= 0 ? value : 0;
-}
-
-async function remote(path: string, init: RequestInit = {}) {
-  return fetch(`${API_BASE}${path}`, {
+async function relay(path: string, init: RequestInit = {}) {
+  const base = relayUrl();
+  if (!base) throw new Error('服务端队列中转尚未配置。');
+  return fetch(`${base}${path}`, {
     ...init,
-    headers: {
-      Authorization: `Bearer ${token()}`,
-      ...(init.headers ?? {}),
-    },
+    headers: { Authorization: `Bearer ${modelScopeToken()}`, 'X-Relay-Token': relayToken(), ...(init.headers ?? {}) },
   });
 }
 
 async function errorText(response: Response) {
   const text = await response.text();
   try {
-    const body = JSON.parse(text) as JsonRecord;
-    const error = body.error as JsonRecord | string | undefined;
-    if (typeof error === 'string') return error;
-    if (error && typeof error === 'object' && typeof error.message === 'string') return error.message;
-    if (typeof body.message === 'string') return body.message;
+    const body = JSON.parse(text) as { detail?: string; message?: string; error?: string };
+    return body.detail ?? body.error ?? body.message ?? text;
   } catch {
-    // Keep the provider's plain-text response when it is not JSON.
+    return text || `Relay returned HTTP ${response.status}`;
   }
-  return text || `ModelScope returned HTTP ${response.status}`;
-}
-
-function endpointNames(info: unknown) {
-  if (!info || typeof info !== 'object') return [];
-  const record = info as JsonRecord;
-  const named = record.named_endpoints ?? record.namedEndpoints;
-  if (named && typeof named === 'object') return Object.keys(named as JsonRecord);
-  const endpoints = record.endpoints;
-  if (Array.isArray(endpoints)) return endpoints.flatMap((item) => {
-    if (!item || typeof item !== 'object') return [];
-    const value = (item as JsonRecord).api_name ?? (item as JsonRecord).apiName;
-    return typeof value === 'string' ? [value] : [];
-  });
-  return [];
-}
-
-function extractUploadedFile(value: unknown): unknown {
-  if (Array.isArray(value)) return value[0];
-  if (value && typeof value === 'object') {
-    const record = value as JsonRecord;
-    for (const key of ['files', 'data', 'value']) {
-      const candidate = record[key];
-      if (Array.isArray(candidate)) return candidate[0];
-    }
-  }
-  return value;
 }
 
 export async function GET(request: Request) {
-  if (!token()) {
-    return json({ ready: false, reason: 'missing_token', message: '管理员尚未配置 ModelScope API Token。' }, 503);
-  }
-
+  const base = relayUrl();
+  if (!base) return json({ ready: false, reason: 'missing_relay', message: '服务端常驻队列中转尚未部署。' }, 503);
   const url = new URL(request.url);
-  const sessionHash = url.searchParams.get('sessionHash');
-  const configuredApiName = apiName();
-
-  if (sessionHash) {
-    if (!configuredApiName) return json({ ready: false, reason: 'missing_api_name' }, 503);
-    const response = await remote(`/gradio_api/queue/data?session_hash=${encodeURIComponent(sessionHash)}`, {
-      headers: { Accept: 'text/event-stream' },
-    });
-    if (!response.ok) return json({ error: await errorText(response) }, response.status);
-    return new Response(response.body, {
-      headers: {
-        'Content-Type': response.headers.get('Content-Type') ?? 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-store',
-      },
-    });
+  const jobId = url.searchParams.get('jobId');
+  try {
+    if (!jobId) {
+      const health = await relay('/health');
+      if (!health.ok) return json({ ready: false, message: await errorText(health) }, health.status);
+      const body = await health.json() as { ok?: boolean };
+      return json({ ready: Boolean(body.ok), message: body.ok ? '服务端队列中转已就绪。' : '中转服务缺少上游凭据。' }, body.ok ? 200 : 503);
+    }
+    if (url.searchParams.get('output') === '1') {
+      const output = await relay(`/jobs/${encodeURIComponent(jobId)}/output`);
+      if (!output.ok) return json({ error: await errorText(output) }, output.status);
+      return new Response(output.body, { headers: { 'Content-Type': output.headers.get('Content-Type') ?? 'application/octet-stream', 'Content-Disposition': output.headers.get('Content-Disposition') ?? 'attachment' } });
+    }
+    const job = await relay(`/jobs/${encodeURIComponent(jobId)}`);
+    if (!job.ok) return json({ error: await errorText(job) }, job.status);
+    return json(await job.json() as RelayJob);
+  } catch (error) {
+    return json({ ready: false, error: error instanceof Error ? error.message : '无法连接服务端队列中转。' }, 502);
   }
-
-  const info = await remote('/gradio_api/info');
-  if (!info.ok) return json({ ready: false, reason: 'provider_error', message: await errorText(info) }, info.status);
-  const body = await info.json();
-  return json({
-    ready: Boolean(configuredApiName),
-    configuredApiName: configuredApiName || null,
-    availableEndpoints: endpointNames(body),
-    message: configuredApiName ? 'See-Through API 已就绪。' : 'Token 已验证；仍需选择 See-Through 的 Gradio API endpoint。',
-  });
 }
 
 export async function POST(request: Request) {
-  if (!token()) return json({ error: '管理员尚未配置 ModelScope API Token。' }, 503);
-  const configuredApiName = apiName();
-  if (!configuredApiName) return json({ error: '尚未设置 SEE_THROUGH_API_NAME。请先完成 API endpoint 配置。' }, 503);
-
+  if (!relayUrl()) return json({ error: '服务端常驻队列中转尚未部署。' }, 503);
   const form = await request.formData();
   const image = form.get('image');
   if (!(image instanceof File)) return json({ error: '请提供 PNG 或 JPG 角色参考图。' }, 400);
   if (!['image/png', 'image/jpeg'].includes(image.type)) return json({ error: '仅支持 PNG 或 JPG 图片。' }, 415);
-
-  const uploadForm = new FormData();
-  uploadForm.append('files', image, image.name);
-  const upload = await remote('/gradio_api/upload', { method: 'POST', body: uploadForm });
-  if (!upload.ok) return json({ error: await errorText(upload) }, upload.status);
-  const uploaded = extractUploadedFile(await upload.json());
-  if (!uploaded) return json({ error: 'ModelScope 未返回可用的上传文件标识。' }, 502);
-  const imageInput = typeof uploaded === 'string'
-    ? { path: uploaded, orig_name: image.name, mime_type: image.type, meta: { _type: 'gradio.FileData' } }
-    : uploaded;
-
-  const data = inputTemplate().map((value) => value === '$image' ? imageInput : value);
-  const sessionHash = crypto.randomUUID();
-  const job = await remote('/gradio_api/queue/join', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data, fn_index: fnIndex(), session_hash: sessionHash }),
-  });
-  if (!job.ok) return json({ error: await errorText(job) }, job.status);
-  const result = await job.json() as JsonRecord;
-  const eventId = result.event_id ?? result.eventId;
-  if (typeof eventId !== 'string') return json({ error: 'ModelScope 未返回任务编号。', provider: result }, 502);
-  return json({ eventId, sessionHash, status: 'submitted', message: '已提交到 See-Through 队列，完成后可登记生成的 PSD。' }, 202);
+  const relayForm = new FormData();
+  relayForm.append('image', image, image.name);
+  try {
+    const job = await relay(`/jobs?name=${encodeURIComponent(image.name.replace(/\.[^.]+$/, ''))}`, { method: 'POST', body: relayForm });
+    if (!job.ok) return json({ error: await errorText(job) }, job.status);
+    const body = await job.json() as RelayJob;
+    return json({ jobId: body.id, eventId: body.id, status: body.status, message: body.message }, 202);
+  } catch (error) {
+    return json({ error: error instanceof Error ? error.message : '无法创建服务端任务。' }, 502);
+  }
 }
