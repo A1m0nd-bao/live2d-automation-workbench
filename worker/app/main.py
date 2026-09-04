@@ -24,7 +24,9 @@ from pydantic import BaseModel
 DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/data/morph-live2d")).resolve()
 DB_PATH = DATA_ROOT / "jobs.sqlite3"
 UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.api-inference.modelscope.net").rstrip("/")
-MODELSCOPE_TOKEN = os.environ.get("MODELSCOPE_API_TOKEN", "")
+# ModelScope reserves MODELSCOPE_API_TOKEN for its internal SDK credential.
+# Use a relay-specific secret so outbound inference receives the user's API token.
+MODELSCOPE_TOKEN = os.environ.get("SEE_THROUGH_API_TOKEN", "")
 RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
 INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
 SPLIT_LIMBS = os.environ.get("SEE_THROUGH_SPLIT_LIMBS", "true").lower() in {"1", "true", "yes"}
