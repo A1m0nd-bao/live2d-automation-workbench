@@ -1,0 +1,92 @@
+.panel-modal {
+  width: min(700px, 94vw);
+  max-height: 90dvh;
+  overflow-y: auto;
+  border: 0;
+  margin: auto;
+}
+.panel-body {
+  margin-top: 22px;
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.detail-stack {
+  display: grid;
+  gap: 12px;
+}
+.detail-stack .field-label {
+  margin-top: 4px;
+}
+.detail-stack small,
+figcaption {
+  color: #65758b;
+}
+.psd-preview {
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  background: #f1f3f7;
+}
+figure {
+  margin: 12px 0 0;
+}
+.guide-list {
+  padding-left: 22px;
+  display: grid;
+  gap: 10px;
+}
+.task-link {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border-right: 0;
+  border-left: 0;
+  border-bottom: 0;
+  padding: 12px 0;
+}
+.task-link:hover {
+  background: #f6f9ff;
+}
+.task-table .task-state {
+  white-space: normal;
+}
+.toast {
+  position: fixed;
+  z-index: 30;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(680px, 90vw);
+  padding: 15px 20px;
+  border-radius: 12px;
+  background: #18283e;
+  color: white;
+  box-shadow: 0 6px 20px #0003;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+:focus-visible {
+  outline: 3px solid #7da7ff;
+  outline-offset: 3px;
+}
+.field-label input {
+  min-width: 0;
+  width: 100%;
+}
+@media (max-width: 760px) {
+  .header-actions {
+    flex-wrap: wrap;
+  }
+  .section-heading {
+    flex-wrap: wrap;
+  }
+  .table-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .rail-footer {
+    font-size: 10px;
+  }
+}

@@ -1,58 +1,633 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpRight, Check, ChevronRight, CircleHelp, FileImage, FolderOpen, Layers3, MoreHorizontal, Plus, Settings2, Upload, X } from 'lucide-react';
+/* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
+import { useEffect, useRef, useState } from 'react';
+import { Plus, X, FolderOpen, Settings2, CircleHelp } from 'lucide-react';
+import { connectService, serviceRequest } from './serviceBridge';
+import { saveAsset, readAsset, downloadBlob } from './assets';
+import './production.css';
 
-type StageState = 'done' | 'working' | 'queued' | 'blocked';
-type Panel = 'guide' | 'assets' | 'templates' | 'settings' | null;
-type Task = { id: string; name: string; referenceName: string; remoteJobId?: string; remoteSessionHash?: string; remoteState?: 'queued' | 'processing' | 'completed' | 'failed'; remoteMessage?: string; psdFile?: string; psdUrl?: string; qaPassed?: boolean; cmoFile?: string; mocFile?: string; createdAt: string };
-type PipelineStep = { name: string; description: string; state: StageState; output: string; tool: string };
-
-const STORAGE_KEY = 'morph.production.tasks';
-const MODELSCOPE_URL = 'https://modelscope.cn/studios/ljsabc/See-Through';
-const STRETCHY_URL = 'https://editor.stretchy.studio';
-const nav = [{ label: '生产任务', icon: FolderOpen }, { label: '流程模板', icon: Layers3, panel: 'templates' as Panel }];
-const stateStyle: Record<StageState, { label: string; className: string }> = { done: { label: '已登记', className: 'status-done' }, working: { label: '待处理', className: 'status-working' }, queued: { label: '等待上游', className: 'status-queued' }, blocked: { label: '需要人工操作', className: 'status-blocked' } };
-
-function taskStatus(task: Task) { if (task.mocFile) return { label: '已交付', progress: 100 }; if (task.cmoFile) return { label: '待 Cubism 编译', progress: 76 }; if (task.qaPassed) return { label: '待 CMO3 导出', progress: 58 }; if (task.psdFile) return { label: '待 PSD 质检', progress: 37 }; if (task.remoteState === 'failed') return { label: 'See-Through 失败', progress: 12 }; if (task.remoteState === 'processing') return { label: 'See-Through 处理中', progress: 25 }; if (task.remoteState === 'queued') return { label: 'See-Through 排队中', progress: 18 }; if (task.remoteJobId) return { label: 'See-Through 已提交', progress: 15 }; return { label: '待 See-Through 拆分', progress: 12 }; }
-function taskSteps(task: Task): PipelineStep[] {
-  const hasPsd = Boolean(task.psdFile); const qa = Boolean(task.qaPassed); const cmo = Boolean(task.cmoFile); const moc = Boolean(task.mocFile);
-  return [
-    { name: '角色参考图', description: '原图仅保留在你的本地或素材库', state: 'done', output: task.referenceName, tool: '素材准备' },
-    { name: 'See-Through 拆分', description: '通过安全代理提交到 ModelScope 并下载分层 PSD', state: hasPsd ? 'done' : task.remoteState === 'failed' ? 'blocked' : task.remoteJobId ? 'working' : 'blocked', output: hasPsd ? task.psdFile! : task.remoteMessage ?? (task.remoteJobId ? `任务 ${task.remoteJobId}` : '等待 PSD'), tool: 'ModelScope API' },
-    { name: 'PSD 质检', description: '确认口腔、眼部与遮挡层级符合制作规范', state: qa ? 'done' : hasPsd ? 'blocked' : 'queued', output: qa ? 'qa_approved' : '等待质检', tool: '人工验收' },
-    { name: 'Cubism 工程导出', description: '在 Stretchy Studio 导出可编辑的 Cubism 工程', state: cmo ? 'done' : qa ? 'blocked' : 'queued', output: cmo ? task.cmoFile! : '等待 .cmo3', tool: 'Stretchy Studio' },
-    { name: 'Cubism 编译与验收', description: '在 Cubism Editor 编译并登记运行时模型', state: moc ? 'done' : cmo ? 'blocked' : 'queued', output: moc ? task.mocFile! : '等待 .moc3', tool: 'Cubism Editor' },
-  ];
+type Task = {
+  id: string;
+  name: string;
+  referenceName: string;
+  createdAt: string;
+  remoteJobId?: string;
+  remoteState?: string;
+  remoteMessage?: string;
+  psdFile?: string;
+  inputFile?: string;
+  inputKind?: string;
+  qaPassed?: boolean;
+  cmoFile?: string;
+  hasGenerated?: boolean;
+  cmoAccepted?: boolean;
+  warnings?: string[];
+};
+type Job = {
+  jobId?: string;
+  status?: string;
+  message?: string;
+  error?: string;
+};
+const STORAGE = 'morph.production.tasks';
+const stage = (t: Task) =>
+  t.cmoAccepted
+    ? 'CMO3 已验收'
+    : t.hasGenerated
+      ? 'CMO3 已生成 · 待验收'
+      : t.qaPassed
+        ? '待生成 CMO3'
+        : t.psdFile || t.inputKind === 'stretch'
+          ? '待确认输入'
+          : t.remoteState === 'failed'
+            ? '拆分失败'
+            : t.remoteJobId
+              ? '后台拆分中'
+              : '待提交参考图';
+const kind = (f: File) =>
+  /\.psd$/i.test(f.name)
+    ? 'psd'
+    : /\.stretch$/i.test(f.name)
+      ? 'stretch'
+      : /\.(png|jpe?g)$/i.test(f.name)
+        ? 'image'
+        : '';
+function validate(f: File) {
+  const k = kind(f);
+  if (!k) throw new Error('请选择 PNG、JPG、PSD 或 .stretch 文件。');
+  if (f.size > (k === 'image' ? 20 : 100) * 1024 * 1024)
+    throw new Error('图片最大 20 MB，工程最大 100 MB。');
+  return k;
 }
 
 export default function App() {
-  const [tasks, setTasks] = useState<Task[]>([]); const [selectedTask, setSelectedTask] = useState<Task | null>(null); const [showCreate, setShowCreate] = useState(false); const [panel, setPanel] = useState<Panel>(null); const [taskName, setTaskName] = useState(''); const [referenceFile, setReferenceFile] = useState<File | null>(null); const [toast, setToast] = useState(''); const fileInput = useRef<HTMLInputElement>(null);
-  useEffect(() => { try { setTasks(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]')); } catch { setTasks([]); } }, []);
-  useEffect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks)); }, [tasks]);
-  useEffect(() => { if (!toast) return; const timer = window.setTimeout(() => setToast(''), 3200); return () => window.clearTimeout(timer); }, [toast]);
-  const selectedSteps = useMemo(() => selectedTask ? taskSteps(selectedTask) : [], [selectedTask]);
-  const updateTask = (id: string, update: Partial<Task>) => { setTasks((current) => current.map((task) => task.id === id ? { ...task, ...update } : task)); setSelectedTask((current) => current?.id === id ? { ...current, ...update } : current); };
-  const createTask = () => { if (!taskName.trim() || !referenceFile) { setToast('请填写任务名称并选择一张角色参考图。'); return; } const task: Task = { id: `L2D-${String(Date.now()).slice(-6)}`, name: taskName.trim(), referenceName: referenceFile.name, createdAt: new Date().toLocaleString('zh-CN') }; setTasks((current) => [task, ...current]); setSelectedTask(task); setShowCreate(false); setTaskName(''); setReferenceFile(null); setToast('生产任务已建立。下一步请在 ModelScope 完成 PSD 拆分。'); };
-  return <main className="app-shell"><aside className="side-rail"><div className="brand-mark"><span className="brand-dot" /><span>morph</span></div><button className="new-task" onClick={() => setShowCreate(true)}><Plus size={17} />新建生产任务</button><nav className="main-nav">{nav.map(({ label, icon: Icon, panel: target }) => <button key={label} className="nav-item active" onClick={() => target && setPanel(target)}><Icon size={18} />{label}</button>)}</nav><div className="rail-footer"><button className="nav-item" onClick={() => setPanel('settings')}><Settings2 size={18} />设置</button><div className="user-chip"><span>BR</span><div><b>包添荣</b><small>本地生产队列</small></div><MoreHorizontal size={17} /></div></div></aside><section className="workspace"><header className="topbar"><div className="crumbs"><span>生产任务</span><ChevronRight size={14} /><b>Live2D 流程</b></div><div className="top-actions"><button className="help" onClick={() => setPanel('guide')}><CircleHelp size={18} />流程指南</button><button className="avatar" onClick={() => setPanel('settings')}>BR</button></div></header><div className="workspace-scroll"><section className="intro-row"><div><p className="eyebrow">PRODUCTION WORKSPACE</p><h1>Live2D 生产任务</h1><p className="intro-copy">通过安全 API 提交 See-Through 拆分，再按 Cubism 交付标准追踪每个真实产物。</p></div><div className="header-actions"><a className="ghost-button" href={MODELSCOPE_URL} target="_blank" rel="noreferrer"><ArrowUpRight size={17} />打开 See-Through</a><button className="primary-button" onClick={() => setShowCreate(true)}><Plus size={17} />新建任务</button></div></section><section className="pipeline-section"><div className="section-heading"><div><p className="eyebrow">API INTEGRATION</p><h2>See-Through 自动拆分</h2></div><a className="run-button" href={MODELSCOPE_URL} target="_blank" rel="noreferrer"><ArrowUpRight size={16} />网页备用入口</a></div><ApiStatus /></section><section className="bottom-grid"><article className="table-card"><div className="section-heading compact"><div><p className="eyebrow">PRODUCTION QUEUE</p><h2>生产队列</h2></div><span className="task-id">{tasks.length} 个任务</span></div>{tasks.length === 0 ? <div className="panel-body"><b>暂无任务。</b><br />新建任务后可通过已接入的 API 提交参考图；网页入口始终作为备用流程。</div> : <div className="task-table"><div className="table-head"><span>任务</span><span>状态</span><span>完成度</span><span>创建时间</span></div>{tasks.map((task) => { const status = taskStatus(task); return <button className="table-row task-link" key={task.id} onClick={() => setSelectedTask(task)}><div><b>{task.name}</b><small>{task.id}</small></div><span className={`task-state ${status.progress === 100 ? 'delivered' : ''}`}>{status.label}</span><div className="row-progress"><span><i style={{ width: `${status.progress}%` }} /></span><b>{status.progress}%</b></div><time>{task.createdAt}</time></button>; })}</div>}</article><article className="risk-card"><div className="risk-icon"><FileImage size={19} /></div><p className="eyebrow">交付要求</p><h2>必须保留两类文件</h2><p>`.cmo3` 用于继续编辑；`.moc3 + model3.json` 用于最终运行。PSD 拆分图是可追溯的中间产物。</p><button className="text-button" onClick={() => setPanel('assets')}>查看资产规范 <ArrowUpRight size={15} /></button></article></section></div></section>{toast && <output className="toast" aria-live="polite">{toast}</output>}{showCreate && <CreateDialog taskName={taskName} setTaskName={setTaskName} referenceFile={referenceFile} fileInput={fileInput} onFile={(file) => setReferenceFile(file)} onClose={() => setShowCreate(false)} onCreate={createTask} />}{selectedTask && <TaskDialog task={selectedTask} steps={selectedSteps} onClose={() => setSelectedTask(null)} onUpdate={updateTask} />}{panel && <PanelDialog panel={panel} onClose={() => setPanel(null)} />}</main>;
+  const [tasks, setTasks] = useState<Task[]>([]),
+    [hydrated, setHydrated] = useState(false);
+  const [selected, setSelected] = useState(''),
+    [create, setCreate] = useState(false),
+    [guide, setGuide] = useState(false);
+  const [name, setName] = useState(''),
+    [file, setFile] = useState<File | null>(null);
+  const [toast, setToast] = useState(''),
+    [connection, setConnection] = useState(
+      '尚未连接；已有 PSD 可直接本地生成。',
+    );
+  const [busy, setBusy] = useState(false),
+    [progress, setProgress] = useState(''),
+    [preview, setPreview] = useState('');
+  const lock = useRef(false);
+  const task = tasks.find((t) => t.id === selected);
+  const update = (id: string, patch: Partial<Task>) =>
+    setTasks((all) => all.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  useEffect(() => {
+    try {
+      const data = JSON.parse(localStorage.getItem(STORAGE) || '[]');
+      if (Array.isArray(data))
+        setTasks(data.filter((t) => t && typeof t.id === 'string'));
+    } catch {
+      /* old corrupt metadata is ignored */
+    }
+    setHydrated(true);
+  }, []);
+  useEffect(() => {
+    if (hydrated) {
+      try {
+        localStorage.setItem(STORAGE, JSON.stringify(tasks));
+      } catch {
+        setToast('任务记录保存失败，请及时下载产物。');
+      }
+    }
+  }, [tasks, hydrated]);
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(''), 6500);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
+  useEffect(() => {
+    let alive = true,
+      url = '';
+    setPreview('');
+    if (task?.hasGenerated)
+      void readAsset(`${task.id}:preview`)
+        .then((blob) => {
+          if (blob && alive) {
+            url = URL.createObjectURL(blob);
+            setPreview(url);
+          }
+        })
+        .catch(() => {});
+    return () => {
+      alive = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [task?.id, task?.hasGenerated]);
+  async function operate(action: () => Promise<void>) {
+    if (lock.current) return;
+    lock.current = true;
+    setBusy(true);
+    try {
+      await action();
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : '操作失败');
+    } finally {
+      lock.current = false;
+      setBusy(false);
+      setProgress('');
+    }
+  }
+  async function input(t: Task) {
+    const blob = await readAsset(`${t.id}:input`);
+    if (!blob)
+      throw new Error(
+        '此浏览器没有原始文件，请重新导入 PSD 或参考图。旧任务仅记录过文件名。',
+      );
+    return new File([blob], t.inputFile || t.psdFile || t.referenceName, {
+      type: blob.type,
+    });
+  }
+  async function refresh(t: Task) {
+    if (!t.remoteJobId) return;
+    const result = await serviceRequest<Job>('status', {
+      jobId: t.remoteJobId,
+    });
+    update(t.id, {
+      remoteState: result.status,
+      remoteMessage: result.error || result.message || result.status,
+    });
+    if (result.status === 'succeeded' && !t.psdFile) {
+      setProgress('下载并保存拆分 PSD…');
+      const data = await serviceRequest<ArrayBuffer>('output', {
+        jobId: t.remoteJobId,
+      });
+      if (new TextDecoder().decode(data.slice(0, 4)) !== '8BPS')
+        throw new Error('服务返回的文件不是 PSD。');
+      const filename = `${t.name}.psd`;
+      await saveAsset(`${t.id}:input`, new Blob([data]));
+      update(t.id, {
+        psdFile: filename,
+        inputFile: filename,
+        inputKind: 'psd',
+        qaPassed: false,
+      });
+      setToast('PSD 已下载并保存到当前浏览器，请确认图层质量。');
+    }
+  }
+  useEffect(() => {
+    if (!task?.remoteJobId || task.psdFile || task.remoteState === 'failed')
+      return;
+    const timer = setInterval(() => {
+      if (!lock.current) void operate(() => refresh(task));
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [task]);
+  async function generate(t: Task) {
+    const f = await input(t);
+    const { generateCubism } = await import('./cubismEngine.js');
+    const result = await generateCubism(f, t.name, setProgress);
+    try {
+      await saveAsset(`${t.id}:cmo`, result.cmo);
+      await saveAsset(`${t.id}:bundle`, result.bundle);
+      await saveAsset(`${t.id}:stretch`, result.stretch);
+      if (result.preview)
+        await saveAsset(`${t.id}:preview`, result.preview as Blob);
+    } catch {
+      downloadBlob(result.bundle, `${result.name}-bundle.zip`);
+      throw new Error(
+        '浏览器空间不足，已尝试直接下载打包文件，请检查下载目录。',
+      );
+    }
+    update(t.id, {
+      cmoFile: `${result.name}.cmo3`,
+      hasGenerated: true,
+      cmoAccepted: false,
+      warnings: result.report.warnings,
+    });
+    setToast('CMO3 已真实生成。请下载到 Cubism 检查全身显示及动作。');
+  }
+  async function download(t: Task, suffix: string, filename: string) {
+    const blob = await readAsset(`${t.id}:${suffix}`);
+    if (!blob) throw new Error('文件不在此浏览器，请重新导入或生成。');
+    downloadBlob(blob, filename);
+  }
+  async function replace(t: Task, f: File) {
+    const k = validate(f);
+    await saveAsset(`${t.id}:input`, f);
+    update(t.id, {
+      inputFile: f.name,
+      inputKind: k,
+      psdFile: k === 'psd' ? f.name : undefined,
+      remoteJobId: undefined,
+      remoteState: undefined,
+      remoteMessage: undefined,
+      qaPassed: false,
+      hasGenerated: false,
+      cmoFile: undefined,
+      cmoAccepted: false,
+      warnings: [],
+    });
+  }
+  return (
+    <main className="app-shell">
+      <aside className="side-rail">
+        <div className="brand-mark">
+          <span className="brand-dot" />
+          morph
+        </div>
+        <button className="new-task" onClick={() => setCreate(true)}>
+          <Plus size={17} />
+          新建生产任务
+        </button>
+        <nav className="main-nav">
+          <button className="nav-item active" onClick={() => setSelected('')}>
+            <FolderOpen size={18} />
+            生产任务
+          </button>
+          <button className="nav-item" onClick={() => setGuide(true)}>
+            <Settings2 size={18} />
+            流程与隐私
+          </button>
+        </nav>
+        <div className="rail-footer">真实文件 · 本地导出</div>
+      </aside>
+      <section className="workspace">
+        <header className="topbar">
+          <div className="crumbs">生产任务 / Live2D 流程</div>
+          <button className="help" onClick={() => setGuide(true)}>
+            <CircleHelp size={18} />
+            流程指南
+          </button>
+        </header>
+        <div className="workspace-scroll">
+          <section className="intro-row">
+            <div>
+              <p className="eyebrow">PRODUCTION WORKSPACE</p>
+              <h1>Live2D 生产任务</h1>
+              <p className="intro-copy">
+                参考图拆分 → PSD 验收 → 浏览器生成 CMO3 → Cubism 动作验收
+              </p>
+            </div>
+            <button className="primary-button" onClick={() => setCreate(true)}>
+              <Plus size={17} />
+              新建任务
+            </button>
+          </section>
+          <section className="pipeline-section">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">PRIVATE TASK SERVICE</p>
+                <h2>See-Through 任务服务</h2>
+              </div>
+              <div className="header-actions">
+                <button
+                  className="ghost-button"
+                  onClick={() => {
+                    try {
+                      connectService();
+                      setConnection('请在连接窗口登录，再点击检查连接。');
+                    } catch (e) {
+                      setToast(String(e));
+                    }
+                  }}
+                >
+                  连接任务服务
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(async () => {
+                      const r = await serviceRequest<{
+                        ready?: boolean;
+                        message?: string;
+                      }>('health');
+                      setConnection(
+                        r.ready
+                          ? '已连接私有任务服务'
+                          : r.message || '服务尚未就绪',
+                      );
+                    })
+                  }
+                >
+                  检查连接
+                </button>
+              </div>
+            </div>
+            <p>{connection}</p>
+            <small>
+              密钥仅留在服务端。推理可后台运行；查询状态时请保持登录窗口打开。
+            </small>
+          </section>
+          <section className="bottom-grid">
+            <article className="table-card">
+              <div className="section-heading compact">
+                <h2>生产队列</h2>
+                <span>{tasks.length} 个任务</span>
+              </div>
+              {tasks.length ? (
+                <div className="task-table">
+                  {tasks.map((t) => (
+                    <button
+                      className="table-row task-link"
+                      key={t.id}
+                      onClick={() => setSelected(t.id)}
+                    >
+                      <div>
+                        <b>{t.name}</b>
+                        <small>{t.referenceName}</small>
+                      </div>
+                      <span className="task-state">{stage(t)}</span>
+                      <span>{t.hasGenerated ? '文件已保存' : '查看任务'}</span>
+                      <time>{t.createdAt}</time>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="panel-body">
+                  暂无任务。可直接导入已验收 PSD，不必重复拆分。
+                </p>
+              )}
+            </article>
+            <article className="risk-card">
+              <p className="eyebrow">CUBISM COMPATIBILITY</p>
+              <h2>可编辑 CMO3</h2>
+              <p>
+                固定兼容导出引擎，生成网格、标准绑定与物理配置。自动生成不等于动作质检通过；MOC3
+                仍由 Cubism 编译。
+              </p>
+              <button className="text-button" onClick={() => setGuide(true)}>
+                查看流程边界 →
+              </button>
+            </article>
+          </section>
+        </div>
+      </section>
+      {toast && (
+        <output className="toast" aria-live="polite">
+          {toast}
+        </output>
+      )}
+      {create && (
+        <Modal title="新建生产任务" close={() => setCreate(false)}>
+          <p>文件保存在当前浏览器；仅点击提交参考图时上传到任务服务。</p>
+          <label className="field-label">
+            任务名称
+            <input value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field-label">
+            参考图 / 已验收 PSD / Stretchy 工程
+            <input
+              type="file"
+              accept=".png,.jpg,.jpeg,.psd,.stretch"
+              onChange={(e) => setFile(e.target.files?.[0] || null)}
+            />
+          </label>
+          <button
+            className="primary-button"
+            disabled={busy}
+            onClick={() =>
+              void operate(async () => {
+                if (!name.trim() || !file)
+                  throw new Error('请填写名称并选择文件。');
+                const k = validate(file),
+                  id = crypto.randomUUID();
+                await saveAsset(`${id}:input`, file);
+                setTasks((all) => [
+                  {
+                    id,
+                    name: name.trim(),
+                    referenceName: file.name,
+                    inputFile: file.name,
+                    inputKind: k,
+                    psdFile: k === 'psd' ? file.name : undefined,
+                    createdAt: new Date().toLocaleString('zh-CN'),
+                  },
+                  ...all,
+                ]);
+                setSelected(id);
+                setCreate(false);
+                setName('');
+                setFile(null);
+              })
+            }
+          >
+            保存并建立任务
+          </button>
+        </Modal>
+      )}
+      {task && !create && (
+        <Modal title={task.name} close={() => setSelected('')}>
+          <span className="task-state">{stage(task)}</span>
+          <p>{task.remoteMessage}</p>
+          <div className="detail-stack">
+            {task.remoteJobId && <small>服务端任务：{task.remoteJobId}</small>}
+            {!task.psdFile &&
+              task.inputKind !== 'stretch' &&
+              !task.remoteJobId && (
+                <button
+                  className="primary-button"
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(async () => {
+                      const f = await input(task);
+                      setProgress('提交参考图…');
+                      const r = await serviceRequest<Job>('submit', {
+                        image: f,
+                        name: f.name,
+                      });
+                      if (!r.jobId)
+                        throw new Error(
+                          r.error ||
+                            '服务未返回任务编号，请检查服务端后再重试。',
+                        );
+                      update(task.id, {
+                        remoteJobId: r.jobId,
+                        remoteState: 'queued',
+                        remoteMessage: r.message,
+                      });
+                    })
+                  }
+                >
+                  提交参考图到 See-Through
+                </button>
+              )}
+            {task.remoteJobId && !task.psdFile && (
+              <button
+                className="ghost-button"
+                disabled={busy}
+                onClick={() => void operate(() => refresh(task))}
+              >
+                刷新状态 / 拉取 PSD
+              </button>
+            )}
+            <label className="field-label">
+              重新导入输入文件
+              <input
+                disabled={busy}
+                type="file"
+                accept=".psd,.stretch,.png,.jpg,.jpeg"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void operate(() => replace(task, f));
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            <button
+              className="ghost-button"
+              disabled={busy}
+              onClick={() =>
+                void operate(() =>
+                  download(
+                    task,
+                    'input',
+                    task.inputFile || task.psdFile || task.referenceName,
+                  ),
+                )
+              }
+            >
+              下载输入文件
+            </button>
+            {(task.psdFile || task.inputKind === 'stretch') &&
+              !task.qaPassed && (
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() => update(task.id, { qaPassed: true })}
+                >
+                  确认输入质检通过
+                </button>
+              )}
+            {task.qaPassed && (
+              <button
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void operate(() => generate(task))}
+              >
+                {task.hasGenerated ? '重新生成 CMO3' : '在浏览器生成 CMO3'}
+              </button>
+            )}
+            {busy && <output>{progress || '处理中…'}</output>}
+            {task.hasGenerated && (
+              <>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(() => download(task, 'cmo', task.cmoFile!))
+                  }
+                >
+                  下载 CMO3
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(() =>
+                      download(task, 'bundle', `${task.name}-bundle.zip`),
+                    )
+                  }
+                >
+                  下载工程包（含报告与 .stretch）
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={busy || task.cmoAccepted}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        '已在 Cubism 打开本次 CMO3，检查全身显示、眼口与身体参数动作了吗？',
+                      )
+                    )
+                      update(task.id, { cmoAccepted: true });
+                  }}
+                >
+                  记录 Cubism 动作验收通过
+                </button>
+              </>
+            )}
+            {task.warnings?.map((w, i) => (
+              <small key={i}>{w}</small>
+            ))}
+            {preview && (
+              <figure>
+                {/* Local Blob preview has no public URL for server image optimization. */}
+                {/* oxlint-disable-next-line next/no-img-element */}
+                <img
+                  className="psd-preview"
+                  src={preview}
+                  alt="输入 PSD 图层合成"
+                />
+                <figcaption>输入 PSD 合成图，不是 CMO3 动作预览。</figcaption>
+              </figure>
+            )}
+          </div>
+        </Modal>
+      )}
+      {guide && (
+        <Modal title="流程与数据边界" close={() => setGuide(false)}>
+          <ol className="guide-list">
+            <li>有 PSD：直接新建任务并导入，确认图层质量后点击生成。</li>
+            <li>
+              仅有原图：连接私有服务、登录、检查连接，然后在任务中提交。打开任务后每
+              10 秒查询一次真实状态。
+            </li>
+            <li>浏览器完成网格和 CMO3 导出，生成期间不要关闭页面。</li>
+            <li>
+              下载 CMO3 到 Cubism 检查全身与参数动作。生成文件不代表动作质检或
+              MOC3 编译通过。
+            </li>
+          </ol>
+          <p>
+            文件与任务记录保存在此浏览器，清除站点数据或更换设备不会自动恢复，请及时下载备份。服务端任务持久化不等于永久资产存储。
+          </p>
+          <p>
+            兼容路径固定 StretchyStudio
+            24a83a2，使用标准自动绑定；手工原生变形器不保证无损。密钥不存入公开前端。
+          </p>
+          <a
+            href="https://editor.stretchy.studio/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            打开 Stretchy Studio 官方编辑器 ↗
+          </a>
+        </Modal>
+      )}
+    </main>
+  );
 }
 
-function ApiStatus() {
-  const [state, setState] = useState<{ ready?: boolean; message?: string; availableEndpoints?: string[] } | null>(null);
-  useEffect(() => { fetch('/api/see-through').then(async (response) => setState(await response.json())).catch(() => setState({ message: '此静态部署没有安全 API 代理；请使用生产工作台。' })); }, []);
-  if (!state) return <div className="detail-stack"><b>正在检查 API 连接…</b><span>不会向浏览器暴露 ModelScope Token。</span></div>;
-  if (state.ready) return <div className="detail-stack"><b>API 已就绪</b><span>{state.message}</span></div>;
-  return <div className="detail-stack"><b>API 等待配置</b><span>{state.message ?? '生产代理尚不可用。'}</span>{state.availableEndpoints?.length ? <small>可用 endpoint：{state.availableEndpoints.join('、')}</small> : null}</div>;
+function Modal({
+  title,
+  close,
+  children,
+}: {
+  title: string;
+  close: () => void;
+  children: React.ReactNode;
+}) {
+  const root = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const before = document.activeElement as HTMLElement | null;
+    root.current?.showModal();
+    return () => before?.focus();
+  }, []);
+  return (
+    <div className="modal-backdrop">
+      <dialog
+        ref={root}
+        tabIndex={-1}
+        className="create-modal panel-modal"
+        aria-modal="true"
+        aria-label={title}
+        onCancel={close}
+      >
+        <button className="close-modal" aria-label="关闭" onClick={close}>
+          <X size={20} />
+        </button>
+        <h2>{title}</h2>
+        <div className="panel-body">{children}</div>
+      </dialog>
+    </div>
+  );
 }
-
-function CreateDialog({ taskName, setTaskName, referenceFile, fileInput, onFile, onClose, onCreate }: { taskName: string; setTaskName: (value: string) => void; referenceFile: File | null; fileInput: React.RefObject<HTMLInputElement | null>; onFile: (file: File | null) => void; onClose: () => void; onCreate: () => void }) { return <div className="modal-backdrop"><section className="create-modal" role="dialog" aria-modal="true"><button className="close-modal" onClick={onClose}><X size={20} /></button><p className="eyebrow">CREATE PRODUCTION TASK</p><h2>新建生产任务</h2><p className="modal-copy">参考图不会上传到本网站。创建后请到 ModelScope 网页亲自上传并下载拆分 PSD。</p><label className="field-label">角色名称<input value={taskName} onChange={(event) => setTaskName(event.target.value)} placeholder="例如：花店店主 · 米娅" /></label><label className="field-label">角色参考图<button className="upload-box" type="button" onClick={() => fileInput.current?.click()}><Upload size={21} /><span>{referenceFile?.name ?? '选择 PNG / JPG 图片'}</span><small>仅记录文件名，不会上传</small></button><input ref={fileInput} className="hidden-input" type="file" accept="image/png,image/jpeg" onChange={(event) => onFile(event.target.files?.[0] ?? null)} /></label><div className="modal-actions"><button className="ghost-button" onClick={onClose}>取消</button><button className="primary-button" onClick={onCreate}>建立任务 <ArrowUpRight size={16} /></button></div></section></div>; }
-
-function TaskDialog({ task, steps, onClose, onUpdate }: { task: Task; steps: PipelineStep[]; onClose: () => void; onUpdate: (id: string, update: Partial<Task>) => void }) { const psdRef = useRef<HTMLInputElement>(null); const cmoRef = useRef<HTMLInputElement>(null); const mocRef = useRef<HTMLInputElement>(null); const status = taskStatus(task); return <div className="modal-backdrop"><section className="create-modal panel-modal" role="dialog" aria-modal="true"><button className="close-modal" onClick={onClose}><X size={20} /></button><p className="eyebrow">{task.id}</p><h2>{task.name}</h2><div className="panel-body"><span className="task-state">{status.label} · {status.progress}%</span>{task.remoteMessage && <div className="detail-stack"><b>实时运行状态</b><span>{task.remoteMessage}</span></div>}<div className="detail-stack">{steps.map((step) => { const state = stateStyle[step.state]; return <div className="run-item" key={step.name}><span><b>{step.name}</b><small>{step.output}</small></span><em className={state.className}>{state.label}</em></div>; })}</div><div className="detail-stack">{!task.psdFile && <ApiSubmission task={task} onUpdate={onUpdate} />}<a className="ghost-button" href={MODELSCOPE_URL} target="_blank" rel="noreferrer"><ArrowUpRight size={16} />使用网页备用流程</a>{!task.psdFile && <><button className="ghost-button" onClick={() => psdRef.current?.click()}><Upload size={16} />登记拆分后的 PSD</button><input ref={psdRef} className="hidden-input" type="file" accept=".psd" onChange={(event) => onUpdate(task.id, { psdFile: event.target.files?.[0]?.name })} /></>}{task.psdFile && task.psdUrl && <a className="ghost-button" href={task.psdUrl} target="_blank" rel="noreferrer"><ArrowUpRight size={16} />下载生成的 PSD</a>}{task.psdFile && !task.qaPassed && <button className="ghost-button" onClick={() => onUpdate(task.id, { qaPassed: true })}><Check size={16} />确认 PSD 质检通过</button>}{task.qaPassed && !task.cmoFile && <><a className="ghost-button" href={STRETCHY_URL} target="_blank" rel="noreferrer"><ArrowUpRight size={16} />在 Stretchy Studio 导出 CMO3</a><button className="ghost-button" onClick={() => cmoRef.current?.click()}><Upload size={16} />登记 .cmo3</button><input ref={cmoRef} className="hidden-input" type="file" accept=".cmo3" onChange={(event) => onUpdate(task.id, { cmoFile: event.target.files?.[0]?.name })} /></>}{task.cmoFile && !task.mocFile && <><button className="ghost-button" onClick={() => mocRef.current?.click()}><Upload size={16} />登记 Cubism 编译产物</button><input ref={mocRef} className="hidden-input" type="file" accept=".moc3" onChange={(event) => onUpdate(task.id, { mocFile: event.target.files?.[0]?.name })} /></>}</div></div></section></div>; }
-
-function ApiSubmission({ task, onUpdate }: { task: Task; onUpdate: (id: string, update: Partial<Task>) => void }) {
-  const input = useRef<HTMLInputElement>(null); const [message, setMessage] = useState(task.remoteMessage ?? ''); const [submitting, setSubmitting] = useState(false);
-  const setProgress = (state: NonNullable<Task['remoteState']>, detail: string) => { setMessage(detail); onUpdate(task.id, { remoteState: state, remoteMessage: detail }); };
-  const watch = async (jobId: string) => { for (let attempt = 0; attempt < 300; attempt += 1) { const response = await fetch(`/api/see-through?jobId=${encodeURIComponent(jobId)}`); const body = await response.json() as { status?: 'queued' | 'running' | 'succeeded' | 'failed'; message?: string; queue_rank?: number; queue_eta_seconds?: number; error?: string }; if (!response.ok) throw new Error(body.error ?? body.message ?? '无法读取服务端任务状态。'); const eta = body.queue_eta_seconds ? `，预计约 ${Math.ceil(body.queue_eta_seconds / 60)} 分钟` : ''; const detail = body.status === 'queued' ? `${body.message ?? '排队中'}${eta}` : body.message ?? '服务端正在处理任务…'; if (body.status === 'succeeded') { onUpdate(task.id, { remoteState: 'completed', remoteMessage: detail, psdFile: 'see-through-output.psd', psdUrl: `/api/see-through?jobId=${encodeURIComponent(jobId)}&output=1` }); setMessage(detail); return; } if (body.status === 'failed') { setProgress('failed', body.error ?? detail); return; } setProgress(body.status === 'running' ? 'processing' : 'queued', detail); await new Promise((resolve) => window.setTimeout(resolve, 2500)); } throw new Error('任务仍在后台处理中；刷新后可继续查看最后状态。'); };
-  const submit = async (file: File | null) => { if (!file) return; setSubmitting(true); setMessage('正在提交到服务端队列…'); try { const form = new FormData(); form.append('image', file); const response = await fetch('/api/see-through', { method: 'POST', body: form }); const body = await response.json() as { jobId?: string; eventId?: string; error?: string; message?: string }; if (!response.ok || !body.jobId) throw new Error(body.error ?? body.message ?? '提交失败'); const detail = body.message ?? `已建立服务端任务 ${body.jobId}。`; setMessage(detail); onUpdate(task.id, { remoteJobId: body.jobId, remoteSessionHash: body.jobId, remoteState: 'queued', remoteMessage: detail }); await watch(body.jobId); } catch (error) { const detail = error instanceof Error ? error.message : '提交失败'; setProgress('failed', detail); } finally { setSubmitting(false); } };
-  return <div><button className="primary-button" disabled={submitting || Boolean(task.remoteJobId)} onClick={() => input.current?.click()}><Upload size={16} />{task.remoteJobId ? 'API 任务已提交' : submitting ? '提交中…' : '通过 API 提交参考图'}</button><input ref={input} className="hidden-input" type="file" accept="image/png,image/jpeg" onChange={(event) => void submit(event.target.files?.[0] ?? null)} />{message && <small>{message}</small>}</div>;
-}
-
-function PanelDialog({ panel, onClose }: { panel: Exclude<Panel, null>; onClose: () => void }) { const content: Record<Exclude<Panel, null>, { eyebrow: string; title: string; body: React.ReactNode }> = { guide: { eyebrow: 'PRODUCTION GUIDE', title: 'API 生产流程', body: <ol className="guide-list"><li>建立任务，仅登记角色原图名称。</li><li>在任务内通过安全 API 提交参考图；没有 API 时使用 ModelScope 网页备用入口。</li><li>下载 PSD 后回到任务登记、完成质检、导出 `.cmo3`。</li><li>使用 Cubism Editor 编译并登记 `.moc3`。</li></ol> }, assets: { eyebrow: 'ASSET SPEC', title: '资产规范', body: <ul className="guide-list"><li>输入：单角色 PNG / JPG，建议 ≥ 1280px。</li><li>中间产物：分层 PSD 与质检记录。</li><li>编辑交付：`.cmo3`；运行交付：`.moc3 + model3.json`。</li></ul> }, templates: { eyebrow: 'PROCESS TEMPLATE', title: '当前流程模板', body: <div className="detail-stack"><b>ModelScope API → PSD 质检 → Stretchy Studio → Cubism Editor</b><span>参考图仅在提交时经安全代理转发到 ModelScope；任务清单与文件名仍保存在当前浏览器。</span></div> }, settings: { eyebrow: 'WORKSPACE SETTINGS', title: '生产与隐私', body: <div className="detail-stack"><span>ModelScope Token 仅保存在托管环境的私密变量中，绝不会写入前端或仓库。工作台不保存原图、PSD、CMO3、MOC3 文件；请在本地磁盘或团队素材库保存原始资产。</span><a className="primary-button" href={MODELSCOPE_URL} target="_blank" rel="noreferrer"><ArrowUpRight size={16} />打开 See-Through 网页</a></div> } }; const item = content[panel]; return <div className="modal-backdrop"><section className="create-modal panel-modal" role="dialog" aria-modal="true"><button className="close-modal" onClick={onClose}><X size={20} /></button><p className="eyebrow">{item.eyebrow}</p><h2>{item.title}</h2><div className="panel-body">{item.body}</div></section></div>; }
