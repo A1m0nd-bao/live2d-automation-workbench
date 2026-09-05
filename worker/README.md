@@ -16,16 +16,28 @@ work after its process restarts.
 
 ## Required secrets
 
-- `MODELSCOPE_API_TOKEN`: calls the upstream See-Through Studio
+- `SEE_THROUGH_API_TOKEN`: calls the upstream See-Through Studio
 - `MORPH_RELAY_TOKEN`: accepted only from the workbench proxy
 
 ## Run locally
 
 ```bash
-export MODELSCOPE_API_TOKEN=ms-...
+export SEE_THROUGH_API_TOKEN=ms-...
 export MORPH_RELAY_TOKEN=replace-with-a-random-secret
 uvicorn app.main:app --host 0.0.0.0 --port 7860
 ```
 
 Configure the workbench with the deployed relay URL and the same
 `MORPH_RELAY_TOKEN`. Never send this token to the browser.
+
+The local `/mnt/data` directory is not retained across Studio redeployments.
+The current SQLite recovery only works when the underlying files survive.
+
+FileData may contain a browser-facing `ms.show` URL. Download its `path` through
+the API inference host instead; the browser URL rejects bearer API tokens.
+The relay checks the PSD signature before reporting success. Private diagnostic
+events are available from `/jobs/{id}/diagnostics` using the relay token.
+
+Run `python test_relay.py` to verify null failure events, trusted download routing,
+and invalid file rejection. For a real bounded test with raw events and PSD parsing,
+install `psd-tools` and run `python diagnose.py /path/to/image.png /path/to/output`.

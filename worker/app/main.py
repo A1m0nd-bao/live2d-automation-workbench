@@ -14,7 +14,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, unquote
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
@@ -24,8 +24,7 @@ from pydantic import BaseModel
 DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/data/morph-live2d")).resolve()
 DB_PATH = DATA_ROOT / "jobs.sqlite3"
 UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.api-inference.modelscope.net").rstrip("/")
-# ModelScope reserves MODELSCOPE_API_TOKEN for its internal SDK credential.
-# Use a relay-specific secret so outbound inference receives the user's API token.
+# Use an explicit, relay-specific secret for outbound inference.
 MODELSCOPE_TOKEN = os.environ.get("SEE_THROUGH_API_TOKEN", "")
 RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
 INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
@@ -107,7 +106,7 @@ def find_psd_output(value: Any) -> str | None:
     assuming that the first item is the download file.
     """
     if isinstance(value, dict):
-        for key in ("url", "path"):
+        for key in ("path", "url"):
             candidate = value.get(key)
             if isinstance(candidate, str) and ".psd" in candidate.lower():
                 return candidate
@@ -128,8 +127,32 @@ def find_psd_output(value: Any) -> str | None:
 def upstream_file_url(value: str) -> str:
     """Turn a FileData path into Gradio's authenticated download URL."""
     if value.startswith(("http://", "https://")):
-        return value
+        parsed = urlsplit(value)
+        if parsed.scheme == "https" and parsed.netloc == urlsplit(UPSTREAM).netloc:
+            return value
+        # Gradio may advertise a browser-facing Studio URL. Only translate
+        # file routes belonging to this specific upstream; never send tokens
+        # to an arbitrary URL in an inference response.
+        if parsed.scheme == "https" and parsed.netloc == "ljsabc-see-through.ms.show":
+            if parsed.path.startswith(("/gradio_api/file=", "/file=")):
+                value = unquote(parsed.path.split("file=", 1)[1])
+            else:
+                raise RuntimeError("Unsupported upstream download route")
+        else:
+            raise RuntimeError("Untrusted upstream download origin")
+    elif value.startswith(("/gradio_api/file=", "/file=")):
+        value = unquote(value.split("file=", 1)[1])
     return f"{UPSTREAM}/gradio_api/file={quote(value, safe='/')}"
+
+
+def record_event(job_id: str, stage: str, **data: Any) -> None:
+    """Keep diagnostics private and remove configured credentials."""
+    entry = json.dumps({"stage": stage, **data}, ensure_ascii=False, default=str)
+    for secret in (MODELSCOPE_TOKEN, RELAY_TOKEN):
+        if secret:
+            entry = entry.replace(secret, "[REDACTED]")
+    with (DATA_ROOT / job_id / "events.jsonl").open("a") as handle:
+        handle.write(entry + "\n")
 
 
 async def upstream_error(response: httpx.Response) -> str:
@@ -154,9 +177,10 @@ async def monitor(job_id: str) -> None:
             update_job(job_id, status="failed", message="原始参考图不存在", error="source image missing")
             return
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            stage = "upload"
             update_job(job_id, status="queued", message="正在连接 See-Through 队列…", attempts=attempt, error=None)
             headers = {"Authorization": f"Bearer {MODELSCOPE_TOKEN}"}
-            timeout = httpx.Timeout(connect=30, read=None, write=60, pool=30)
+            timeout = httpx.Timeout(connect=30, read=90, write=60, pool=30)
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     with source.open("rb") as handle:
@@ -171,6 +195,7 @@ async def monitor(job_id: str) -> None:
                     if not uploaded:
                         raise RuntimeError("See-Through did not return an uploaded file reference")
                     input_file = file_data(uploaded, source.name, "image/png") if isinstance(uploaded, str) else uploaded
+                    stage = "submit"
                     call = await client.post(
                         f"{UPSTREAM}/gradio_api/call/inference",
                         headers={**headers, "Content-Type": "application/json"},
@@ -181,7 +206,10 @@ async def monitor(job_id: str) -> None:
                     event_id = (call.json() or {}).get("event_id")
                     if not isinstance(event_id, str) or not event_id:
                         raise RuntimeError("See-Through did not return a Gradio event id")
-                    update_job(job_id, status="running", message="See-Through 正在拆分图层…", queue_rank=None, queue_eta_seconds=None)
+                    record_event(job_id, "submitted", attempt=attempt, event_id=event_id)
+                    update_job(job_id, status="running", message="上游已接收，等待处理结果（可能仍在排队）", queue_rank=None, queue_eta_seconds=None)
+                    stage = "listen"
+                    deadline = asyncio.get_running_loop().time() + 1200
                     async with client.stream(
                         "GET",
                         f"{UPSTREAM}/gradio_api/call/inference/{event_id}",
@@ -191,14 +219,19 @@ async def monitor(job_id: str) -> None:
                             raise RuntimeError(await upstream_error(stream))
                         event_type = ""
                         async for line in stream.aiter_lines():
+                            if asyncio.get_running_loop().time() > deadline:
+                                raise TimeoutError("No terminal event within 20 minutes")
                             if line.startswith("event:"):
                                 event_type = line[6:].strip()
                                 continue
                             if not line.startswith("data:"):
                                 continue
                             raw = line[5:].strip()
-                            if not raw or raw == "null":
+                            if not raw:
                                 continue
+                            record_event(job_id, "upstream_event", attempt=attempt, event=event_type, data=json.loads(raw))
+                            if event_type == "error":
+                                raise RuntimeError(f"See-Through emitted error: {raw}")
                             if event_type == "complete":
                                 output = json.loads(raw)
                                 output_url = find_psd_output(output)
@@ -206,20 +239,25 @@ async def monitor(job_id: str) -> None:
                                     snapshot = json.dumps(output, ensure_ascii=False, default=str)[:1200]
                                     raise RuntimeError(f"See-Through completed without a PSD output: {snapshot}")
                                 output_file = DATA_ROOT / job_id / "output.psd"
-                                response = await client.get(upstream_file_url(output_url), headers=headers)
+                                stage = "download"
+                                download_url = upstream_file_url(output_url)
+                                record_event(job_id, "download", url=download_url)
+                                response = await client.get(download_url, headers=headers, timeout=120)
                                 if not response.is_success:
                                     raise RuntimeError(await upstream_error(response))
+                                if len(response.content) < 26 or response.content[:6] != b"8BPS\x00\x01":
+                                    raise RuntimeError("Downloaded response is not a PSD file")
                                 output_file.write_bytes(response.content)
                                 update_job(job_id, status="succeeded", message="PSD 已生成", output_psd=str(output_file), queue_rank=None, queue_eta_seconds=None)
                                 return
-                            if event_type == "error":
-                                raise RuntimeError(f"See-Through returned an error: {raw}")
                 raise RuntimeError("See-Through closed the event stream before completion")
             except Exception as error:
+                detail = f"{stage}: {error}"
+                record_event(job_id, "failure", attempt=attempt, error=detail)
                 if attempt == MAX_ATTEMPTS:
-                    update_job(job_id, status="failed", message="See-Through 任务失败", error=str(error))
+                    update_job(job_id, status="failed", message="See-Through 任务失败", error=detail)
                 else:
-                    update_job(job_id, status="queued", message="连接中断，正在自动重试…", error=str(error))
+                    update_job(job_id, status="queued", message="上次尝试失败，准备重试…", error=detail)
                     await asyncio.sleep(2**attempt)
     finally:
         ACTIVE.discard(job_id)
@@ -245,6 +283,7 @@ async def health() -> dict[str, bool | str | int]:
         "upstream": UPSTREAM,
         "resolution": INFERENCE_RESOLUTION,
         "split_limbs": SPLIT_LIMBS,
+        "version": "stage-diagnostics-v1",
     }
 
 
@@ -277,3 +316,13 @@ async def download_output(job_id: str, x_relay_token: str | None = Header(defaul
     if job.status != "succeeded" or not job.output_psd:
         raise HTTPException(status_code=409, detail="PSD is not ready")
     return FileResponse(job.output_psd, media_type="image/vnd.adobe.photoshop", filename=f"{job.name}.psd")
+
+
+@app.get("/jobs/{job_id}/diagnostics")
+async def diagnostics(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
+    require_relay_token(x_relay_token)
+    get_job(job_id)
+    path = DATA_ROOT / job_id / "events.jsonl"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No diagnostics yet")
+    return FileResponse(path, media_type="application/x-ndjson", filename="events.jsonl")
