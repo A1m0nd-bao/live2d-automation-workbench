@@ -280,10 +280,6 @@ export async function exportLive2DProject(project, images, opts = {}) {
       jointPivotX,
       jointPivotY,
       drawOrder: part.draw_order ?? i,
-      // CMO3 ArtMeshForms carry their own initial opacity. Keep this value
-      // so hidden action/expression replacements do not become visible when
-      // the editor opens the project.
-      opacity: part.opacity ?? 1,
       vertices,
       triangles,
       uvs,

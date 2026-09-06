@@ -3744,12 +3744,7 @@ export async function generateCmo3(input) {
 
     // Keyforms — baked bone-weight keyforms or single rest-pose keyform
     // Helper to emit one CArtMeshForm
-    // `m.opacity` comes from the source project.  This is essential for
-    // alternate PSD states: the neutral pose must open with every
-    // action_*/expression_* ArtMesh invisible, rather than stacking all of
-    // them on top of the character.  Special keyforms may still override it
-    // later when action-parameter binding is emitted.
-    const emitArtMeshForm = (kfList, formGuidPid, positions, opacity = m.opacity ?? 1.0) => {
+    const emitArtMeshForm = (kfList, formGuidPid, positions, opacity = 1.0) => {
       const artForm = x.sub(kfList, 'CArtMeshForm');
       const adf = x.sub(artForm, 'ACDrawableForm', { 'xs.n': 'super' });
       const acf = x.sub(adf, 'ACForm', { 'xs.n': 'super' });

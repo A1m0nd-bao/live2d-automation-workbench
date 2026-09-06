@@ -278,7 +278,21 @@ export async function generateCubism(
     }
     onProgress('生成 Cubism 标准参数、变形器与物理数据…');
     await tick();
-    const result = await exportLive2DProject(project, images, {
+    // The CMO3 writer is the conservative editor path.  Until an alternate
+    // state has real Cubism keyform bindings, omit it here rather than
+    // attempting to encode a zero-opacity initial form. Cubism otherwise
+    // treats the handwritten ArtMesh state inconsistently and can open a
+    // blank model. The untouched `project` below still feeds the web/runtime
+    // exporter, where the variant manifest remains available.
+    const cmoProject = {
+      ...project,
+      nodes: project.nodes.map((node) =>
+        node.type === 'part' && node.variant
+          ? { ...node, visible: false }
+          : node,
+      ),
+    };
+    const result = await exportLive2DProject(cmoProject, images, {
       modelName: safeName,
       generateRig: true,
       generatePhysics: true,
