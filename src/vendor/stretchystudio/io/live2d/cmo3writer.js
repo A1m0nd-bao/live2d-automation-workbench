@@ -3641,15 +3641,7 @@ export async function generateCmo3(input) {
     // For baked keyform meshes: parent to ARM deformer (bone's parent group), not bone deformer.
     // The ARM deformer handles shoulder rotation; baked keyforms handle elbow bending.
     let dfOwner;
-    if (pm.actionFormGuids) {
-      // The source PSD contains a whole base arm mesh and a whole wave arm
-      // mesh. Give both action values the same geometry and change only the
-      // opacity; the nearest-neighbour binding above makes this a hard swap.
-      const isAlternate = pm.actionState === 'alternate';
-      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '2' });
-      emitArtMeshForm(kfList, pm.actionFormGuids[0], verts, isAlternate ? 0 : 1);
-      emitArtMeshForm(kfList, pm.actionFormGuids[1], verts, isAlternate ? 1 : 0);
-    } else if (pm.hasBakedKeyforms) {
+    if (pm.hasBakedKeyforms) {
       // Find the ARM group (parent of the bone node) — mesh is parented here, not to bone deformer.
       // Fallback chain: bone's parent → mesh's parent → null (ungrouped, canvas space)
       const boneGroup = groupMap.get(jointBoneId);
@@ -3834,7 +3826,15 @@ export async function generateCmo3(input) {
         positions.map(v => v.toFixed(posPrecision)).join(' ');
     };
 
-    if (pm.hasBakedKeyforms) {
+    if (pm.actionFormGuids) {
+      // The source PSD contains a whole base arm mesh and a whole wave arm
+      // mesh. Give both action values the same geometry and change only the
+      // opacity; the nearest-neighbour binding above makes this a hard swap.
+      const isAlternate = pm.actionState === 'alternate';
+      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '2' });
+      emitArtMeshForm(kfList, pm.actionFormGuids[0], verts, isAlternate ? 0 : 1);
+      emitArtMeshForm(kfList, pm.actionFormGuids[1], verts, isAlternate ? 1 : 0);
+    } else if (pm.hasBakedKeyforms) {
       // Keyforms to prevent interpolation shrinkage
       // Compute baked vertex positions by rotating each vertex around the elbow pivot
       // by angle × boneWeight. Positions match `verts` coord space — that's
