@@ -864,12 +864,11 @@ function PsdVariantPreview({ task }: VariantPreviewProps) {
         const manifest = extractVariantManifest(buffer) as unknown as VariantManifest;
         if (alive) {
           setModel({ ...parsed, manifest });
-          setAction(
-            manifest.variants.find((v) => v.kind === 'action' && !v.hidden)?.id || '',
-          );
-          setExpression(
-            manifest.variants.find((v) => v.kind === 'expression' && !v.hidden)?.id || '',
-          );
+          // A PSD can be saved while an action group is open and its neutral
+          // parts are hidden.  Preview always begins from the production
+          // canonical pose; actions and expressions are opt-in replacements.
+          setAction('');
+          setExpression('');
         }
       } catch (e) {
         if (alive) setError(e instanceof Error ? e.message : 'PSD 动作预览失败。');
@@ -906,12 +905,16 @@ function PsdVariantPreview({ task }: VariantPreviewProps) {
     for (const layer of [...model.layers].reverse()) {
       const variant = variantByPart.get(layer.name);
       if (variant) {
-        if (!selected.has(variant.id) || !layer.visible) continue;
-      } else if (!layer.visible) {
-        continue;
+        // Variant groups are only drawn when explicitly selected. Their
+        // authored PSD visibility is not meaningful here because an ancestor
+        // action group may have been hidden when the file was saved.
+        if (!selected.has(variant.id)) continue;
       } else if ([...selectedSlots].some((slot) => replaces(layer.name, slot))) {
         continue;
       }
+      // Unqualified layers are the canonical pose. Draw them even when the
+      // PSD saved them hidden: e.g. neutral handwear is commonly hidden while
+      // an action pose was being authored.
       const tile = document.createElement('canvas');
       tile.width = layer.width;
       tile.height = layer.height;
