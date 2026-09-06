@@ -38,11 +38,11 @@ type Job = {
 const STORAGE = 'morph.production.tasks';
 const stage = (t: Task) =>
   t.cmoAccepted
-    ? 'CMO3 已验收'
+    ? '运行时包已验收'
     : t.hasGenerated
-      ? 'CMO3 已生成 · 待验收'
+      ? '运行时包已生成 · 待验收'
       : t.qaPassed
-        ? '待生成 CMO3'
+        ? '待生成运行时包'
         : t.psdFile || t.inputKind === 'stretch'
           ? '待确认输入'
           : t.inputKind === 'image' && !t.preparedFile
@@ -311,7 +311,7 @@ export default function App() {
       cmoAccepted: false,
       warnings: result.report.warnings,
     });
-    setToast('CMO3 与运行时 MOC3 工程包已生成。');
+    setToast('规范化运行时 MOC3 工程包已生成；CMO3 仍为实验性文件。');
   }
   async function download(t: Task, suffix: string, filename: string) {
     const blob = await readAsset(`${t.id}:${suffix}`);
@@ -380,7 +380,7 @@ export default function App() {
               <p className="eyebrow">PRODUCTION WORKSPACE</p>
               <h1>Live2D 生产任务</h1>
               <p className="intro-copy">
-                参考图 → 豆包生图友好化 → See-Through → PSD 验收 → CMO3
+                参考图 → 豆包生图友好化 → See-Through → PSD 验收 → 规范化运行时包
               </p>
             </div>
             <button className="primary-button" onClick={() => setCreate(true)}>
@@ -483,9 +483,9 @@ export default function App() {
             </article>
             <article className="risk-card">
               <p className="eyebrow">CUBISM COMPATIBILITY</p>
-              <h2>可编辑 CMO3</h2>
+              <h2>规范化运行时导出</h2>
                 <p>
-                固定兼容导出引擎，生成可编辑 CMO3 与运行时 MOC3 工程包。自动生成不等于动作质检通过，仍需在 Cubism/运行时中验收。
+                以确定性 Part ID、动作清单和 motion3 曲线生成运行时 MOC3 包。CMO3 仍属实验性文件，不作为当前交付物。
               </p>
               <button className="text-button" onClick={() => setGuide(true)}>
                 查看流程边界 →
@@ -704,7 +704,7 @@ export default function App() {
                 disabled={busy}
                 onClick={() => void operate(() => generate(task))}
               >
-                {task.hasGenerated ? '重新生成 CMO3' : '在浏览器生成 CMO3'}
+                {task.hasGenerated ? '重新生成运行时包' : '在浏览器生成运行时包'}
               </button>
             )}
             {busy && <output>{progress || '处理中…'}</output>}
@@ -717,7 +717,7 @@ export default function App() {
                     void operate(() => download(task, 'cmo', task.cmoFile!))
                   }
                 >
-                  下载 CMO3
+                  下载实验性 CMO3
                 </button>
                 <button
                   className="ghost-button"
@@ -749,7 +749,7 @@ export default function App() {
                   onClick={() => {
                     if (
                       window.confirm(
-                        '已在 Cubism 打开本次 CMO3，检查全身显示、眼口与身体参数动作了吗？',
+                        '已在运行时 Viewer 中打开本次 MOC3 包并检查基础显示与动作切换了吗？',
                       )
                     )
                       update(task.id, { cmoAccepted: true });
@@ -787,9 +787,9 @@ export default function App() {
               生成全身中立的 Live2D
               友好图。确认身份、服装、四肢和附件都完整后才提交拆分。
             </li>
-            <li>浏览器完成网格和 CMO3 导出，生成期间不要关闭页面。</li>
+            <li>浏览器完成网格和规范化运行时导出，生成期间不要关闭页面。</li>
             <li>
-              下载 CMO3 到 Cubism 检查全身与参数动作；运行时 MOC3 包可直接用于
+              实验性 CMO3 仅供研究；运行时 MOC3 包用于
               SDK/播放器联调，生成文件仍需实际验收。
             </li>
           </ol>
