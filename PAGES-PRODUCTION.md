@@ -2,13 +2,13 @@
 
 - Public UI: https://a1m0nd-bao.github.io/live2d-automation-workbench/
 - Private service connection: existing Sites `/pages-bridge`; access policy unchanged.
-- Image preparation: private `POST /api/live2d-prep` uses Doubao Seedream reference-image editing with the source as the identity lock, then requires human approval before See-Through submission. Configure `VOLCENGINE_ARK_API_KEY`, `VOLCENGINE_TOS_ACCESS_KEY`, `VOLCENGINE_TOS_SECRET_KEY`, and `VOLCENGINE_TOS_BUCKET` as Sites secrets; never use a Vite variable. `VOLCENGINE_TOS_REGION` (default `cn-beijing`), `VOLCENGINE_TOS_ENDPOINT`, and `VOLCENGINE_ARK_MODEL` are optional non-secret overrides.
+- Image preparation: private `POST /api/live2d-prep` uses Doubao Seedream reference-image editing with the source as the identity lock, then requires human approval before See-Through submission. Configure `VOLCENGINE_ARK_API_KEY` as a Sites secret; never use a Vite variable. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
 - Inference: existing authenticated relay, server queue and saved task states.
 - PSD → CMO3: pinned browser-side StretchyStudio compatibility exporter; no ModelScope key needed for existing PSD.
 
 ## Use
 
-Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. For a PNG/JPG reference, first connect the private service in its login popup, create a Live2D-friendly Doubao Seedream edit, inspect it, approve it, then submit the approved edit. The original and approved image remain separate browser assets. A private, signed TOS object exists only while Seedream reads the reference and is deleted after the call. Open a task to resume status polling and retrieve its PSD. No fabricated completion percentages are shown.
+Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. For a PNG/JPG reference, first connect the private service in its login popup, create a Live2D-friendly Doubao Seedream edit, inspect it, approve it, then submit the approved edit. The original and approved image remain separate browser assets. The reference is sent directly from the private service to Ark as a base64 data URL; no bucket or public object URL is created. Open a task to resume status polling and retrieve its PSD. No fabricated completion percentages are shown.
 
 Task metadata uses the existing localStorage key; actual inputs and outputs use IndexedDB. An older task with only filenames needs its file reimported. Changing origins/devices or clearing site data does not migrate files. Keep downloaded backups. Closing Pages stops browser generation, but not an already submitted server inference job.
 

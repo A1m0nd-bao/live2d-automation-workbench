@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Plus, X, FolderOpen, Settings2, CircleHelp } from 'lucide-react';
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
-import { isPng } from './live2dPrep';
+import { isJpeg, isPng } from './live2dPrep';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import './production.css';
 
@@ -70,6 +70,35 @@ function validate(f: File) {
   if (f.size > (k === 'image' ? 20 : 100) * 1024 * 1024)
     throw new Error('图片最大 20 MB，工程最大 100 MB。');
   return k;
+}
+
+async function asPreparedPng(data: ArrayBuffer) {
+  if (isPng(data)) return new Blob([data], { type: 'image/png' });
+  if (!isJpeg(data))
+    throw new Error('豆包生图返回的文件不是 PNG 或 JPEG。');
+  const source = new Blob([data], { type: 'image/jpeg' });
+  const url = URL.createObjectURL(source);
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('无法读取豆包生图返回的 JPEG。'));
+      image.src = url;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法创建 PNG 转换画布。');
+    context.drawImage(image, 0, 0);
+    const png = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/png'),
+    );
+    if (!png) throw new Error('无法把豆包生图 JPEG 转为 PNG。');
+    return png;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 export default function App() {
@@ -204,11 +233,11 @@ export default function App() {
         image: source,
         name: source.name,
       });
-      if (!isPng(data)) throw new Error('豆包生图返回的文件不是 PNG。');
+      const png = await asPreparedPng(data);
       const filename = `${t.name}-live2d-friendly.png`;
       await saveAsset(
         `${t.id}:prepared`,
-        new Blob([data], { type: 'image/png' }),
+        png,
       );
       update(t.id, {
         preparedFile: filename,

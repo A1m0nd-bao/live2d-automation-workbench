@@ -1,5 +1,6 @@
 export const LIVE2D_PREP_MODEL = 'doubao-seedream-4-5-251128';
-export const LIVE2D_PREP_SIZE = '1024x1536';
+// Seedream 4.5 requires a generated image of at least 3,686,400 pixels.
+export const LIVE2D_PREP_SIZE = '1536x2400';
 
 /**
  * A deliberately small, repeatable character lock for one source image.
@@ -26,4 +27,9 @@ export function isPng(buffer: ArrayBuffer) {
     bytes[6] === 0x1a &&
     bytes[7] === 0x0a
   );
+}
+
+export function isJpeg(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer.slice(0, 3));
+  return bytes.length === 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
 }
