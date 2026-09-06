@@ -845,34 +845,38 @@ export async function generateCmo3(input) {
     let pidFormClosed = null;
     let bakedFormGuids = null;
     let neckCornerFormGuids = null; // [pidForm_-30, pidForm_+30]; 0 reuses pidFormMesh
-    let actionFormGuids = null; // [base-value form, wave-value form]
+    let actionFormGuids = null; // [base form, alternate form]
 
     if (hasActionSwitch) {
-      // Two complete art meshes are switched atomically. NEAREST_NEIGHBOR is
-      // Cubism's discrete interpolation type, so dragging between 0 and 1
-      // never produces the transparent, no-hand intermediate of a crossfade.
+      // A nearly-instant hard swap. Cubism's CMO reader implements LINEAR but
+      // not the previously used NEAREST_NEIGHBOR enum. Reusing base/alternate
+      // forms on either side of the 0.5 threshold leaves a 0.0002-wide blend
+      // interval instead of an exposed no-hand intermediate.
       const [, pidFormWave] = x.shared('CFormGuid', {
         uuid: uuid(), note: `${meshName}_action_switch`,
       });
       actionFormGuids = [pidFormMesh, pidFormWave];
-      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '2' });
-      for (let i = 0; i < 2; i++) {
+      const actionKeyForms = [actionFormGuids[0], actionFormGuids[0], actionFormGuids[1], actionFormGuids[1]];
+      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: String(actionKeyForms.length) });
+      for (let i = 0; i < actionKeyForms.length; i++) {
         const kog = x.sub(kfog, 'KeyformOnGrid');
         const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
         const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
         const kon = x.sub(kop, 'KeyOnParameter');
         x.subRef(kon, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
         x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = String(i);
-        x.subRef(kog, 'CFormGuid', actionFormGuids[i], { 'xs.n': 'keyformGuid' });
+        x.subRef(kog, 'CFormGuid', actionKeyForms[i], { 'xs.n': 'keyformGuid' });
       }
       const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
       x.subRef(kb, 'KeyformBindingSource', pidKfb);
       x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
       x.subRef(kfBinding, 'CParameterGuid', actionParamPid, { 'xs.n': 'parameterGuid' });
-      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '2' });
+      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '4' });
       x.sub(keys, 'f').text = '0.0';
+      x.sub(keys, 'f').text = '0.4999';
+      x.sub(keys, 'f').text = '0.5001';
       x.sub(keys, 'f').text = '1.0';
-      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'NEAREST_NEIGHBOR' });
+      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
       x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
       x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
       x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
