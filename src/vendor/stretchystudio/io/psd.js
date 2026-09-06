@@ -79,3 +79,90 @@ export function importPsd(buffer) {
 
   return { width: psd.width, height: psd.height, layers };
 }
+
+/**
+ * Extract the discrete action/expression replacement protocol used by the
+ * Live2D PSD workflow. A variant group is named `action_*` or `expression_*`
+ * and its raster children use `variant_name__slot_name` names. The returned
+ * manifest deliberately keeps hidden groups: hidden layers are the source of
+ * alternate states and must not be discarded during import.
+ *
+ * @param {ArrayBuffer} buffer
+ * @returns {{ width: number, height: number, baseSlots: Array<Object>, variants: Array<Object> }}
+ */
+export function extractVariantManifest(buffer) {
+  const psd = readPsd(buffer, {
+    skipLayerImageData: true,
+    skipCompositeImageData: true,
+    useImageData: false,
+  });
+  const variants = [];
+  const baseSlots = [];
+
+  const isVariantGroup = (name) => /^(action|expression)_[^]+/.test(name || '');
+  const kindFor = (name) => name?.startsWith('action_') ? 'action' : 'expression';
+
+  function collectRasterChildren(children, out, path) {
+    if (!children) return;
+    for (const layer of children) {
+      const name = layer.name || '';
+      const nextPath = [...path, name];
+      if (layer.children) {
+        collectRasterChildren(layer.children, out, nextPath);
+        continue;
+      }
+      const separator = name.indexOf('__');
+      if (separator > 0) {
+        out.push({
+          name,
+          slot: name.slice(separator + 2),
+          path: nextPath,
+          hidden: Boolean(layer.hidden),
+          bounds: [layer.left ?? 0, layer.top ?? 0, layer.right ?? 0, layer.bottom ?? 0],
+        });
+      }
+    }
+  }
+
+  function walk(children, path = []) {
+    if (!children) return;
+    for (const layer of children) {
+      const name = layer.name || '';
+      const nextPath = [...path, name];
+      if (layer.children) {
+        if (isVariantGroup(name)) {
+          const parts = [];
+          collectRasterChildren(layer.children, parts, nextPath);
+          variants.push({
+            id: name,
+            kind: kindFor(name),
+            path: nextPath,
+            hidden: Boolean(layer.hidden),
+            parts,
+          });
+        }
+        walk(layer.children, nextPath);
+        continue;
+      }
+
+      // Only unqualified raster layers are considered canonical/base slots.
+      if (!name.includes('__')) {
+        baseSlots.push({
+          name,
+          path: nextPath,
+          hidden: Boolean(layer.hidden),
+          bounds: [layer.left ?? 0, layer.top ?? 0, layer.right ?? 0, layer.bottom ?? 0],
+        });
+      }
+    }
+  }
+
+  walk(psd.children);
+
+  return {
+    width: psd.width,
+    height: psd.height,
+    baseSlots,
+    variants,
+  };
+}

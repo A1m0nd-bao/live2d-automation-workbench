@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 import thirdPartyLicense from './vendor/stretchystudio/LICENSE?raw';
-import { importPsd } from './vendor/stretchystudio/io/psd.js';
+import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import { splitLayerLR } from './vendor/stretchystudio/io/splitLR.js';
 import {
   matchTag,
@@ -9,7 +9,7 @@ import {
   buildArmatureNodes,
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
-import { exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
+import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
   loadProject,
@@ -33,6 +33,46 @@ const png = (canvas) =>
       'image/png',
     ),
   );
+
+const replacementMatches = (base, replacement) =>
+  base === replacement || replacement === base.replace(/-[lr]$/, '');
+
+function buildVariantAnimations(variants, layers, ids) {
+  const layerIds = new Map(layers.map((layer, index) => [layer.name, ids[index]]));
+  const tracksForVariant = (variant) => {
+    const slots = variant.parts.map((part) => part.slot);
+    const sameKind = variants.filter((candidate) => candidate.kind === variant.kind);
+    const sameKindParts = new Set(
+      sameKind.flatMap((candidate) => candidate.parts.map((part) => part.name)),
+    );
+    const tracks = [];
+    for (let index = 0; index < layers.length; index++) {
+      const layer = layers[index];
+      const variantPart = variant.parts.find((part) => part.name === layer.name);
+      const selected = Boolean(variantPart);
+      const otherVariantPart = sameKindParts.has(layer.name) && !selected;
+      const replaces = slots.some((slot) => replacementMatches(layer.name, slot));
+      if (!selected && !otherVariantPart && !replaces) continue;
+      tracks.push({
+        nodeId: ids[index],
+        property: 'opacity',
+        keyframes: [
+          { time: 0, value: selected ? 0 : 1 },
+          { time: 120, value: selected ? 1 : 0 },
+        ],
+      });
+    }
+    return tracks;
+  };
+  return variants.map((variant) => ({
+    name: variant.id,
+    duration: 120,
+    fps: 30,
+    loop: false,
+    tracks: tracksForVariant(variant),
+    layerIds: variant.parts.map((part) => layerIds.get(part.name)).filter(Boolean),
+  }));
+}
 
 export function validatePsdHeader(buffer) {
   if (buffer.byteLength < 26) throw new Error('PSD 文件不完整。');
@@ -82,10 +122,12 @@ export async function generateCubism(
       const buffer = await file.arrayBuffer();
       validatePsdHeader(buffer);
       const parsed = importPsd(buffer);
+      const variantManifest = extractVariantManifest(buffer);
       const { width, height } = parsed;
       if (!parsed.layers.length || parsed.layers.length > 120)
         throw new Error('PSD 需要包含 1–120 个有效图层。');
-      const layers = parsed.layers.filter((layer) => layer.visible);
+      // Keep hidden PSD layers: they are alternate action/expression parts.
+      const layers = [...parsed.layers];
       const candidates = [
         'handwear',
         'legwear',
@@ -120,6 +162,13 @@ export async function generateCubism(
             })),
           );
       }
+      const variantByPart = new Map();
+      for (const variant of variantManifest.variants)
+        for (const part of variant.parts) variantByPart.set(part.name, variant);
+      const isInitiallyVisible = (layer) => {
+        const variant = variantByPart.get(layer.name);
+        return Boolean(layer.visible && (!variant || !variant.hidden));
+      };
       const ids = layers.map(() => crypto.randomUUID());
       const tags = Object.fromEntries(
         layers.map((layer) => [matchTag(layer.name), layer]),
@@ -140,7 +189,7 @@ export async function generateCubism(
         canvas: { width, height },
         textures: [],
         parameters: [],
-        animations: [],
+        animations: buildVariantAnimations(variantManifest.variants, layers, ids),
         physics_groups: [],
         nodes: groupDefs.map((group) => ({
           id: group.id,
@@ -162,6 +211,7 @@ export async function generateCubism(
       composite.height = height;
       // PSD parser gives top-to-bottom layers; composite bottom-to-top for reference QA.
       for (const layer of [...layers].reverse()) {
+        if (!isInitiallyVisible(layer)) continue;
         const tile = document.createElement('canvas');
         tile.width = layer.width;
         tile.height = layer.height;
@@ -204,11 +254,14 @@ export async function generateCubism(
           parent: assignments.get(i)?.parentGroupId ?? null,
           draw_order: assignments.get(i)?.drawOrder ?? layers.length - 1 - i,
           visible: true,
-          opacity: layer.opacity,
+          opacity: isInitiallyVisible(layer) ? layer.opacity : 0,
           transform: transform(),
           mesh,
           imageWidth: width,
           imageHeight: height,
+          variant: variantManifest.variants.find((variant) =>
+            variant.parts.some((part) => part.name === layer.name),
+          )?.id,
         });
       }
     }
@@ -227,6 +280,12 @@ export async function generateCubism(
       modelName: safeName,
       generateRig: true,
       generatePhysics: true,
+      onProgress: (message) => onProgress(message),
+    });
+    onProgress('生成运行时 .moc3 与 motion3…');
+    const runtime = await exportLive2D(project, images, {
+      modelName: safeName,
+      exportMotions: true,
       onProgress: (message) => onProgress(message),
     });
     const header = new Uint8Array(await result.slice(0, 4).arrayBuffer());
@@ -254,6 +313,7 @@ export async function generateCubism(
       validation: '已生成，待 Cubism 动作验收；不代表动作或运行时编译通过。',
     };
     bundle.file('morph-report.json', JSON.stringify(report, null, 2));
+    const runtimeBundle = runtime;
     bundle.file('StretchyStudio-LICENSE.txt', thirdPartyLicense);
     bundle.file(`${safeName}.stretch`, stretch);
     return {
@@ -261,6 +321,8 @@ export async function generateCubism(
       stretch,
       preview,
       bundle: await bundle.generateAsync({ type: 'blob' }),
+      runtimeBundle,
+      runtimeFile: `${safeName}-runtime.zip`,
       report,
       name: safeName,
     };

@@ -4,6 +4,7 @@ import { Plus, X, FolderOpen, Settings2, CircleHelp } from 'lucide-react';
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import { isPng } from './live2dPrep';
+import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import './production.css';
 
 type Task = {
@@ -23,6 +24,7 @@ type Task = {
   prepAccepted?: boolean;
   qaPassed?: boolean;
   cmoFile?: string;
+  runtimeFile?: string;
   hasGenerated?: boolean;
   cmoAccepted?: boolean;
   warnings?: string[];
@@ -263,6 +265,7 @@ export default function App() {
     try {
       await saveAsset(`${t.id}:cmo`, result.cmo);
       await saveAsset(`${t.id}:bundle`, result.bundle);
+      await saveAsset(`${t.id}:runtime`, result.runtimeBundle);
       await saveAsset(`${t.id}:stretch`, result.stretch);
       if (result.preview)
         await saveAsset(`${t.id}:preview`, result.preview as Blob);
@@ -274,11 +277,12 @@ export default function App() {
     }
     update(t.id, {
       cmoFile: `${result.name}.cmo3`,
+      runtimeFile: result.runtimeFile,
       hasGenerated: true,
       cmoAccepted: false,
       warnings: result.report.warnings,
     });
-    setToast('CMO3 已真实生成。请下载到 Cubism 检查全身显示及动作。');
+    setToast('CMO3 与运行时 MOC3 工程包已生成。');
   }
   async function download(t: Task, suffix: string, filename: string) {
     const blob = await readAsset(`${t.id}:${suffix}`);
@@ -451,9 +455,8 @@ export default function App() {
             <article className="risk-card">
               <p className="eyebrow">CUBISM COMPATIBILITY</p>
               <h2>可编辑 CMO3</h2>
-              <p>
-                固定兼容导出引擎，生成网格、标准绑定与物理配置。自动生成不等于动作质检通过；MOC3
-                仍由 Cubism 编译。
+                <p>
+                固定兼容导出引擎，生成可编辑 CMO3 与运行时 MOC3 工程包。自动生成不等于动作质检通过，仍需在 Cubism/运行时中验收。
               </p>
               <button className="text-button" onClick={() => setGuide(true)}>
                 查看流程边界 →
@@ -698,6 +701,19 @@ export default function App() {
                 >
                   下载工程包（含报告与 .stretch）
                 </button>
+                {task.runtimeFile && (
+                  <button
+                    className="ghost-button"
+                    disabled={busy}
+                    onClick={() =>
+                      void operate(() =>
+                        download(task, 'runtime', task.runtimeFile!),
+                      )
+                    }
+                  >
+                    下载运行时 MOC3 包
+                  </button>
+                )}
                 <button
                   className="ghost-button"
                   disabled={busy || task.cmoAccepted}
@@ -729,6 +745,7 @@ export default function App() {
                 <figcaption>输入 PSD 合成图，不是 CMO3 动作预览。</figcaption>
               </figure>
             )}
+            {task.psdFile && <PsdVariantPreview task={task} />}
           </div>
         </Modal>
       )}
@@ -743,8 +760,8 @@ export default function App() {
             </li>
             <li>浏览器完成网格和 CMO3 导出，生成期间不要关闭页面。</li>
             <li>
-              下载 CMO3 到 Cubism 检查全身与参数动作。生成文件不代表动作质检或
-              MOC3 编译通过。
+              下载 CMO3 到 Cubism 检查全身与参数动作；运行时 MOC3 包可直接用于
+              SDK/播放器联调，生成文件仍需实际验收。
             </li>
           </ol>
           <p>
@@ -769,6 +786,155 @@ export default function App() {
         </Modal>
       )}
     </main>
+  );
+}
+
+type VariantPreviewProps = { task: Task };
+type VariantPart = { name: string; slot: string; hidden: boolean };
+type Variant = {
+  id: string;
+  kind: 'action' | 'expression';
+  hidden: boolean;
+  parts: VariantPart[];
+};
+type VariantManifest = { variants: Variant[] };
+type PreviewLayer = {
+  name: string;
+  imageData: ImageData;
+  visible: boolean;
+  opacity: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+type PreviewModel = {
+  width: number;
+  height: number;
+  layers: PreviewLayer[];
+  manifest: VariantManifest;
+};
+
+function PsdVariantPreview({ task }: VariantPreviewProps) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const [model, setModel] = useState<PreviewModel | null>(null);
+  const [action, setAction] = useState('');
+  const [expression, setExpression] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    setModel(null);
+    setError('');
+    void (async () => {
+      try {
+        const blob =
+          (await readAsset(`${task.id}:psd`)) ??
+          (await readAsset(`${task.id}:input`));
+        if (!blob) throw new Error('PSD 不在当前浏览器，无法预览动作替换。');
+        const buffer = await blob.arrayBuffer();
+        const parsed = importPsd(buffer) as Omit<PreviewModel, 'manifest'>;
+        const manifest = extractVariantManifest(buffer) as unknown as VariantManifest;
+        if (alive) {
+          setModel({ ...parsed, manifest });
+          setAction(
+            manifest.variants.find((v) => v.kind === 'action' && !v.hidden)?.id || '',
+          );
+          setExpression(
+            manifest.variants.find((v) => v.kind === 'expression' && !v.hidden)?.id || '',
+          );
+        }
+      } catch (e) {
+        if (alive) setError(e instanceof Error ? e.message : 'PSD 动作预览失败。');
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [task.id]);
+
+  useEffect(() => {
+    if (!model || !canvas.current) return;
+    const target = canvas.current;
+    target.width = model.width;
+    target.height = model.height;
+    const ctx = target.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, model.width, model.height);
+    ctx.fillStyle = '#f1f3f7';
+    ctx.fillRect(0, 0, model.width, model.height);
+    const variants = model.manifest.variants;
+    const selected = new Set([action, expression].filter(Boolean));
+    const selectedParts = variants
+      .filter((v) => selected.has(v.id))
+      .flatMap((v) => v.parts);
+    const selectedSlots = new Set(selectedParts.map((p) => p.slot));
+    const variantByPart = new Map<string, Variant>();
+    for (const variant of variants)
+      for (const part of variant.parts) variantByPart.set(part.name, variant);
+
+    const replaces = (base: string, replacement: string) =>
+      base === replacement || replacement === base.replace(/-[lr]$/, '');
+
+    for (const layer of [...model.layers].reverse()) {
+      const variant = variantByPart.get(layer.name);
+      if (variant) {
+        if (!selected.has(variant.id) || !layer.visible) continue;
+      } else if (!layer.visible) {
+        continue;
+      } else if ([...selectedSlots].some((slot) => replaces(layer.name, slot))) {
+        continue;
+      }
+      const tile = document.createElement('canvas');
+      tile.width = layer.width;
+      tile.height = layer.height;
+      tile.getContext('2d')?.putImageData(layer.imageData, 0, 0);
+      ctx.globalAlpha = layer.opacity ?? 1;
+      ctx.drawImage(tile, layer.x, layer.y);
+    }
+    ctx.globalAlpha = 1;
+  }, [model, action, expression]);
+
+  if (!task.psdFile) return null;
+  const actions = model?.manifest.variants.filter((v) => v.kind === 'action') || [];
+  const expressions =
+    model?.manifest.variants.filter((v) => v.kind === 'expression') || [];
+  return (
+    <section className="variant-preview">
+      <div className="variant-preview-heading">
+        <div>
+          <p className="eyebrow">PSD VARIANT PREVIEW</p>
+          <h3>动作 / 表情替换预览</h3>
+        </div>
+        {model && <small>{model.width}×{model.height} · 不修改原始 PSD</small>}
+      </div>
+      {error && <small>{error}</small>}
+      {model && (
+        <>
+          <div className="variant-controls">
+            <div>
+              <span>动作</span>
+              <button className={!action ? 'is-active' : ''} onClick={() => setAction('')}>基础</button>
+              {actions.map((v) => (
+                <button key={v.id} className={action === v.id ? 'is-active' : ''} onClick={() => setAction(v.id)}>
+                  {v.id.replace(/^action_\d+_/, '')}
+                </button>
+              ))}
+            </div>
+            <div>
+              <span>表情</span>
+              <button className={!expression ? 'is-active' : ''} onClick={() => setExpression('')}>基础</button>
+              {expressions.map((v) => (
+                <button key={v.id} className={expression === v.id ? 'is-active' : ''} onClick={() => setExpression(v.id)}>
+                  {v.id.replace(/^expression_\d+_/, '')}
+                </button>
+              ))}
+            </div>
+          </div>
+          <canvas ref={canvas} className="variant-canvas" aria-label="PSD 动作替换预览" />
+        </>
+      )}
+    </section>
   );
 }
 

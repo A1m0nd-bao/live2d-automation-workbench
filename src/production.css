@@ -28,6 +28,61 @@ figcaption {
   object-fit: contain;
   background: #f1f3f7;
 }
+.variant-preview {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #dfe5ee;
+}
+.variant-preview-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.variant-preview-heading h3 {
+  margin: 2px 0 0;
+  font-size: 18px;
+}
+.variant-preview-heading small {
+  color: #65758b;
+}
+.variant-controls {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+.variant-controls > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.variant-controls span {
+  min-width: 42px;
+  color: #65758b;
+  font-size: 12px;
+}
+.variant-controls button {
+  border: 1px solid #c9d3e2;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: white;
+  color: #26364b;
+  font-size: 12px;
+}
+.variant-controls button.is-active {
+  border-color: #385fbd;
+  background: #385fbd;
+  color: white;
+}
+.variant-canvas {
+  display: block;
+  width: 100%;
+  max-height: 520px;
+  object-fit: contain;
+  background: #f1f3f7;
+  border-radius: 8px;
+}
 figure {
   margin: 12px 0 0;
 }
