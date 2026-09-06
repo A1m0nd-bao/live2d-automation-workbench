@@ -123,9 +123,9 @@ for (let index = 0; index < kept.length; index += 1) {
       id: 'ParamActionWave',
       name: 'Action: Wave',
       state: isWave ? 'alternate' : 'base',
-      // 0–0.35: base, 0.35–0.65: cross-fade, 0.65–1: wave.
-      transitionStart: 0.35,
-      transitionEnd: 0.65,
+      // 0–0.15: base, 0.15–0.85: long, gentle cross-fade, 0.85–1: wave.
+      transitionStart: 0.15,
+      transitionEnd: 0.85,
     } : null,
   });
 }
