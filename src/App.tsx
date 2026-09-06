@@ -49,9 +49,7 @@ const stage = (t: Task) =>
             ? t.prepState === 'failed'
               ? '豆包生图预处理失败'
               : '待豆包生图预处理'
-            : t.inputKind === 'image' && !t.prepAccepted
-              ? '待确认 Live2D 友好图'
-              : t.remoteState === 'failed'
+          : t.remoteState === 'failed'
                 ? '拆分失败'
                 : t.remoteJobId
                   ? '后台拆分中'
@@ -242,17 +240,35 @@ export default function App() {
       update(t.id, {
         preparedFile: filename,
         prepState: 'succeeded',
-        prepAccepted: false,
-        prepMessage:
-          '已生成。请确认身份、全身、双手双脚和服装完整后再提交拆分。',
+        prepAccepted: true,
+        prepMessage: '已生成 Live2D 友好图，正在自动提交拆分。',
       });
-      setToast('Live2D 友好图已生成，待你确认后才会提交 See-Through。');
+      return new File([png], filename, { type: 'image/png' });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : '豆包生图预处理失败。';
       update(t.id, { prepState: 'failed', prepMessage: message });
       throw error;
     }
+  }
+  async function submitToSeeThrough(t: Task, preparedImage?: File) {
+    const f =
+      preparedImage ??
+      (t.inputKind === 'image' ? await prepared(t) : await input(t));
+    setProgress('提交 Live2D 友好图到 See-Through…');
+    const r = await serviceRequest<Job>('submit', { image: f, name: f.name });
+    if (!r.jobId)
+      throw new Error(r.error || '服务未返回任务编号，请检查服务端后再重试。');
+    update(t.id, {
+      remoteJobId: r.jobId,
+      remoteState: 'queued',
+      remoteMessage: r.message || '已提交，后台将自动下载 PSD。',
+    });
+  }
+  async function startImagePipeline(t: Task) {
+    const preparedImage = await prepare(t);
+    await submitToSeeThrough(t, preparedImage);
+    setToast('已自动生成友好图并提交 See-Through；PSD 完成后会自动下载。');
   }
   async function refresh(t: Task) {
     if (!t.remoteJobId) return;
@@ -272,11 +288,20 @@ export default function App() {
         throw new Error('服务返回的文件不是 PSD。');
       const filename = `${t.name}.psd`;
       await saveAsset(`${t.id}:psd`, new Blob([data]));
+      const readyTask = { ...t, psdFile: filename, qaPassed: true };
       update(t.id, {
         psdFile: filename,
-        qaPassed: false,
+        qaPassed: true,
       });
-      setToast('PSD 已下载并保存到当前浏览器，请确认图层质量。');
+      setProgress('PSD 已下载，正在自动生成运行时包…');
+      try {
+        await generate(readyTask);
+        setToast('PSD 已保存并自动生成运行时包；请在 Cubism 中验收 CMO3。');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '运行时包自动生成失败。';
+        update(t.id, { qaPassed: false, warnings: [message] });
+        setToast(`PSD 已保存，但自动生成未完成：${message}`);
+      }
     }
   }
   useEffect(() => {
@@ -325,13 +350,13 @@ export default function App() {
   async function replace(t: Task, f: File) {
     const k = validate(f);
     await saveAsset(`${t.id}:input`, f);
-    update(t.id, {
+    const patch: Partial<Task> = {
       inputFile: f.name,
       inputKind: k,
       preparedFile: undefined,
       prepState: undefined,
       prepMessage: undefined,
-      prepAccepted: false,
+      prepAccepted: k === 'image',
       psdFile: k === 'psd' ? f.name : undefined,
       remoteJobId: undefined,
       remoteState: undefined,
@@ -341,7 +366,15 @@ export default function App() {
       cmoFile: undefined,
       cmoAccepted: false,
       warnings: [],
-    });
+    };
+    update(t.id, patch);
+    if (k === 'image')
+      await startImagePipeline({
+        ...t,
+        ...patch,
+        inputFile: f.name,
+        inputKind: k,
+      });
   }
   return (
     <main className="app-shell">
@@ -502,8 +535,8 @@ export default function App() {
       {create && (
         <Modal title="新建生产任务" close={() => setCreate(false)}>
           <p>
-            原图保存在当前浏览器。PNG/JPG 先经豆包生图生成待确认的 Live2D
-            友好图，确认后才会提交 See-Through；PSD 与 .stretch 不经过生图步骤。
+            原图保存在当前浏览器。PNG/JPG 上传后会自动生成 Live2D 友好图、提交
+            See-Through、轮询下载 PSD 并尝试生成运行时包；PSD 与 .stretch 不经过生图步骤。
           </p>
           <label className="field-label">
             任务名称
@@ -527,22 +560,21 @@ export default function App() {
                 const k = validate(file),
                   id = crypto.randomUUID();
                 await saveAsset(`${id}:input`, file);
-                setTasks((all) => [
-                  {
-                    id,
-                    name: name.trim(),
-                    referenceName: file.name,
-                    inputFile: file.name,
-                    inputKind: k,
-                    psdFile: k === 'psd' ? file.name : undefined,
-                    createdAt: new Date().toLocaleString('zh-CN'),
-                  },
-                  ...all,
-                ]);
+                const next: Task = {
+                  id,
+                  name: name.trim(),
+                  referenceName: file.name,
+                  inputFile: file.name,
+                  inputKind: k,
+                  psdFile: k === 'psd' ? file.name : undefined,
+                  createdAt: new Date().toLocaleString('zh-CN'),
+                };
+                setTasks((all) => [next, ...all]);
                 setSelected(id);
                 setCreate(false);
                 setName('');
                 setFile(null);
+                if (k === 'image') await startImagePipeline(next);
               })
             }
           >
@@ -559,15 +591,14 @@ export default function App() {
             {task.prepMessage && <small>{task.prepMessage}</small>}
             {task.inputKind === 'image' &&
               !task.preparedFile &&
-              !task.remoteJobId && (
+              !task.remoteJobId &&
+              task.prepState === 'failed' && (
                 <button
                   className="primary-button"
                   disabled={busy}
-                  onClick={() => void operate(() => prepare(task))}
+                  onClick={() => void operate(() => startImagePipeline(task))}
                 >
-                  {task.prepState === 'queued'
-                    ? '豆包生图处理中…'
-                    : '用豆包生图生成 Live2D 友好图'}
+                  重试自动化处理
                 </button>
               )}
             {task.preparedFile && (
@@ -592,19 +623,8 @@ export default function App() {
                       src={preparedPreview}
                       alt="经预处理的 Live2D 角色参考"
                     />
-                    <figcaption>
-                      请核查：身份、服装、完整全身、双手双脚、附件、无遮挡裁切和纯色背景。
-                    </figcaption>
+                    <figcaption>自动化预处理结果；已自动投递 See-Through。</figcaption>
                   </figure>
-                )}
-                {!task.prepAccepted && (
-                  <button
-                    className="ghost-button"
-                    disabled={busy}
-                    onClick={() => update(task.id, { prepAccepted: true })}
-                  >
-                    确认 Live2D 友好图通过
-                  </button>
                 )}
               </>
             )}
@@ -615,29 +635,7 @@ export default function App() {
                 <button
                   className="primary-button"
                   disabled={busy}
-                  onClick={() =>
-                    void operate(async () => {
-                      const f =
-                        task.inputKind === 'image'
-                          ? await prepared(task)
-                          : await input(task);
-                      setProgress('提交 Live2D 友好图到 See-Through…');
-                      const r = await serviceRequest<Job>('submit', {
-                        image: f,
-                        name: f.name,
-                      });
-                      if (!r.jobId)
-                        throw new Error(
-                          r.error ||
-                            '服务未返回任务编号，请检查服务端后再重试。',
-                        );
-                      update(task.id, {
-                        remoteJobId: r.jobId,
-                        remoteState: 'queued',
-                        remoteMessage: r.message,
-                      });
-                    })
-                  }
+                  onClick={() => void operate(() => submitToSeeThrough(task))}
                 >
                   提交处理图到 See-Through
                 </button>
