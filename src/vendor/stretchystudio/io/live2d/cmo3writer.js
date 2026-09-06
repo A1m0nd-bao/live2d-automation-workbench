@@ -96,6 +96,9 @@ export async function generateCmo3(input) {
   const {
     canvasW, canvasH, meshes,
     groups = [], parameters = [],
+    // Discrete art swaps, e.g. canonical arms ↔ wave arms. Each is emitted
+    // as a normal 0/1 Cubism parameter with nearest-neighbour keyforms.
+    actionSwitches = [],
     warpDeformerNodes = [],
     animations = [],
     modelName = 'StretchyStudio Export',
@@ -213,6 +216,24 @@ export async function generateCmo3(input) {
       min: p.min ?? 0, max: p.max ?? 1, defaultVal: p.default ?? 0,
       decimalPlaces: 3,
     });
+  }
+
+  // Action switches deliberately live in the authoring CMO3 (unlike runtime
+  // motion clips). Keeping the parameter source explicit lets an artist drag
+  // ParamActionWave in Cubism and inspect either complete arm set.
+  const actionParamPids = new Map();
+  for (const action of actionSwitches) {
+    if (!action?.id || actionParamPids.has(action.id)) continue;
+    let definition = paramDefs.find((p) => p.id === action.id);
+    if (!definition) {
+      const [, pid] = x.shared('CParameterGuid', { uuid: uuid(), note: action.id });
+      definition = {
+        pid, id: action.id, name: action.name ?? action.id,
+        min: 0, max: 1, defaultVal: 0, decimalPlaces: 0,
+      };
+      paramDefs.push(definition);
+    }
+    actionParamPids.set(action.id, definition.pid);
   }
 
   // Standard Live2D parameters (when generateRig is enabled).
@@ -813,6 +834,10 @@ export async function generateCmo3(input) {
     // the standard head-yaw parameter exists.
     const hasNeckCornerShapekeys = !hasBakedKeyforms && !hasEyelidClosure
       && generateRig && m.tag === 'neck' && !!pidParamAngleXEarly;
+    const actionSwitch = m.actionSwitch ?? null;
+    const actionParamPid = actionSwitch ? actionParamPids.get(actionSwitch.id) : null;
+    const hasActionSwitch = !!actionParamPid &&
+      (actionSwitch.state === 'base' || actionSwitch.state === 'alternate');
     const [kfBinding, pidKfb] = x.shared('KeyformBindingSource');
     const [kfGridMesh, pidKfgMesh] = x.shared('KeyformGridSource');
 
@@ -820,8 +845,39 @@ export async function generateCmo3(input) {
     let pidFormClosed = null;
     let bakedFormGuids = null;
     let neckCornerFormGuids = null; // [pidForm_-30, pidForm_+30]; 0 reuses pidFormMesh
+    let actionFormGuids = null; // [base-value form, wave-value form]
 
-    if (hasBakedKeyforms) {
+    if (hasActionSwitch) {
+      // Two complete art meshes are switched atomically. NEAREST_NEIGHBOR is
+      // Cubism's discrete interpolation type, so dragging between 0 and 1
+      // never produces the transparent, no-hand intermediate of a crossfade.
+      const [, pidFormWave] = x.shared('CFormGuid', {
+        uuid: uuid(), note: `${meshName}_action_switch`,
+      });
+      actionFormGuids = [pidFormMesh, pidFormWave];
+      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '2' });
+      for (let i = 0; i < 2; i++) {
+        const kog = x.sub(kfog, 'KeyformOnGrid');
+        const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
+        const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
+        const kon = x.sub(kop, 'KeyOnParameter');
+        x.subRef(kon, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
+        x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = String(i);
+        x.subRef(kog, 'CFormGuid', actionFormGuids[i], { 'xs.n': 'keyformGuid' });
+      }
+      const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
+      x.subRef(kb, 'KeyformBindingSource', pidKfb);
+      x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
+      x.subRef(kfBinding, 'CParameterGuid', actionParamPid, { 'xs.n': 'parameterGuid' });
+      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '2' });
+      x.sub(keys, 'f').text = '0.0';
+      x.sub(keys, 'f').text = '1.0';
+      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'NEAREST_NEIGHBOR' });
+      x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
+      x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
+      x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
+      x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = actionSwitch.id;
+    } else if (hasBakedKeyforms) {
       // Multiple keyforms to reduce linear interpolation shrinkage
       bakedFormGuids = [];
       const boneParam = boneParamGuids.get(m.jointBoneId);
@@ -959,7 +1015,7 @@ export async function generateCmo3(input) {
     perMesh.push({
       mi, meshName, meshId, pngPath, drawOrder: m.drawOrder ?? (500 + mi),
       pidDrawable, pidFormMesh, bakedFormGuids, pidFormClosed,
-      neckCornerFormGuids,
+      neckCornerFormGuids, actionFormGuids, actionState: actionSwitch?.state ?? null,
       pidMiGuid, pidTexGuid, pidExtMesh, pidExtTex, pidEmesh,
       pidImg, pidLayer,
       pidFset, pidTex2d, pidTie, pidTimi,
@@ -3585,7 +3641,15 @@ export async function generateCmo3(input) {
     // For baked keyform meshes: parent to ARM deformer (bone's parent group), not bone deformer.
     // The ARM deformer handles shoulder rotation; baked keyforms handle elbow bending.
     let dfOwner;
-    if (pm.hasBakedKeyforms) {
+    if (pm.actionFormGuids) {
+      // The source PSD contains a whole base arm mesh and a whole wave arm
+      // mesh. Give both action values the same geometry and change only the
+      // opacity; the nearest-neighbour binding above makes this a hard swap.
+      const isAlternate = pm.actionState === 'alternate';
+      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '2' });
+      emitArtMeshForm(kfList, pm.actionFormGuids[0], verts, isAlternate ? 0 : 1);
+      emitArtMeshForm(kfList, pm.actionFormGuids[1], verts, isAlternate ? 1 : 0);
+    } else if (pm.hasBakedKeyforms) {
       // Find the ARM group (parent of the bone node) — mesh is parented here, not to bone deformer.
       // Fallback chain: bone's parent → mesh's parent → null (ungrouped, canvas space)
       const boneGroup = groupMap.get(jointBoneId);

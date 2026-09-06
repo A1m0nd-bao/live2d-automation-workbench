@@ -209,6 +209,18 @@ export async function generateCubism(
         canvas: { width, height },
         textures: [],
         parameters: [],
+        // Discrete production states are exported as Cubism parameters rather
+        // than interpolated mesh poses.  Start with the safest useful case:
+        // base arms ↔ action_02 wave arms.  Both endpoint states contain a
+        // complete pair of arms, so the switch never exposes a no-hand pose.
+        actionSwitches: variantManifest.variants
+          .filter((variant) => variant.id === 'action_02_wave_arms_only')
+          .map((variant) => ({
+            id: 'ParamActionWave',
+            name: 'Action: Wave',
+            variantId: variant.id,
+            baseSlots: variant.parts.map((part) => part.slot),
+          })),
         animations: buildVariantAnimations(variantManifest.variants, layers, ids),
         physics_groups: [],
         nodes: groupDefs.map((group) => ({
@@ -296,16 +308,13 @@ export async function generateCubism(
     }
     onProgress('生成 Cubism 标准参数、变形器与物理数据…');
     await tick();
-    // The CMO3 writer is the conservative editor path.  Until an alternate
-    // state has real Cubism keyform bindings, omit it here rather than
-    // attempting to encode a zero-opacity initial form. Cubism otherwise
-    // treats the handwritten ArtMesh state inconsistently and can open a
-    // blank model. The untouched `project` below still feeds the web/runtime
-    // exporter, where the variant manifest remains available.
+    // CMO3 uses a real, discrete ParamActionWave binding. Keep only the wave
+    // alternates plus canonical parts in this first authoring pass; other
+    // alternates remain hidden until their own bindings exist.
     const cmoProject = {
       ...project,
       nodes: project.nodes.map((node) =>
-        node.type === 'part' && node.variant
+        node.type === 'part' && node.variant && node.variant !== 'action_02_wave_arms_only'
           ? { ...node, visible: false }
           : node,
       ),

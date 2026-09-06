@@ -280,6 +280,16 @@ export async function exportLive2DProject(project, images, opts = {}) {
     const warpDeformerParentId = ancestorWarpDeformer?.id ?? null;
     const warpDeformerParameterId = ancestorWarpDeformer?.parameterId ?? null;
 
+    // A discrete action state owns both its alternate art mesh and the
+    // canonical slots it replaces.  The CMO3 writer turns this into two
+    // opacity keyforms on a nearest-neighbour Cubism parameter.
+    const actionSwitch = (project.actionSwitches ?? []).find((action) =>
+      part.variant === action.variantId || action.baseSlots?.includes(meshName),
+    ) ?? null;
+    const actionState = actionSwitch
+      ? (part.variant === actionSwitch.variantId ? 'alternate' : 'base')
+      : null;
+
     meshes.push({
       name: meshName,
       tag: matchTag(meshName),
@@ -298,6 +308,11 @@ export async function exportLive2DProject(project, images, opts = {}) {
       pngData,
       texWidth: canvasW,
       texHeight: canvasH,
+      actionSwitch: actionSwitch && actionState ? {
+        id: actionSwitch.id,
+        name: actionSwitch.name,
+        state: actionState,
+      } : null,
     });
   }
 
@@ -322,6 +337,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     groups,
     warpDeformerNodes,
     parameters: project.parameters ?? [],
+    actionSwitches: project.actionSwitches ?? [],
     animations: project.animations ?? [],
     modelName,
     generateRig,
