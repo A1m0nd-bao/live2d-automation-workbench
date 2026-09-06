@@ -26,6 +26,20 @@ const transform = () => ({
   pivotY: 0,
 });
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const stableAsciiName = (value) => {
+  const source = String(value ?? 'character');
+  let hash = 2166136261;
+  for (const char of source) {
+    hash ^= char.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  const stem = source
+    .normalize('NFKD')
+    .replace(/[^A-Za-z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48) || 'live2d_model';
+  return `${stem}_${(hash >>> 0).toString(36)}`;
+};
 const png = (canvas) =>
   new Promise((resolve, reject) =>
     canvas.toBlob(
@@ -105,8 +119,10 @@ export async function generateCubism(
   const urls = [];
   const images = new Map();
   const warnings = [];
-  const safeName =
-    name.replace(/[^\p{L}\p{N}_-]/gu, '_').slice(0, 80) || 'character';
+  // Runtime bundle paths must be portable across Cubism Viewer, web hosts,
+  // and ZIP extractors. Keep the UI task name separate from this ASCII-only
+  // model identifier.
+  const safeName = stableAsciiName(name);
   let project;
   let preview;
   try {
