@@ -848,10 +848,13 @@ export async function generateCmo3(input) {
     let actionFormGuids = null; // [base form, alternate form]
 
     if (hasActionSwitch) {
-      // A nearly-instant hard swap. Cubism's CMO reader implements LINEAR but
-      // not the previously used NEAREST_NEIGHBOR enum. Reusing base/alternate
-      // forms on either side of the 0.5 threshold leaves a 0.0002-wide blend
-      // interval instead of an exposed no-hand intermediate.
+      // Cross-fade whole replacement parts over a configurable middle range.
+      // The two endpoints keep a clean pose, while values between them blend
+      // the old and new artwork. Cubism's CMO reader supports LINEAR here.
+      const transitionStart = Number.isFinite(actionSwitch.transitionStart)
+        ? actionSwitch.transitionStart : 0.35;
+      const transitionEnd = Number.isFinite(actionSwitch.transitionEnd)
+        ? actionSwitch.transitionEnd : 0.65;
       const [, pidFormWave] = x.shared('CFormGuid', {
         uuid: uuid(), note: `${meshName}_action_switch`,
       });
@@ -873,8 +876,8 @@ export async function generateCmo3(input) {
       x.subRef(kfBinding, 'CParameterGuid', actionParamPid, { 'xs.n': 'parameterGuid' });
       const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '4' });
       x.sub(keys, 'f').text = '0.0';
-      x.sub(keys, 'f').text = '0.4999';
-      x.sub(keys, 'f').text = '0.5001';
+      x.sub(keys, 'f').text = transitionStart.toFixed(4);
+      x.sub(keys, 'f').text = transitionEnd.toFixed(4);
       x.sub(keys, 'f').text = '1.0';
       x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
       x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
