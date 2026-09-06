@@ -1,6 +1,22 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
 import { useEffect, useRef, useState } from 'react';
-import { Plus, X, FolderOpen, Settings2, CircleHelp } from 'lucide-react';
+import {
+  Plus,
+  X,
+  FolderOpen,
+  Settings2,
+  CircleHelp,
+  UploadCloud,
+  Sparkles,
+  Layers3,
+  Box,
+  CheckCircle2,
+  Clock3,
+  ChevronRight,
+  FileImage,
+  ScanLine,
+  ShieldCheck,
+} from 'lucide-react';
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import { isJpeg, isPng } from './live2dPrep';
@@ -117,6 +133,55 @@ export default function App() {
     [preparedPreview, setPreparedPreview] = useState('');
   const lock = useRef(false);
   const task = tasks.find((t) => t.id === selected);
+  const featuredTask = task ?? tasks[0];
+  const runningCount = tasks.filter(
+    (t) => Boolean(t.remoteJobId) && !t.psdFile && t.remoteState !== 'failed',
+  ).length;
+  const deliveredCount = tasks.filter((t) => t.hasGenerated).length;
+  const pipelineSteps = [
+    {
+      title: '参考图',
+      note: featuredTask?.referenceName ?? '拖入角色参考图',
+      state: featuredTask?.inputFile ? 'done' : 'queued',
+      Icon: UploadCloud,
+    },
+    {
+      title: '角色整理',
+      note: featuredTask?.preparedFile
+        ? '原画风已保留'
+        : '全身构图与风格锁定',
+      state: featuredTask?.preparedFile
+        ? 'done'
+        : featuredTask?.prepState === 'queued'
+          ? 'working'
+          : 'queued',
+      Icon: Sparkles,
+    },
+    {
+      title: '语义拆层',
+      note: featuredTask?.remoteJobId
+        ? featuredTask.remoteMessage || '服务端队列中'
+        : 'See-Through PSD',
+      state: featuredTask?.psdFile
+        ? 'done'
+        : featuredTask?.remoteJobId
+          ? 'working'
+          : 'queued',
+      Icon: Layers3,
+    },
+    {
+      title: 'PSD 质检',
+      note: featuredTask?.psdFile ? '分层文件已保存' : '图层与边缘检查',
+      state: featuredTask?.psdFile ? 'done' : 'queued',
+      Icon: ScanLine,
+    },
+    {
+      title: 'Cubism 交付',
+      note: featuredTask?.hasGenerated ? 'CMO3 / 运行时包' : '自动生成待命',
+      state: featuredTask?.hasGenerated ? 'done' : 'queued',
+      Icon: Box,
+    },
+  ];
   const update = (id: string, patch: Partial<Task>) =>
     setTasks((all) => all.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   useEffect(() => {
@@ -410,118 +475,129 @@ export default function App() {
         <div className="workspace-scroll">
           <section className="intro-row">
             <div>
-              <p className="eyebrow">PRODUCTION WORKSPACE</p>
-              <h1>Live2D 生产任务</h1>
+              <p className="eyebrow">MORPH / CHARACTER FACTORY</p>
+              <h1>角色生产控制台</h1>
               <p className="intro-copy">
-                参考图 → 豆包生图友好化 → See-Through → PSD 验收 → 规范化运行时包
+                从原画保留、自动拆层到 Cubism 交付，每个文件和每一段状态都在同一条生产线内可见。
               </p>
             </div>
             <button className="primary-button" onClick={() => setCreate(true)}>
-              <Plus size={17} />
-              新建任务
+              <Plus size={17} /> 新建角色任务
             </button>
+          </section>
+          <section className="overview-grid" aria-label="生产概览">
+            <article className="feature-card current-task">
+              <div className="card-top">
+                <div>
+                  <span className="task-id">{featuredTask ? 'CURRENT CHARACTER' : 'READY FOR INPUT'}</span>
+                  <h2>{featuredTask?.name ?? '等待第一位角色'}</h2>
+                </div>
+                <span className={featuredTask?.remoteJobId && !featuredTask.psdFile ? 'status-working' : 'status-done'}>
+                  {featuredTask ? stage(featuredTask) : '生产线就绪'}
+                </span>
+              </div>
+              <div className="production-visual" aria-hidden="true">
+                <div className="visual-grid" />
+                <div className="layer-planes">
+                  <i /><i /><i /><i /><i />
+                </div>
+                <div className="visual-readout">
+                  <span>LIVE LAYER MAP</span>
+                  <b>{featuredTask?.psdFile ? 'PSD READY' : featuredTask?.preparedFile ? 'PREPARED' : 'INPUT'}</b>
+                </div>
+              </div>
+              <div className="progress-copy">
+                <span>{featuredTask?.remoteMessage || (featuredTask ? '自动化生产线已接管该任务' : '上传一张角色图，系统将自动开始处理')}</span>
+                <b>{featuredTask?.hasGenerated ? '100%' : featuredTask?.remoteJobId ? '60%' : featuredTask ? '20%' : '0%'}</b>
+              </div>
+              <div className="progress-track"><span style={{ width: featuredTask?.hasGenerated ? '100%' : featuredTask?.remoteJobId ? '60%' : featuredTask ? '20%' : '0%' }} /></div>
+              <div className="task-meta">
+                <span><FileImage size={13} /> {featuredTask?.referenceName ?? '尚无源文件'}</span>
+                <span><Clock3 size={13} /> {featuredTask?.createdAt ?? '立即开始'}</span>
+              </div>
+            </article>
+            <article className="feature-card stats-card">
+              <div className="card-heading">
+                <div>
+                  <p className="eyebrow">PRODUCTION PULSE</p>
+                  <h2>今日生产概览</h2>
+                </div>
+                <ShieldCheck size={20} />
+              </div>
+              <div className="stats">
+                <div><strong>{tasks.length}</strong><span>全部任务</span></div>
+                <div><strong>{runningCount}</strong><span>正在拆分</span></div>
+                <div><strong>{deliveredCount}</strong><span>已生成产物</span></div>
+              </div>
+              <div className="mini-chart" aria-label="任务活跃度">
+                {[32, 48, 37, 68, 55, 83, 61].map((height, index) => <span key={height} className={index === 5 ? 'highlight' : ''} style={{ height: `${height}%` }} />)}
+              </div>
+              <div className="chart-labels"><span>输入</span><span>预处理</span><span>PSD</span><span>交付</span></div>
+            </article>
           </section>
           <section className="pipeline-section">
             <div className="section-heading">
               <div>
-                <p className="eyebrow">PRIVATE TASK SERVICE</p>
-                <h2>豆包生图 + See-Through 任务服务</h2>
+                <p className="eyebrow">AUTOMATED PIPELINE</p>
+                <h2>当前角色生产线</h2>
               </div>
               <div className="header-actions">
-                <button
-                  className="ghost-button"
-                  onClick={() => {
-                    try {
-                      connectService();
-                      setConnection('请在连接窗口登录，再点击检查连接。');
-                    } catch (e) {
-                      setToast(String(e));
-                    }
-                  }}
-                >
-                  连接任务服务
-                </button>
-                <button
-                  className="ghost-button"
-                  disabled={busy}
-                  onClick={() =>
-                    void operate(async () => {
-                      const [relay, prep] = await Promise.allSettled([
-                        serviceRequest<{ ready?: boolean; message?: string }>(
-                          'health',
-                        ),
-                        serviceRequest<{ ready?: boolean; message?: string }>(
-                          'prepHealth',
-                        ),
-                      ]);
-                      const relayMessage =
-                        relay.status === 'fulfilled'
-                          ? relay.value.ready
-                            ? 'See-Through 已就绪'
-                            : relay.value.message
-                          : relay.reason instanceof Error
-                            ? relay.reason.message
-                            : 'See-Through 不可用';
-                      const prepMessage =
-                        prep.status === 'fulfilled'
-                          ? prep.value.ready
-                            ? '豆包生图已就绪'
-                            : prep.value.message
-                          : prep.reason instanceof Error
-                            ? prep.reason.message
-                            : '豆包生图不可用';
-                      setConnection(`${relayMessage}；${prepMessage}`);
-                    })
-                  }
-                >
-                  检查连接
-                </button>
+                <button className="ghost-button" onClick={() => { try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); } }}>连接服务</button>
+                <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
+                  const [relay, prep] = await Promise.allSettled([serviceRequest<{ ready?: boolean; message?: string }>('health'), serviceRequest<{ ready?: boolean; message?: string }>('prepHealth')]);
+                  const relayMessage = relay.status === 'fulfilled' ? (relay.value.ready ? 'See-Through 已就绪' : relay.value.message) : relay.reason instanceof Error ? relay.reason.message : 'See-Through 不可用';
+                  const prepMessage = prep.status === 'fulfilled' ? (prep.value.ready ? '豆包生图已就绪' : prep.value.message) : prep.reason instanceof Error ? prep.reason.message : '豆包生图不可用';
+                  setConnection(`${relayMessage}；${prepMessage}`);
+                })}>检查服务</button>
               </div>
             </div>
-            <p>{connection}</p>
-            <small>
-              豆包生图会先输出待确认的全身中立参考图；确认后才提交
-              See-Through。密钥仅留在服务端。
-            </small>
+            <div className="pipeline">
+              {pipelineSteps.map(({ title, note, state: stepState, Icon }, index) => (
+                <article className={`pipeline-step ${stepState}`} key={title}>
+                  <div className="step-number"><Icon size={16} /></div>
+                  <div className="step-title"><h3>{title}</h3>{stepState === 'done' && <CheckCircle2 size={13} />}</div>
+                  <div className="step-content"><p>{note}</p></div>
+                  <div className="step-footer"><span>STEP {String(index + 1).padStart(2, '0')}</span><b>{stepState === 'done' ? '已完成' : stepState === 'working' ? '处理中' : '等待触发'}</b></div>
+                </article>
+              ))}
+            </div>
+            <div className="service-strip"><span className="live-dot" /> {connection} <small>上传图片后由服务端持续跟踪 PSD，不依赖页面保持打开。</small></div>
           </section>
           <section className="bottom-grid">
             <article className="table-card">
               <div className="section-heading compact">
-                <h2>生产队列</h2>
+                <div><p className="eyebrow">CHARACTER QUEUE</p><h2>角色生产队列</h2></div>
                 <span>{tasks.length} 个任务</span>
               </div>
               {tasks.length ? (
-                <div className="task-table">
+                <div className="task-card-grid">
                   {tasks.map((t) => (
                     <button
-                      className="table-row task-link"
+                      className="task-card task-link"
                       key={t.id}
                       onClick={() => setSelected(t.id)}
                     >
-                      <div>
+                      <div className="task-card-icon"><FileImage size={17} /></div>
+                      <div className="task-card-copy">
                         <b>{t.name}</b>
                         <small>{t.referenceName}</small>
                       </div>
                       <span className="task-state">{stage(t)}</span>
-                      <span>{t.hasGenerated ? '文件已保存' : '查看任务'}</span>
-                      <time>{t.createdAt}</time>
+                      <ChevronRight size={17} />
                     </button>
                   ))}
                 </div>
               ) : (
-                <p className="panel-body">
-                  暂无任务。可直接导入已验收 PSD，不必重复拆分。
-                </p>
+                <button className="queue-empty" onClick={() => setCreate(true)}><UploadCloud size={21} /><span>还没有角色任务<br /><small>上传参考图，自动生产线会立即启动</small></span><ChevronRight size={17} /></button>
               )}
             </article>
             <article className="risk-card">
-              <p className="eyebrow">CUBISM COMPATIBILITY</p>
-              <h2>规范化运行时导出</h2>
-                <p>
-                以确定性 Part ID、动作清单和 motion3 曲线生成运行时 MOC3 包。CMO3 仍属实验性文件，不作为当前交付物。
-              </p>
+              <div className="risk-icon"><Box size={18} /></div>
+              <p className="eyebrow">DELIVERY CHECKPOINT</p>
+              <h2>Cubism 交付区</h2>
+              <p>自动产出 PSD、CMO3 与运行时包；在 Cubism Editor 打开 CMO3 后确认变形、遮罩和动作参数。</p>
               <button className="text-button" onClick={() => setGuide(true)}>
-                查看流程边界 →
+                查看交付检查项 <ChevronRight size={14} />
               </button>
             </article>
           </section>
