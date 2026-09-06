@@ -30,8 +30,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 7860
 Configure the workbench with the deployed relay URL and the same
 `MORPH_RELAY_TOKEN`. Never send this token to the browser.
 
-The local `/mnt/data` directory is not retained across Studio redeployments.
-The current SQLite recovery only works when the underlying files survive.
+By default the relay stores queue metadata and PSDs in ModelScope's persistent
+`/mnt/workspace/morph-live2d` directory. It can be changed with
+`MORPH_DATA_ROOT`; do not point it at the ephemeral `/mnt/data` path.
 
 FileData may contain a browser-facing `ms.show` URL. Download its `path` through
 the API inference host instead; the browser URL rejects bearer API tokens.

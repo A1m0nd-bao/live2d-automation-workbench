@@ -235,6 +235,11 @@ export default function App() {
         }));
       return [...refreshed, ...recovered];
     });
+    setConnection(
+      records.length
+        ? `服务端历史已同步：${records.length} 条任务记录。`
+        : '服务端历史已同步；当前持久化队列还没有可恢复记录。',
+    );
     if (notify) setToast(`已同步 ${records.length} 条服务端任务记录。`);
   }
   useEffect(() => {

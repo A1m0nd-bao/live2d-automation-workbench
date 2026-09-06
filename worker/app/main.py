@@ -21,7 +21,9 @@ from fastapi import FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/data/morph-live2d")).resolve()
+# ModelScope preserves /mnt/workspace across normal restarts and redeployments.
+# Keep the queue database and PSDs there rather than on the ephemeral /mnt/data.
+DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/workspace/morph-live2d")).resolve()
 DB_PATH = DATA_ROOT / "jobs.sqlite3"
 UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.api-inference.modelscope.net").rstrip("/")
 # Use an explicit, relay-specific secret for outbound inference.
