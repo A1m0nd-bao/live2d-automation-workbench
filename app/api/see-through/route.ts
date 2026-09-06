@@ -91,6 +91,21 @@ export async function GET(request: Request) {
         body.ok ? 200 : 503,
       );
     }
+    if (url.searchParams.get('diagnostics') === '1') {
+      const diagnostics = await relay(
+        `/jobs/${encodeURIComponent(jobId)}/diagnostics`,
+      );
+      if (!diagnostics.ok)
+        return json({ error: await errorText(diagnostics) }, diagnostics.status);
+      return new Response(diagnostics.body, {
+        headers: {
+          'Content-Type':
+            diagnostics.headers.get('Content-Type') ??
+            'application/x-ndjson; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
     if (url.searchParams.get('output') === '1') {
       const output = await relay(`/jobs/${encodeURIComponent(jobId)}/output`);
       if (!output.ok)
