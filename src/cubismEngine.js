@@ -130,7 +130,6 @@ export async function generateCubism(
       const layers = [...parsed.layers];
       const candidates = [
         'handwear',
-        'legwear',
         'footwear',
         'irides',
         'eyebrow',
@@ -165,10 +164,13 @@ export async function generateCubism(
       const variantByPart = new Map();
       for (const variant of variantManifest.variants)
         for (const part of variant.parts) variantByPart.set(part.name, variant);
-      const isInitiallyVisible = (layer) => {
-        const variant = variantByPart.get(layer.name);
-        return Boolean(layer.visible && (!variant || !variant.hidden));
-      };
+      // Treat the unqualified PSD layers as the canonical, neutral pose.
+      // A production file must never boot with alternate action/expression
+      // groups visible just because an artist last previewed one in Photoshop.
+      // In particular, the source PSD intentionally has the neutral arms
+      // hidden while an action group is open; we restore the neutral layer
+      // set here and keep every qualified replacement hidden until selected.
+      const isInitiallyVisible = (layer) => !variantByPart.has(layer.name);
       const ids = layers.map(() => crypto.randomUUID());
       const tags = Object.fromEntries(
         layers.map((layer) => [matchTag(layer.name), layer]),
