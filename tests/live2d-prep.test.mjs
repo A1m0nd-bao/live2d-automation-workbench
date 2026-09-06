@@ -18,20 +18,20 @@ vm.runInNewContext(code, { module, exports: module.exports, Uint8Array });
 const { isPng, LIVE2D_PREP_MODEL, LIVE2D_PREP_SIZE, live2dPrepPrompt } =
   module.exports;
 
-test('Live2D preprocessing targets image editing with a portrait source canvas', () => {
-  assert.equal(LIVE2D_PREP_MODEL, 'gpt-image-2');
+test('Live2D preprocessing targets Doubao Seedream image editing with a portrait source canvas', () => {
+  assert.equal(LIVE2D_PREP_MODEL, 'doubao-seedream-4-5-251128');
   assert.equal(LIVE2D_PREP_SIZE, '1024x1536');
 });
 
 test('character lock requires full-body, identity preservation and rejects topology drift', () => {
   const prompt = live2dPrepPrompt();
   for (const phrase of [
-    'sole authority',
-    'full head',
-    'both arms',
-    'both legs',
-    'plain opaque very-light-gray background',
-    'extra or missing fingers/limbs',
+    '唯一角色设定',
+    '完整展示头部',
+    '左右手臂',
+    '双腿',
+    '不透明极浅灰纯背景',
+    '额外或缺失的手指/肢体',
   ])
     assert.match(prompt, new RegExp(phrase));
 });

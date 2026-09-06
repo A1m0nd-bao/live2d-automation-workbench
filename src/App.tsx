@@ -47,8 +47,8 @@ const stage = (t: Task) =>
           ? '待确认输入'
           : t.inputKind === 'image' && !t.preparedFile
             ? t.prepState === 'failed'
-              ? 'Image 2 预处理失败'
-              : '待 Image 2 预处理'
+              ? '豆包生图预处理失败'
+              : '待豆包生图预处理'
             : t.inputKind === 'image' && !t.prepAccepted
               ? '待确认 Live2D 友好图'
               : t.remoteState === 'failed'
@@ -194,7 +194,7 @@ export default function App() {
   }
   async function prepare(t: Task) {
     const source = await input(t);
-    setProgress('Image 2 正在按 Live2D 规范重绘角色…');
+    setProgress('豆包生图正在按 Live2D 规范重绘角色…');
     update(t.id, {
       prepState: 'queued',
       prepMessage: '正在生成 Live2D 友好图…',
@@ -204,7 +204,7 @@ export default function App() {
         image: source,
         name: source.name,
       });
-      if (!isPng(data)) throw new Error('Image 2 返回的文件不是 PNG。');
+      if (!isPng(data)) throw new Error('豆包生图返回的文件不是 PNG。');
       const filename = `${t.name}-live2d-friendly.png`;
       await saveAsset(
         `${t.id}:prepared`,
@@ -220,7 +220,7 @@ export default function App() {
       setToast('Live2D 友好图已生成，待你确认后才会提交 See-Through。');
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Image 2 预处理失败。';
+        error instanceof Error ? error.message : '豆包生图预处理失败。';
       update(t.id, { prepState: 'failed', prepMessage: message });
       throw error;
     }
@@ -351,7 +351,7 @@ export default function App() {
               <p className="eyebrow">PRODUCTION WORKSPACE</p>
               <h1>Live2D 生产任务</h1>
               <p className="intro-copy">
-                参考图 → Image 2 友好化 → See-Through → PSD 验收 → CMO3
+                参考图 → 豆包生图友好化 → See-Through → PSD 验收 → CMO3
               </p>
             </div>
             <button className="primary-button" onClick={() => setCreate(true)}>
@@ -363,7 +363,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">PRIVATE TASK SERVICE</p>
-                <h2>Image 2 + See-Through 任务服务</h2>
+                <h2>豆包生图 + See-Through 任务服务</h2>
               </div>
               <div className="header-actions">
                 <button
@@ -403,11 +403,11 @@ export default function App() {
                       const prepMessage =
                         prep.status === 'fulfilled'
                           ? prep.value.ready
-                            ? 'Image 2 已就绪'
+                            ? '豆包生图已就绪'
                             : prep.value.message
                           : prep.reason instanceof Error
                             ? prep.reason.message
-                            : 'Image 2 不可用';
+                            : '豆包生图不可用';
                       setConnection(`${relayMessage}；${prepMessage}`);
                     })
                   }
@@ -418,7 +418,7 @@ export default function App() {
             </div>
             <p>{connection}</p>
             <small>
-              Image 2 会先输出待确认的全身中立参考图；确认后才提交
+              豆包生图会先输出待确认的全身中立参考图；确认后才提交
               See-Through。密钥仅留在服务端。
             </small>
           </section>
@@ -473,7 +473,7 @@ export default function App() {
       {create && (
         <Modal title="新建生产任务" close={() => setCreate(false)}>
           <p>
-            原图保存在当前浏览器。PNG/JPG 先经 Image 2 生成待确认的 Live2D
+            原图保存在当前浏览器。PNG/JPG 先经豆包生图生成待确认的 Live2D
             友好图，确认后才会提交 See-Through；PSD 与 .stretch 不经过生图步骤。
           </p>
           <label className="field-label">
@@ -537,8 +537,8 @@ export default function App() {
                   onClick={() => void operate(() => prepare(task))}
                 >
                   {task.prepState === 'queued'
-                    ? 'Image 2 处理中…'
-                    : '用 Image 2 生成 Live2D 友好图'}
+                    ? '豆包生图处理中…'
+                    : '用豆包生图生成 Live2D 友好图'}
                 </button>
               )}
             {task.preparedFile && (
@@ -754,7 +754,7 @@ export default function App() {
           <ol className="guide-list">
             <li>有 PSD：直接新建任务并导入，确认图层质量后点击生成。</li>
             <li>
-              仅有原图：连接私有服务、登录、检查连接，先用 Image 2
+              仅有原图：连接私有服务、登录、检查连接，先用豆包生图
               生成全身中立的 Live2D
               友好图。确认身份、服装、四肢和附件都完整后才提交拆分。
             </li>
@@ -772,7 +772,7 @@ export default function App() {
             24a83a2，使用标准自动绑定；手工原生变形器不保证无损。密钥不存入公开前端。
           </p>
           <p>
-            Image 2
+            豆包生图
             使用原图做身份保持编辑，不是无约束文生图。处理图只是拆分输入，仍不等同于已绑定的
             Live2D 模型。
           </p>
