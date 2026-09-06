@@ -4,6 +4,7 @@ import { initializeCanvas } from 'ag-psd';
 import sharp from 'sharp';
 import { importPsd, extractVariantManifest } from '../src/vendor/stretchystudio/io/psd.js';
 import { generateCmo3 } from '../src/vendor/stretchystudio/io/live2d/cmo3writer.js';
+import { matchTag } from '../src/vendor/stretchystudio/io/armatureOrganizer.js';
 
 // ag-psd only needs this small canvas surface while decoding layer pixels.
 class MockCanvas {
@@ -45,8 +46,6 @@ for (const slot of waveSlots) {
 // Keep the neutral artwork plus the two wave alternates. Other actions and
 // expressions are intentionally omitted, so the CMO opens in its base state.
 const kept = parsed.layers.filter((layer) => !layer.name.includes('__') || waveNames.has(layer.name));
-const rectVertices = [0, 0, parsed.width, 0, parsed.width, parsed.height, 0, parsed.height];
-const rectUvs = [0, 0, 1, 0, 1, 1, 0, 1];
 const rectTriangles = [0, 1, 2, 0, 2, 3];
 
 async function fullCanvasPng(layer) {
@@ -64,6 +63,20 @@ for (let index = 0; index < kept.length; index += 1) {
   const isWave = waveNames.has(layer.name);
   const slot = isWave ? layer.name.slice(layer.name.indexOf('__') + 2) : layer.name;
   const participates = waveSlots.has(slot);
+  // The texture is canvas-sized, but the mesh follows this layer's true PSD
+  // bounds. That gives the generated breathing / hair / clothing warps a
+  // local region instead of deforming an invisible full-canvas rectangle.
+  const x = layer.x;
+  const y = layer.y;
+  const x2 = x + layer.imageData.width;
+  const y2 = y + layer.imageData.height;
+  const rectVertices = [x, y, x2, y, x2, y2, x, y2];
+  const rectUvs = [
+    x / parsed.width, y / parsed.height,
+    x2 / parsed.width, y / parsed.height,
+    x2 / parsed.width, y2 / parsed.height,
+    x / parsed.width, y2 / parsed.height,
+  ];
   meshes.push({
     name: layer.name,
     partId: `psd_${index}`,
@@ -73,6 +86,7 @@ for (let index = 0; index < kept.length; index += 1) {
     pngData: await fullCanvasPng(layer),
     texWidth: parsed.width,
     texHeight: parsed.height,
+    tag: matchTag(isWave ? slot : layer.name),
     // importPsd returns PSD layers from front → back.  Cubism draws a larger
     // drawOrder on top, so preserving the raw index reverses the artwork
     // (the back hair obscures the face, as seen in the first verification).
@@ -100,8 +114,8 @@ const { cmo3 } = await generateCmo3({
     baseSlots: [...waveSlots],
   }],
   modelName: '动作替换首范例-挥手形态键',
-  generateRig: false,
-  generatePhysics: false,
+  generateRig: true,
+  generatePhysics: true,
 });
 
 await fs.mkdir(path.dirname(output), { recursive: true });
