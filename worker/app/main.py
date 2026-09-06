@@ -97,6 +97,22 @@ def file_data(path: str, name: str, content_type: str) -> dict[str, Any]:
     return {"path": path, "orig_name": name, "mime_type": content_type, "meta": {"_type": "gradio.FileData"}}
 
 
+def source_image_type(path: Path) -> tuple[str, str]:
+    """Return the truthful Gradio MIME type and a usable filename suffix.
+
+    The browser normally normalizes generated JPEGs to PNG before submitting,
+    but the durable relay also accepts direct JPEG jobs.  Never label JPEG
+    bytes as PNG: some Gradio versions defer validation until queue execution,
+    where that mismatch can leave a job appearing to run indefinitely.
+    """
+    signature = path.read_bytes()[:8]
+    if signature.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", ".png"
+    if signature.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    raise RuntimeError("Source file is not a PNG or JPEG image")
+
+
 def find_psd_output(value: Any) -> str | None:
     """Find the PSD file in Gradio's nested File/Gallery output payload.
 
@@ -183,8 +199,14 @@ async def monitor(job_id: str) -> None:
             timeout = httpx.Timeout(connect=30, read=90, write=60, pool=30)
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
+                    source_mime, source_suffix = source_image_type(source)
+                    source_name = f"source{source_suffix}"
                     with source.open("rb") as handle:
-                        upload = await client.post(f"{UPSTREAM}/gradio_api/upload", headers=headers, files={"files": (source.name, handle, "image/png")})
+                        upload = await client.post(
+                            f"{UPSTREAM}/gradio_api/upload",
+                            headers=headers,
+                            files={"files": (source_name, handle, source_mime)},
+                        )
                     if not upload.is_success:
                         raise RuntimeError(await upstream_error(upload))
                     uploaded: Any = upload.json()
@@ -194,7 +216,11 @@ async def monitor(job_id: str) -> None:
                         uploaded = (uploaded.get("files") or uploaded.get("data") or [None])[0]
                     if not uploaded:
                         raise RuntimeError("See-Through did not return an uploaded file reference")
-                    input_file = file_data(uploaded, source.name, "image/png") if isinstance(uploaded, str) else uploaded
+                    input_file = (
+                        file_data(uploaded, source_name, source_mime)
+                        if isinstance(uploaded, str)
+                        else uploaded
+                    )
                     stage = "submit"
                     call = await client.post(
                         f"{UPSTREAM}/gradio_api/call/inference",
