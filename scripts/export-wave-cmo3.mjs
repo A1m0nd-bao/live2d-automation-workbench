@@ -4,7 +4,13 @@ import { initializeCanvas } from 'ag-psd';
 import sharp from 'sharp';
 import { importPsd, extractVariantManifest } from '../src/vendor/stretchystudio/io/psd.js';
 import { generateCmo3 } from '../src/vendor/stretchystudio/io/live2d/cmo3writer.js';
-import { matchTag } from '../src/vendor/stretchystudio/io/armatureOrganizer.js';
+import {
+  matchTag,
+  analyzeGroups,
+  estimateSkeletonFromBounds,
+  buildArmatureNodes,
+} from '../src/vendor/stretchystudio/io/armatureOrganizer.js';
+import { generateMesh } from '../src/vendor/stretchystudio/mesh/generate.js';
 
 // ag-psd only needs this small canvas surface while decoding layer pixels.
 class MockCanvas {
@@ -46,7 +52,25 @@ for (const slot of waveSlots) {
 // Keep the neutral artwork plus the two wave alternates. Other actions and
 // expressions are intentionally omitted, so the CMO opens in its base state.
 const kept = parsed.layers.filter((layer) => !layer.name.includes('__') || waveNames.has(layer.name));
-const rectTriangles = [0, 1, 2, 0, 2, 3];
+const ids = kept.map((_, index) => `psd_${index}`);
+const tags = Object.fromEntries(kept.map((layer) => [matchTag(layer.name), layer]));
+const { groupDefs, assignments } = buildArmatureNodes(
+  estimateSkeletonFromBounds(kept, parsed.width, parsed.height),
+  analyzeGroups(tags),
+  kept,
+  ids,
+  () => crypto.randomUUID(),
+);
+const groups = groupDefs.map((group) => ({
+  id: group.id,
+  name: group.name,
+  parent: group.parentId,
+  boneRole: group.boneRole,
+  transform: {
+    x: 0, y: 0, rotation: 0, scaleX: 1, scaleY: 1,
+    pivotX: group.pivotX, pivotY: group.pivotY,
+  },
+}));
 
 async function fullCanvasPng(layer) {
   const tile = await sharp(Buffer.from(layer.imageData.data), {
@@ -57,40 +81,44 @@ async function fullCanvasPng(layer) {
   }).composite([{ input: tile, left: layer.x, top: layer.y }]).png().toBuffer();
 }
 
+function fullCanvasPixels(layer) {
+  const pixels = new Uint8ClampedArray(parsed.width * parsed.height * 4);
+  const { width, height, data } = layer.imageData;
+  for (let row = 0; row < height; row += 1) {
+    const destination = ((layer.y + row) * parsed.width + layer.x) * 4;
+    pixels.set(data.subarray(row * width * 4, (row + 1) * width * 4), destination);
+  }
+  return pixels;
+}
+
 const meshes = [];
 for (let index = 0; index < kept.length; index += 1) {
   const layer = kept[index];
   const isWave = waveNames.has(layer.name);
   const slot = isWave ? layer.name.slice(layer.name.indexOf('__') + 2) : layer.name;
   const participates = waveSlots.has(slot);
-  // The texture is canvas-sized, but the mesh follows this layer's true PSD
-  // bounds. That gives the generated breathing / hair / clothing warps a
-  // local region instead of deforming an invisible full-canvas rectangle.
-  const x = layer.x;
-  const y = layer.y;
-  const x2 = x + layer.imageData.width;
-  const y2 = y + layer.imageData.height;
-  const rectVertices = [x, y, x2, y, x2, y2, x, y2];
-  const rectUvs = [
-    x / parsed.width, y / parsed.height,
-    x2 / parsed.width, y / parsed.height,
-    x2 / parsed.width, y2 / parsed.height,
-    x / parsed.width, y2 / parsed.height,
-  ];
+  // Match the base CMO's contour-following triangulation. Four-corner meshes
+  // can only bend like cards, which is why the earlier action export lacked
+  // the base model's natural breathing and secondary motion.
+  const mesh = generateMesh(fullCanvasPixels(layer), parsed.width, parsed.height);
+  if (!mesh.triangles.length) throw new Error(`${layer.name} 无法生成有效网格。`);
+  const canonicalIndex = isWave ? kept.findIndex((candidate) => candidate.name === slot) : index;
+  const assignment = assignments.get(canonicalIndex);
   meshes.push({
     name: layer.name,
     partId: `psd_${index}`,
-    vertices: rectVertices,
-    uvs: rectUvs,
-    triangles: rectTriangles,
+    parentGroupId: assignment?.parentGroupId ?? null,
+    vertices: mesh.vertices.flatMap((vertex) => [vertex.restX, vertex.restY]),
+    uvs: Array.from(mesh.uvs),
+    triangles: mesh.triangles.flat(),
     pngData: await fullCanvasPng(layer),
     texWidth: parsed.width,
     texHeight: parsed.height,
     tag: matchTag(isWave ? slot : layer.name),
-    // importPsd returns PSD layers from front → back.  Cubism draws a larger
+    // importPsd returns PSD layers from front → back. Cubism draws a larger
     // drawOrder on top, so preserving the raw index reverses the artwork
     // (the back hair obscures the face, as seen in the first verification).
-    drawOrder: kept.length - index,
+    drawOrder: assignment?.drawOrder ?? (kept.length - index),
     actionSwitch: participates ? {
       id: 'ParamActionWave',
       name: 'Action: Wave',
@@ -106,7 +134,7 @@ const { cmo3 } = await generateCmo3({
   canvasW: parsed.width,
   canvasH: parsed.height,
   meshes,
-  groups: [],
+  groups,
   actionSwitches: [{
     id: 'ParamActionWave',
     name: 'Action: Wave',
