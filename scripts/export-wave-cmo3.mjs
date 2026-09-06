@@ -73,7 +73,10 @@ for (let index = 0; index < kept.length; index += 1) {
     pngData: await fullCanvasPng(layer),
     texWidth: parsed.width,
     texHeight: parsed.height,
-    drawOrder: index,
+    // importPsd returns PSD layers from front → back.  Cubism draws a larger
+    // drawOrder on top, so preserving the raw index reverses the artwork
+    // (the back hair obscures the face, as seen in the first verification).
+    drawOrder: kept.length - index,
     actionSwitch: participates ? {
       id: 'ParamActionWave',
       name: 'Action: Wave',
