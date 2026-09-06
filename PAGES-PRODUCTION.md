@@ -2,12 +2,13 @@
 
 - Public UI: https://a1m0nd-bao.github.io/live2d-automation-workbench/
 - Private service connection: existing Sites `/pages-bridge`; access policy unchanged.
+- Image preparation: private `POST /api/live2d-prep` uses OpenAI GPT Image editing with the source as the identity lock, then requires human approval before See-Through submission. Configure `OPENAI_API_KEY` as a Sites secret; never use a Vite variable.
 - Inference: existing authenticated relay, server queue and saved task states.
 - PSD → CMO3: pinned browser-side StretchyStudio compatibility exporter; no ModelScope key needed for existing PSD.
 
 ## Use
 
-Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. For reference-image inference, first connect the private service in its login popup, keep that window open, check connection, then submit. Open a task to resume status polling and retrieve its PSD. No fabricated completion percentages are shown.
+Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. For a PNG/JPG reference, first connect the private service in its login popup, create a Live2D-friendly Image 2 edit, inspect it, approve it, then submit the approved edit. The original and approved image remain separate browser assets. Open a task to resume status polling and retrieve its PSD. No fabricated completion percentages are shown.
 
 Task metadata uses the existing localStorage key; actual inputs and outputs use IndexedDB. An older task with only filenames needs its file reimported. Changing origins/devices or clearing site data does not migrate files. Keep downloaded backups. Closing Pages stops browser generation, but not an already submitted server inference job.
 
@@ -21,7 +22,7 @@ Local UI test on 2026-09-05: imported the accepted 1024×1024 ana.psd, generated
 
 ## Checks
 
-`node --test tests/service-bridge.test.mjs`
+`node --test tests/service-bridge.test.mjs tests/live2d-prep.test.mjs`
 
 `npx tsc --noEmit`
 

@@ -30,9 +30,12 @@ export default function PrivateBridgePage() {
         return;
       try {
         const { command, payload } = data;
-        let path = '/api/see-through';
+        let path =
+          command === 'prepare' || command === 'prepHealth'
+            ? '/api/live2d-prep'
+            : '/api/see-through';
         let init: RequestInit = {};
-        if (command === 'submit') {
+        if (command === 'submit' || command === 'prepare') {
           if (
             !(payload?.image instanceof Blob) ||
             payload.image.size > 20 * 1024 * 1024
@@ -45,12 +48,12 @@ export default function PrivateBridgePage() {
           if (!/^[a-f0-9]{32}$/.test(payload?.jobId ?? ''))
             throw new Error('任务 ID 无效。');
           path += `?jobId=${payload.jobId}${command === 'output' ? '&output=1' : ''}`;
-        } else if (command !== 'health') {
+        } else if (command !== 'health' && command !== 'prepHealth') {
           throw new Error('不支持的请求。');
         }
         const response = await fetch(path, {
           ...init,
-          signal: AbortSignal.timeout(80000),
+          signal: AbortSignal.timeout(command === 'prepare' ? 240_000 : 80_000),
         });
         if (!response.ok) {
           const body = (await response.json().catch(() => ({}))) as {
@@ -62,7 +65,7 @@ export default function PrivateBridgePage() {
           );
         }
         const result =
-          command === 'output'
+          command === 'output' || command === 'prepare'
             ? await response.arrayBuffer()
             : await response.json();
         if (alive) {

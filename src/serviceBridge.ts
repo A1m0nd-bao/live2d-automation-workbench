@@ -47,13 +47,16 @@ export function connectService() {
 }
 
 export async function serviceRequest<T>(
-  command: 'health' | 'submit' | 'status' | 'output',
+  command: 'health' | 'prepare' | 'prepHealth' | 'submit' | 'status' | 'output',
   payload: { image?: Blob; name?: string; jobId?: string } = {},
 ): Promise<T> {
   if (window.location.origin === SERVICE_ORIGIN) {
-    let path = '/api/see-through';
+    let path =
+      command === 'prepare' || command === 'prepHealth'
+        ? '/api/live2d-prep'
+        : '/api/see-through';
     let init: RequestInit = {};
-    if (command === 'submit') {
+    if (command === 'submit' || command === 'prepare') {
       if (!payload.image) throw new Error('缺少参考图');
       const form = new FormData();
       form.append('image', payload.image, payload.name);
@@ -66,7 +69,7 @@ export async function serviceRequest<T>(
     }
     const response = await fetch(path, {
       ...init,
-      signal: AbortSignal.timeout(80000),
+      signal: AbortSignal.timeout(command === 'prepare' ? 240_000 : 80_000),
     });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as {
@@ -77,7 +80,7 @@ export async function serviceRequest<T>(
         body.error || body.message || `服务返回 ${response.status}`,
       );
     }
-    return command === 'output'
+    return command === 'output' || command === 'prepare'
       ? (response.arrayBuffer() as Promise<T>)
       : response.json();
   }
@@ -87,16 +90,19 @@ export async function serviceRequest<T>(
     );
   const id = crypto.randomUUID();
   return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      pending.delete(id);
-      reject(
-        new Error(
-          command === 'submit'
-            ? '未收到提交确认，请勿重复提交；请检查连接窗口和后台任务。'
-            : '连接超时，请在连接窗口完成登录后重试。',
-        ),
-      );
-    }, 90000);
+    const timer = window.setTimeout(
+      () => {
+        pending.delete(id);
+        reject(
+          new Error(
+            command === 'submit' || command === 'prepare'
+              ? '未收到提交确认，请勿重复提交；请检查连接窗口和后台任务。'
+              : '连接超时，请在连接窗口完成登录后重试。',
+          ),
+        );
+      },
+      command === 'prepare' ? 240_000 : 90_000,
+    );
     pending.set(id, { resolve: (data) => resolve(data as T), reject, timer });
     popup!.postMessage(
       { channel: CHANNEL, nonce, id, command, payload },

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Plus, X, FolderOpen, Settings2, CircleHelp } from 'lucide-react';
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
+import { isPng } from './live2dPrep';
 import './production.css';
 
 type Task = {
@@ -16,6 +17,10 @@ type Task = {
   psdFile?: string;
   inputFile?: string;
   inputKind?: string;
+  preparedFile?: string;
+  prepState?: 'queued' | 'succeeded' | 'failed';
+  prepMessage?: string;
+  prepAccepted?: boolean;
   qaPassed?: boolean;
   cmoFile?: string;
   hasGenerated?: boolean;
@@ -38,11 +43,17 @@ const stage = (t: Task) =>
         ? '待生成 CMO3'
         : t.psdFile || t.inputKind === 'stretch'
           ? '待确认输入'
-          : t.remoteState === 'failed'
-            ? '拆分失败'
-            : t.remoteJobId
-              ? '后台拆分中'
-              : '待提交参考图';
+          : t.inputKind === 'image' && !t.preparedFile
+            ? t.prepState === 'failed'
+              ? 'Image 2 预处理失败'
+              : '待 Image 2 预处理'
+            : t.inputKind === 'image' && !t.prepAccepted
+              ? '待确认 Live2D 友好图'
+              : t.remoteState === 'failed'
+                ? '拆分失败'
+                : t.remoteJobId
+                  ? '后台拆分中'
+                  : '待提交参考图';
 const kind = (f: File) =>
   /\.psd$/i.test(f.name)
     ? 'psd'
@@ -73,7 +84,8 @@ export default function App() {
     );
   const [busy, setBusy] = useState(false),
     [progress, setProgress] = useState(''),
-    [preview, setPreview] = useState('');
+    [preview, setPreview] = useState(''),
+    [preparedPreview, setPreparedPreview] = useState('');
   const lock = useRef(false);
   const task = tasks.find((t) => t.id === selected);
   const update = (id: string, patch: Partial<Task>) =>
@@ -121,6 +133,24 @@ export default function App() {
       if (url) URL.revokeObjectURL(url);
     };
   }, [task?.id, task?.hasGenerated]);
+  useEffect(() => {
+    let alive = true,
+      url = '';
+    setPreparedPreview('');
+    if (task?.preparedFile)
+      void readAsset(`${task.id}:prepared`)
+        .then((blob) => {
+          if (blob && alive) {
+            url = URL.createObjectURL(blob);
+            setPreparedPreview(url);
+          }
+        })
+        .catch(() => {});
+    return () => {
+      alive = false;
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [task?.id, task?.preparedFile]);
   async function operate(action: () => Promise<void>) {
     if (lock.current) return;
     lock.current = true;
@@ -145,6 +175,54 @@ export default function App() {
       type: blob.type,
     });
   }
+  async function prepared(t: Task) {
+    const blob = await readAsset(`${t.id}:prepared`);
+    if (!blob || !t.preparedFile)
+      throw new Error('Live2D 友好图不在此浏览器，请重新生成。');
+    return new File([blob], t.preparedFile, { type: 'image/png' });
+  }
+  async function psdInput(t: Task) {
+    if (!t.psdFile) throw new Error('任务尚未取得 PSD。');
+    const blob =
+      (await readAsset(`${t.id}:psd`)) ?? (await readAsset(`${t.id}:input`));
+    if (!blob) throw new Error('PSD 不在此浏览器，请重新导入或重新下载。');
+    return new File([blob], t.psdFile, {
+      type: 'image/vnd.adobe.photoshop',
+    });
+  }
+  async function prepare(t: Task) {
+    const source = await input(t);
+    setProgress('Image 2 正在按 Live2D 规范重绘角色…');
+    update(t.id, {
+      prepState: 'queued',
+      prepMessage: '正在生成 Live2D 友好图…',
+    });
+    try {
+      const data = await serviceRequest<ArrayBuffer>('prepare', {
+        image: source,
+        name: source.name,
+      });
+      if (!isPng(data)) throw new Error('Image 2 返回的文件不是 PNG。');
+      const filename = `${t.name}-live2d-friendly.png`;
+      await saveAsset(
+        `${t.id}:prepared`,
+        new Blob([data], { type: 'image/png' }),
+      );
+      update(t.id, {
+        preparedFile: filename,
+        prepState: 'succeeded',
+        prepAccepted: false,
+        prepMessage:
+          '已生成。请确认身份、全身、双手双脚和服装完整后再提交拆分。',
+      });
+      setToast('Live2D 友好图已生成，待你确认后才会提交 See-Through。');
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Image 2 预处理失败。';
+      update(t.id, { prepState: 'failed', prepMessage: message });
+      throw error;
+    }
+  }
   async function refresh(t: Task) {
     if (!t.remoteJobId) return;
     const result = await serviceRequest<Job>('status', {
@@ -162,11 +240,9 @@ export default function App() {
       if (new TextDecoder().decode(data.slice(0, 4)) !== '8BPS')
         throw new Error('服务返回的文件不是 PSD。');
       const filename = `${t.name}.psd`;
-      await saveAsset(`${t.id}:input`, new Blob([data]));
+      await saveAsset(`${t.id}:psd`, new Blob([data]));
       update(t.id, {
         psdFile: filename,
-        inputFile: filename,
-        inputKind: 'psd',
         qaPassed: false,
       });
       setToast('PSD 已下载并保存到当前浏览器，请确认图层质量。');
@@ -181,7 +257,7 @@ export default function App() {
     return () => clearInterval(timer);
   }, [task]);
   async function generate(t: Task) {
-    const f = await input(t);
+    const f = t.psdFile ? await psdInput(t) : await input(t);
     const { generateCubism } = await import('./cubismEngine.js');
     const result = await generateCubism(f, t.name, setProgress);
     try {
@@ -209,12 +285,20 @@ export default function App() {
     if (!blob) throw new Error('文件不在此浏览器，请重新导入或生成。');
     downloadBlob(blob, filename);
   }
+  async function downloadPsd(t: Task) {
+    const file = await psdInput(t);
+    downloadBlob(file, t.psdFile!);
+  }
   async function replace(t: Task, f: File) {
     const k = validate(f);
     await saveAsset(`${t.id}:input`, f);
     update(t.id, {
       inputFile: f.name,
       inputKind: k,
+      preparedFile: undefined,
+      prepState: undefined,
+      prepMessage: undefined,
+      prepAccepted: false,
       psdFile: k === 'psd' ? f.name : undefined,
       remoteJobId: undefined,
       remoteState: undefined,
@@ -263,7 +347,7 @@ export default function App() {
               <p className="eyebrow">PRODUCTION WORKSPACE</p>
               <h1>Live2D 生产任务</h1>
               <p className="intro-copy">
-                参考图拆分 → PSD 验收 → 浏览器生成 CMO3 → Cubism 动作验收
+                参考图 → Image 2 友好化 → See-Through → PSD 验收 → CMO3
               </p>
             </div>
             <button className="primary-button" onClick={() => setCreate(true)}>
@@ -275,7 +359,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <p className="eyebrow">PRIVATE TASK SERVICE</p>
-                <h2>See-Through 任务服务</h2>
+                <h2>Image 2 + See-Through 任务服务</h2>
               </div>
               <div className="header-actions">
                 <button
@@ -296,15 +380,31 @@ export default function App() {
                   disabled={busy}
                   onClick={() =>
                     void operate(async () => {
-                      const r = await serviceRequest<{
-                        ready?: boolean;
-                        message?: string;
-                      }>('health');
-                      setConnection(
-                        r.ready
-                          ? '已连接私有任务服务'
-                          : r.message || '服务尚未就绪',
-                      );
+                      const [relay, prep] = await Promise.allSettled([
+                        serviceRequest<{ ready?: boolean; message?: string }>(
+                          'health',
+                        ),
+                        serviceRequest<{ ready?: boolean; message?: string }>(
+                          'prepHealth',
+                        ),
+                      ]);
+                      const relayMessage =
+                        relay.status === 'fulfilled'
+                          ? relay.value.ready
+                            ? 'See-Through 已就绪'
+                            : relay.value.message
+                          : relay.reason instanceof Error
+                            ? relay.reason.message
+                            : 'See-Through 不可用';
+                      const prepMessage =
+                        prep.status === 'fulfilled'
+                          ? prep.value.ready
+                            ? 'Image 2 已就绪'
+                            : prep.value.message
+                          : prep.reason instanceof Error
+                            ? prep.reason.message
+                            : 'Image 2 不可用';
+                      setConnection(`${relayMessage}；${prepMessage}`);
                     })
                   }
                 >
@@ -314,7 +414,8 @@ export default function App() {
             </div>
             <p>{connection}</p>
             <small>
-              密钥仅留在服务端。推理可后台运行；查询状态时请保持登录窗口打开。
+              Image 2 会先输出待确认的全身中立参考图；确认后才提交
+              See-Through。密钥仅留在服务端。
             </small>
           </section>
           <section className="bottom-grid">
@@ -368,7 +469,10 @@ export default function App() {
       )}
       {create && (
         <Modal title="新建生产任务" close={() => setCreate(false)}>
-          <p>文件保存在当前浏览器；仅点击提交参考图时上传到任务服务。</p>
+          <p>
+            原图保存在当前浏览器。PNG/JPG 先经 Image 2 生成待确认的 Live2D
+            友好图，确认后才会提交 See-Through；PSD 与 .stretch 不经过生图步骤。
+          </p>
           <label className="field-label">
             任务名称
             <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -420,16 +524,72 @@ export default function App() {
           <p>{task.remoteMessage}</p>
           <div className="detail-stack">
             {task.remoteJobId && <small>服务端任务：{task.remoteJobId}</small>}
+            {task.prepMessage && <small>{task.prepMessage}</small>}
+            {task.inputKind === 'image' &&
+              !task.preparedFile &&
+              !task.remoteJobId && (
+                <button
+                  className="primary-button"
+                  disabled={busy}
+                  onClick={() => void operate(() => prepare(task))}
+                >
+                  {task.prepState === 'queued'
+                    ? 'Image 2 处理中…'
+                    : '用 Image 2 生成 Live2D 友好图'}
+                </button>
+              )}
+            {task.preparedFile && (
+              <>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() =>
+                    void operate(() =>
+                      download(task, 'prepared', task.preparedFile!),
+                    )
+                  }
+                >
+                  下载 Live2D 友好图
+                </button>
+                {preparedPreview && (
+                  <figure>
+                    {/* Local Blob preview has no public URL for server image optimization. */}
+                    {/* oxlint-disable-next-line next/no-img-element */}
+                    <img
+                      className="psd-preview"
+                      src={preparedPreview}
+                      alt="经预处理的 Live2D 角色参考"
+                    />
+                    <figcaption>
+                      请核查：身份、服装、完整全身、双手双脚、附件、无遮挡裁切和纯色背景。
+                    </figcaption>
+                  </figure>
+                )}
+                {!task.prepAccepted && (
+                  <button
+                    className="ghost-button"
+                    disabled={busy}
+                    onClick={() => update(task.id, { prepAccepted: true })}
+                  >
+                    确认 Live2D 友好图通过
+                  </button>
+                )}
+              </>
+            )}
             {!task.psdFile &&
               task.inputKind !== 'stretch' &&
-              !task.remoteJobId && (
+              !task.remoteJobId &&
+              (task.inputKind !== 'image' || task.prepAccepted) && (
                 <button
                   className="primary-button"
                   disabled={busy}
                   onClick={() =>
                     void operate(async () => {
-                      const f = await input(task);
-                      setProgress('提交参考图…');
+                      const f =
+                        task.inputKind === 'image'
+                          ? await prepared(task)
+                          : await input(task);
+                      setProgress('提交 Live2D 友好图到 See-Through…');
                       const r = await serviceRequest<Job>('submit', {
                         image: f,
                         name: f.name,
@@ -447,7 +607,7 @@ export default function App() {
                     })
                   }
                 >
-                  提交参考图到 See-Through
+                  提交处理图到 See-Through
                 </button>
               )}
             {task.remoteJobId && !task.psdFile && (
@@ -485,8 +645,17 @@ export default function App() {
                 )
               }
             >
-              下载输入文件
+              下载原始输入文件
             </button>
+            {task.psdFile && (
+              <button
+                className="ghost-button"
+                disabled={busy}
+                onClick={() => void operate(() => downloadPsd(task))}
+              >
+                下载拆分 PSD
+              </button>
+            )}
             {(task.psdFile || task.inputKind === 'stretch') &&
               !task.qaPassed && (
                 <button
@@ -568,8 +737,9 @@ export default function App() {
           <ol className="guide-list">
             <li>有 PSD：直接新建任务并导入，确认图层质量后点击生成。</li>
             <li>
-              仅有原图：连接私有服务、登录、检查连接，然后在任务中提交。打开任务后每
-              10 秒查询一次真实状态。
+              仅有原图：连接私有服务、登录、检查连接，先用 Image 2
+              生成全身中立的 Live2D
+              友好图。确认身份、服装、四肢和附件都完整后才提交拆分。
             </li>
             <li>浏览器完成网格和 CMO3 导出，生成期间不要关闭页面。</li>
             <li>
@@ -583,6 +753,11 @@ export default function App() {
           <p>
             兼容路径固定 StretchyStudio
             24a83a2，使用标准自动绑定；手工原生变形器不保证无损。密钥不存入公开前端。
+          </p>
+          <p>
+            Image 2
+            使用原图做身份保持编辑，不是无约束文生图。处理图只是拆分输入，仍不等同于已绑定的
+            Live2D 模型。
           </p>
           <a
             href="https://editor.stretchy.studio/"
