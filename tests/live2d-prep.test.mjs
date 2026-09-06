@@ -32,6 +32,9 @@ test('character lock requires full-body, identity preservation and rejects topol
     '双腿',
     '不透明极浅灰纯背景',
     '额外或缺失的手指/肢体',
+    '二维平面原画',
+    '有限色阶的赛璐璐阴影',
+    '禁止照片质感',
   ])
     assert.match(prompt, new RegExp(phrase));
 });
