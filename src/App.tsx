@@ -51,6 +51,15 @@ type Job = {
   message?: string;
   error?: string;
 };
+type HistoryJob = Job & {
+  id: string;
+  name: string;
+  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  message: string;
+  created_at?: string;
+  updated_at?: string;
+  attempts?: number;
+};
 const STORAGE = 'morph.production.tasks';
 const stage = (t: Task) =>
   t.cmoAccepted
@@ -65,11 +74,13 @@ const stage = (t: Task) =>
             ? t.prepState === 'failed'
               ? '豆包生图预处理失败'
               : '待豆包生图预处理'
-          : t.remoteState === 'failed'
-                ? '拆分失败'
-                : t.remoteJobId
-                  ? '后台拆分中'
-                  : '待提交参考图';
+          : t.remoteState === 'succeeded'
+            ? 'PSD 已生成 · 待下载'
+            : t.remoteState === 'failed'
+              ? '拆分失败'
+              : t.remoteJobId
+                ? '后台拆分中'
+                : '待提交参考图';
 const kind = (f: File) =>
   /\.psd$/i.test(f.name)
     ? 'psd'
@@ -132,10 +143,14 @@ export default function App() {
     [preview, setPreview] = useState(''),
     [preparedPreview, setPreparedPreview] = useState('');
   const lock = useRef(false);
+  const historyLoaded = useRef(false);
   const task = tasks.find((t) => t.id === selected);
   const featuredTask = task ?? tasks[0];
   const runningCount = tasks.filter(
-    (t) => Boolean(t.remoteJobId) && !t.psdFile && t.remoteState !== 'failed',
+    (t) =>
+      Boolean(t.remoteJobId) &&
+      !t.psdFile &&
+      (t.remoteState === 'queued' || t.remoteState === 'running'),
   ).length;
   const deliveredCount = tasks.filter((t) => t.hasGenerated).length;
   const pipelineSteps = [
@@ -184,6 +199,44 @@ export default function App() {
   ];
   const update = (id: string, patch: Partial<Task>) =>
     setTasks((all) => all.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  async function loadServerHistory(notify = false) {
+    const records = await serviceRequest<HistoryJob[]>('history');
+    setTasks((current) => {
+      const remote = new Map(records.map((record) => [record.id, record]));
+      const localJobIds = new Set(
+        current.map((item) => item.remoteJobId).filter(Boolean),
+      );
+      const refreshed = current.map((item) => {
+        const record = item.remoteJobId
+          ? remote.get(item.remoteJobId)
+          : undefined;
+        return record
+          ? {
+              ...item,
+              remoteState: record.status,
+              remoteMessage: record.error || record.message || record.status,
+            }
+          : item;
+      });
+      const recovered = records
+        .filter((record) => !localJobIds.has(record.id))
+        .map<Task>((record) => ({
+          id: `server-${record.id}`,
+          name: record.name,
+          referenceName: `服务端任务 · ${record.id.slice(0, 8)}`,
+          inputKind: 'image',
+          remoteJobId: record.id,
+          remoteState: record.status,
+          remoteMessage: record.error || record.message || record.status,
+          createdAt: (record.created_at || record.updated_at || '服务端记录')
+            .replace('T', ' ')
+            .replace('Z', '')
+            .slice(0, 16),
+        }));
+      return [...refreshed, ...recovered];
+    });
+    if (notify) setToast(`已同步 ${records.length} 条服务端任务记录。`);
+  }
   useEffect(() => {
     try {
       const data = JSON.parse(localStorage.getItem(STORAGE) || '[]');
@@ -194,6 +247,13 @@ export default function App() {
     }
     setHydrated(true);
   }, []);
+  useEffect(() => {
+    if (!hydrated || historyLoaded.current) return;
+    historyLoaded.current = true;
+    // Public Pages may not have its authenticated bridge open yet.  In that
+    // case the explicit sync button retries after the user connects it.
+    void loadServerHistory().catch(() => {});
+  }, [hydrated]);
   useEffect(() => {
     if (hydrated) {
       try {
@@ -543,11 +603,13 @@ export default function App() {
               </div>
               <div className="header-actions">
                 <button className="ghost-button" onClick={() => { try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); } }}>连接服务</button>
+                <button className="ghost-button" disabled={busy} onClick={() => void operate(() => loadServerHistory(true))}>同步历史</button>
                 <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
                   const [relay, prep] = await Promise.allSettled([serviceRequest<{ ready?: boolean; message?: string }>('health'), serviceRequest<{ ready?: boolean; message?: string }>('prepHealth')]);
                   const relayMessage = relay.status === 'fulfilled' ? (relay.value.ready ? 'See-Through 已就绪' : relay.value.message) : relay.reason instanceof Error ? relay.reason.message : 'See-Through 不可用';
                   const prepMessage = prep.status === 'fulfilled' ? (prep.value.ready ? '豆包生图已就绪' : prep.value.message) : prep.reason instanceof Error ? prep.reason.message : '豆包生图不可用';
                   setConnection(`${relayMessage}；${prepMessage}`);
+                  if (relay.status === 'fulfilled') await loadServerHistory();
                 })}>检查服务</button>
               </div>
             </div>
@@ -722,7 +784,9 @@ export default function App() {
                 disabled={busy}
                 onClick={() => void operate(() => refresh(task))}
               >
-                刷新状态 / 拉取 PSD
+                {task.remoteState === 'succeeded'
+                  ? '下载服务端 PSD'
+                  : '刷新状态 / 拉取 PSD'}
               </button>
             )}
             <label className="field-label">
@@ -868,7 +932,7 @@ export default function App() {
             </li>
           </ol>
           <p>
-            文件与任务记录保存在此浏览器，清除站点数据或更换设备不会自动恢复，请及时下载备份。服务端任务持久化不等于永久资产存储。
+            本机文件和 Cubism 产物保存在此浏览器；服务端队列记录会自动同步，因此刷新或更换浏览器仍可看到任务状态。PSD 成功后请尽快下载备份，服务端任务持久化不等于永久资产存储。
           </p>
           <p>
             兼容路径固定 StretchyStudio

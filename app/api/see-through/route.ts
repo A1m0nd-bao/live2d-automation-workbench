@@ -12,6 +12,11 @@ type RelayJob = {
   attempts: number;
 };
 
+type RelayHistoryJob = RelayJob & {
+  created_at: string;
+  updated_at: string;
+};
+
 function relayUrl() {
   return (process.env.SEE_THROUGH_RELAY_URL ?? '').replace(/\/$/, '');
 }
@@ -70,9 +75,19 @@ export async function GET(request: Request) {
     );
   const url = new URL(request.url);
   const jobId = url.searchParams.get('jobId');
+  const history = url.searchParams.get('history') === '1';
   if (jobId && !/^[a-f0-9]{32}$/.test(jobId))
     return json({ error: '任务 ID 无效。' }, 400);
   try {
+    if (history) {
+      const requested = Number(url.searchParams.get('limit') ?? '40');
+      const limit = Number.isInteger(requested)
+        ? Math.min(Math.max(requested, 1), 100)
+        : 40;
+      const jobs = await relay(`/jobs?limit=${limit}`);
+      if (!jobs.ok) return json({ error: await errorText(jobs) }, jobs.status);
+      return json((await jobs.json()) as RelayHistoryJob[]);
+    }
     if (!jobId) {
       const health = await relay('/health');
       if (!health.ok)

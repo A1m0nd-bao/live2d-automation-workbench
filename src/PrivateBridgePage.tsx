@@ -48,6 +48,8 @@ export default function PrivateBridgePage() {
           if (!/^[a-f0-9]{32}$/.test(payload?.jobId ?? ''))
             throw new Error('任务 ID 无效。');
           path += `?jobId=${payload.jobId}${command === 'output' ? '&output=1' : ''}`;
+        } else if (command === 'history') {
+          path += '?history=1';
         } else if (command !== 'health' && command !== 'prepHealth') {
           throw new Error('不支持的请求。');
         }

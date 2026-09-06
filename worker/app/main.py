@@ -45,6 +45,13 @@ class JobStatus(BaseModel):
     attempts: int
 
 
+class JobHistory(JobStatus):
+    """A durable queue record, including the timestamps needed by clients."""
+
+    created_at: str
+    updated_at: str
+
+
 def db() -> sqlite3.Connection:
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
@@ -67,6 +74,10 @@ def init_db() -> None:
 
 def row_to_job(row: sqlite3.Row) -> JobStatus:
     return JobStatus(**dict(row))
+
+
+def row_to_history(row: sqlite3.Row) -> JobHistory:
+    return JobHistory(**dict(row))
 
 
 def get_job(job_id: str) -> JobStatus:
@@ -327,6 +338,19 @@ async def create_job(image: UploadFile = File(...), name: str = "character", x_r
         connection.execute("INSERT INTO jobs (id, name, status, message) VALUES (?, ?, 'queued', '已建立服务端任务')", (job_id, name[:120]))
     asyncio.create_task(monitor(job_id))
     return get_job(job_id)
+
+
+@app.get("/jobs", response_model=list[JobHistory])
+async def list_jobs(limit: int = 40, x_relay_token: str | None = Header(default=None)) -> list[JobHistory]:
+    """Return recent queue records so a fresh browser can recover its history."""
+    require_relay_token(x_relay_token)
+    safe_limit = min(max(limit, 1), 100)
+    with db() as connection:
+        rows = connection.execute(
+            "SELECT * FROM jobs ORDER BY updated_at DESC, created_at DESC LIMIT ?",
+            (safe_limit,),
+        ).fetchall()
+    return [row_to_history(row) for row in rows]
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)

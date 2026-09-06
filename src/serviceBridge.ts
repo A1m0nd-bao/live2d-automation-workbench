@@ -47,7 +47,14 @@ export function connectService() {
 }
 
 export async function serviceRequest<T>(
-  command: 'health' | 'prepare' | 'prepHealth' | 'submit' | 'status' | 'output',
+  command:
+    | 'health'
+    | 'history'
+    | 'prepare'
+    | 'prepHealth'
+    | 'submit'
+    | 'status'
+    | 'output',
   payload: { image?: Blob; name?: string; jobId?: string } = {},
 ): Promise<T> {
   if (window.location.origin === SERVICE_ORIGIN) {
@@ -67,6 +74,7 @@ export async function serviceRequest<T>(
         throw new Error('任务 ID 无效');
       path += `?jobId=${payload.jobId}${command === 'output' ? '&output=1' : ''}`;
     }
+    if (command === 'history') path += '?history=1';
     const response = await fetch(path, {
       ...init,
       signal: AbortSignal.timeout(command === 'prepare' ? 240_000 : 80_000),
