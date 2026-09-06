@@ -18,6 +18,8 @@
  * @module io/live2d/moc3writer
  */
 
+import { buildRuntimeExportPlan } from './exportPlan.js';
+
 // Source: [ref][py-moc3] — format constants from reference file + py-moc3
 const MAGIC = [0x4D, 0x4F, 0x43, 0x33]; // "MOC3"
 const HEADER_SIZE = 64;
@@ -330,10 +332,12 @@ function buildSectionData(input) {
   const sections = new Map();
   const counts = new Array(COUNT_INFO_ENTRIES).fill(0);
 
-  // Collect parts (groups → Live2D Parts)
-  const groups = project.nodes.filter(n => n.type === 'group');
-  // Always have at least one root part
-  const partNodes = groups.length > 0 ? groups : [{ id: 'PartRoot', name: 'Root', parent: null, opacity: 1, visible: true }];
+  // Every drawable gets a real Part, as well as structural group Parts. This
+  // makes a motion3 PartOpacity curve addressable per replacement layer.
+  const runtimePlan = buildRuntimeExportPlan(project);
+  const partNodes = runtimePlan.parts.length > 0
+    ? runtimePlan.parts
+    : [{ id: 'PartRoot', sourceId: 'PartRoot', name: 'Root', parent: null, visible: true }];
 
   // Collect art meshes (parts with meshes → Live2D ArtMeshes).
   // Sort by draw_order (descending) to maintain correct depth ordering (upstream fix).
@@ -403,7 +407,10 @@ function buildSectionData(input) {
 
   // Build Part ID → index map
   const partIdMap = new Map();
-  partNodes.forEach((p, i) => partIdMap.set(p.id, i));
+  partNodes.forEach((p, i) => {
+    partIdMap.set(p.id, i);
+    partIdMap.set(p.sourceId, i);
+  });
 
   // --- Counts ---
   const numParts = partNodes.length;
@@ -505,7 +512,9 @@ function buildSectionData(input) {
   sections.set('art_mesh.visibles', meshParts.map(p => p.visible !== false));
   sections.set('art_mesh.enables', meshParts.map(() => true));
   sections.set('art_mesh.parent_part_indices', meshParts.map(p => {
-    if (p.parent && partIdMap.has(p.parent)) return partIdMap.get(p.parent);
+    // The mesh's own Part owns visibility/opacity; its Part is then nested
+    // under the source group Part in the canonical plan.
+    if (partIdMap.has(p.id)) return partIdMap.get(p.id);
     return 0; // default to first part
   }));
   sections.set('art_mesh.parent_deformer_indices', meshParts.map(p =>
@@ -536,7 +545,9 @@ function buildSectionData(input) {
   sections.set('part_keyform.draw_orders', partNodes.map(() => 500.0));
 
   // --- ArtMesh Keyform sections ---
-  sections.set('art_mesh_keyform.opacities', meshParts.map(p => p.opacity ?? 1));
+  // Initial hidden states live on their owning Parts. Keeping every drawable
+  // at full opacity lets PartOpacity motion curves reveal alternate layers.
+  sections.set('art_mesh_keyform.opacities', meshParts.map(() => 1));
   sections.set('art_mesh_keyform.draw_orders', meshParts.map(() => 500.0));
   sections.set('art_mesh_keyform.keyform_position_begin_indices', meshInfos.map(m => m.keyformPositionBeginIndex));
 

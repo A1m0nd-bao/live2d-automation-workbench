@@ -15,6 +15,7 @@ import { packTextureAtlas } from './textureAtlas.js';
 import { generateCmo3 } from './cmo3writer.js';
 import { generateCan3 } from './can3writer.js';
 import { matchTag } from '../armatureOrganizer.js';
+import { buildRuntimeExportPlan } from './exportPlan.js';
 
 /**
  * @typedef {Object} ExportOptions
@@ -42,6 +43,7 @@ export async function exportLive2D(project, images, opts = {}) {
 
   const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
+  const runtimePlan = buildRuntimeExportPlan(project);
 
   // --- Step 1: Pack textures ---
   onProgress('Packing texture atlas...');
@@ -104,7 +106,10 @@ export async function exportLive2D(project, images, opts = {}) {
     for (const anim of project.animations) {
       const sanitized = sanitizeName(anim.name);
       const filename = `${sanitized}.motion3.json`;
-      const motion = generateMotion3Json(anim, { parameterMap });
+      const motion = generateMotion3Json(anim, {
+        parameterMap,
+        partIdMap: runtimePlan.partIdByNodeId,
+      });
       motionFolder.file(filename, JSON.stringify(motion, null, '\t'));
       motionFiles.push(`motion/${filename}`);
     }
@@ -123,9 +128,9 @@ export async function exportLive2D(project, images, opts = {}) {
       name: p.name ?? p.id,
       groupId: p.groupId,
     })),
-    parts: groups.map(g => ({
-      id: g.id,
-      name: g.name ?? g.id,
+    parts: runtimePlan.parts.map(part => ({
+      id: part.id,
+      name: part.name,
     })),
   });
 
@@ -142,6 +147,13 @@ export async function exportLive2D(project, images, opts = {}) {
   });
 
   zip.file(`${modelName}.model3.json`, JSON.stringify(model3, null, '\t'));
+  zip.file('runtime-export-manifest.json', JSON.stringify({
+    version: 1,
+    parts: runtimePlan.parts.map(({ id, sourceId, name, parent, visible }) => ({
+      id, sourceId, name, parent, visible,
+    })),
+    motions: motionFiles,
+  }, null, '\t'));
 
   // --- Step 6: Package ZIP ---
   onProgress('Creating ZIP...');

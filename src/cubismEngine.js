@@ -57,8 +57,10 @@ function buildVariantAnimations(variants, layers, ids) {
         nodeId: ids[index],
         property: 'opacity',
         keyframes: [
-          { time: 0, value: selected ? 0 : 1 },
-          { time: 120, value: selected ? 1 : 0 },
+          // A state clip should apply atomically when playback starts.  A
+          // stepped hold avoids the transparent, no-hand intermediate state.
+          { time: 0, value: selected ? 1 : 0 },
+          { time: 120, value: selected ? 1 : 0, easing: 'stepped' },
         ],
       });
     }

@@ -31,10 +31,11 @@
  * @param {object} [opts]
  * @param {boolean} [opts.loop=true] - Whether the motion should loop
  * @param {Map<string, string>} [opts.parameterMap] - nodeId+property → Live2D parameter ID
+ * @param {Map<string, string>} [opts.partIdMap] - source node ID → runtime Part ID
  * @returns {object} JSON-serializable .motion3.json structure
  */
 export function generateMotion3Json(animation, opts = {}) {
-  const { loop = true, parameterMap = new Map() } = opts;
+  const { loop = true, parameterMap = new Map(), partIdMap = new Map() } = opts;
 
   const durationSec = (animation.duration ?? 2000) / 1000;
   const fps = animation.fps ?? 24;
@@ -71,7 +72,7 @@ export function generateMotion3Json(animation, opts = {}) {
     }
 
     // Determine the Live2D target and ID for this track
-    const mapping = resolveTrackMapping(track, parameterMap);
+    const mapping = resolveTrackMapping(track, parameterMap, partIdMap);
     if (!mapping) continue;
 
     const { target, id } = mapping;
@@ -115,7 +116,7 @@ export function generateMotion3Json(animation, opts = {}) {
  * @param {Map<string, string>} parameterMap
  * @returns {{ target: string, id: string } | null}
  */
-function resolveTrackMapping(track, parameterMap) {
+function resolveTrackMapping(track, parameterMap, partIdMap) {
   const key = `${track.nodeId}.${track.property}`;
 
   // Check explicit mapping first
@@ -123,9 +124,11 @@ function resolveTrackMapping(track, parameterMap) {
     return { target: 'Parameter', id: parameterMap.get(key) };
   }
 
-  // Default mapping: opacity → Part opacity
+  // Opacity curves must target the stable MOC3 Part ID, never the temporary
+  // source node UUID created while importing the PSD.
   if (track.property === 'opacity') {
-    return { target: 'PartOpacity', id: track.nodeId };
+    const partId = partIdMap.get(track.nodeId);
+    return partId ? { target: 'PartOpacity', id: partId } : null;
   }
 
   // Properties like x, y, rotation, scaleX, scaleY need explicit parameterMap
