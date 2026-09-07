@@ -20,6 +20,7 @@ import {
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import { isJpeg, isPng } from './live2dPrep';
+import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import './production.css';
 
@@ -44,6 +45,9 @@ type Task = {
   hasGenerated?: boolean;
   cmoAccepted?: boolean;
   warnings?: string[];
+  mode?: 'standard' | 'pro';
+  proStateIds?: string[];
+  proStage?: 'persona_lock' | 'base_processing' | 'base_psd_ready' | 'state_generation' | 'state_decomposition' | 'merge_ready';
 };
 type Job = {
   jobId?: string;
@@ -62,7 +66,13 @@ type HistoryJob = Job & {
 };
 const STORAGE = 'morph.production.tasks';
 const stage = (t: Task) =>
-  t.cmoAccepted
+  t.mode === 'pro' && t.proStage === 'base_psd_ready'
+    ? 'Pro：基础 PSD 已就绪 · 待状态图'
+    : t.mode === 'pro' && t.proStage === 'state_generation'
+      ? 'Pro：等待状态图生成'
+      : t.mode === 'pro' && t.proStage === 'persona_lock'
+        ? 'Pro：等待基础状态处理'
+        : t.cmoAccepted
     ? '运行时包已验收'
     : t.hasGenerated
       ? '运行时包已生成 · 待验收'
@@ -216,6 +226,13 @@ export default function App() {
     [guide, setGuide] = useState(false);
   const [name, setName] = useState(''),
     [file, setFile] = useState<File | null>(null);
+  const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
+  const [proStateIds, setProStateIds] = useState<string[]>([
+    'action_02_wave_arms_only',
+    'action_03_hand_on_hip_arms_only',
+    'action_04_arms_crossed_crossed_arms',
+    'action_05_thinking_arms_only',
+  ]);
   const [toast, setToast] = useState(''),
     [connection, setConnection] = useState(
       '尚未连接；已有 PSD 可直接本地生成。',
@@ -488,6 +505,12 @@ export default function App() {
     await submitToSeeThrough(t, preparedImage);
     setToast('已自动生成友好图并提交 See-Through；PSD 完成后会自动下载。');
   }
+  async function startProBasePipeline(t: Task) {
+    update(t.id, { proStage: 'base_processing' });
+    const preparedImage = await prepare(t);
+    await submitToSeeThrough(t, preparedImage);
+    setToast('Pro 基础状态已提交 See-Through；基础 PSD 完成后将进入多状态生成。');
+  }
   async function refresh(t: Task) {
     if (!t.remoteJobId) return;
     const result = await serviceRequest<Job>('status', {
@@ -511,6 +534,16 @@ export default function App() {
         psdFile: filename,
         qaPassed: true,
       });
+      if (t.mode === 'pro') {
+        update(t.id, {
+          psdFile: filename,
+          qaPassed: false,
+          proStage: 'base_psd_ready',
+          remoteMessage: '基础 PSD 已就绪。下一步将按 Persona Lock 生成并拆分所选状态图。',
+        });
+        setToast('Pro 基础 PSD 已保存；状态图生成与差分合并入口已准备。');
+        return;
+      }
       setProgress('PSD 已下载，正在自动生成运行时包…');
       try {
         await generate(readyTask);
@@ -769,6 +802,45 @@ export default function App() {
             原图保存在当前浏览器。PNG/JPG 上传后会自动生成 Live2D 友好图、提交
             See-Through、轮询下载 PSD 并尝试生成运行时包；PSD 与 .stretch 不经过生图步骤。
           </p>
+          <fieldset className="workflow-mode">
+            <button
+              type="button"
+              className={productionMode === 'standard' ? 'is-selected' : ''}
+              onClick={() => setProductionMode('standard')}
+            >
+              <b>标准 Live2D</b><small>单图拆层与基础交付</small>
+            </button>
+            <button
+              type="button"
+              className={productionMode === 'pro' ? 'is-selected' : ''}
+              onClick={() => setProductionMode('pro')}
+            >
+              <b>Live2D Pro</b><small>同角色多动作 / 表情差分</small>
+            </button>
+          </fieldset>
+          {productionMode === 'pro' && (
+            <section className="pro-state-picker">
+              <b>选择首批状态</b>
+              <small>基础 PSD 完成后，这些状态会按同一 Persona Lock 逐一生成、拆层与合并。</small>
+              <div>
+                {LIVE2D_PRO_STATES.map((state) => {
+                  const checked = proStateIds.includes(state.id);
+                  return (
+                    <label key={state.id}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => setProStateIds((current) =>
+                          checked ? current.filter((id) => id !== state.id) : [...current, state.id],
+                        )}
+                      />
+                      {state.label}<small>{state.kind === 'action' ? '动作' : '表情'}</small>
+                    </label>
+                  );
+                })}
+              </div>
+            </section>
+          )}
           <label className="field-label">
             任务名称
             <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -791,6 +863,15 @@ export default function App() {
                 const k = validate(file),
                   id = crypto.randomUUID();
                 await saveAsset(`${id}:input`, file);
+                const selectedStates = productionMode === 'pro' ? selectedProStates(proStateIds) : [];
+                if (productionMode === 'pro' && !selectedStates.length)
+                  throw new Error('Live2D Pro 至少选择一个动作或表情状态。');
+                if (productionMode === 'pro') {
+                  const manifest = buildLive2DProManifest(file.name, proStateIds);
+                  await saveAsset(`${id}:pro-manifest`, new Blob([
+                    JSON.stringify(manifest, null, 2),
+                  ], { type: 'application/json' }));
+                }
                 const next: Task = {
                   id,
                   name: name.trim(),
@@ -799,13 +880,21 @@ export default function App() {
                   inputKind: k,
                   psdFile: k === 'psd' ? file.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
+                  mode: productionMode,
+                  proStateIds: productionMode === 'pro' ? proStateIds : undefined,
+                  proStage: productionMode === 'pro'
+                    ? (k === 'image' ? 'persona_lock' : 'base_psd_ready')
+                    : undefined,
                 };
                 setTasks((all) => [next, ...all]);
                 setSelected(id);
                 setCreate(false);
                 setName('');
                 setFile(null);
-                if (k === 'image') await startImagePipeline(next);
+                if (k === 'image') {
+                  if (productionMode === 'pro') await startProBasePipeline(next);
+                  else await startImagePipeline(next);
+                }
               })
             }
           >
@@ -820,6 +909,25 @@ export default function App() {
           <div className="detail-stack">
             {task.remoteJobId && <small>服务端任务：{task.remoteJobId}</small>}
             {task.prepMessage && <small>{task.prepMessage}</small>}
+            {task.mode === 'pro' && (
+              <section className="pro-task-card">
+                <p className="eyebrow">LIVE2D PRO</p>
+                <b>Persona Lock + 多状态差分</b>
+                <small>
+                  已选择：{selectedProStates(task.proStateIds ?? []).map((state) => state.label).join('、') || '尚未选择'}
+                </small>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() => void operate(() => download(task, 'pro-manifest', `${task.name}-live2d-pro-manifest.json`))}
+                >
+                  下载 Pro 状态清单与提示词约束
+                </button>
+                {task.proStage === 'base_psd_ready' && (
+                  <small>基础 PSD 已完成。下一项是批量状态生图、逐张 See-Through 拆层与语义差分合并。</small>
+                )}
+              </section>
+            )}
             {task.inputKind === 'image' &&
               !task.preparedFile &&
               !task.remoteJobId &&
@@ -1017,6 +1125,10 @@ export default function App() {
               仅有原图：连接私有服务、登录、检查连接，先用豆包生图
               生成全身中立的 Live2D
               友好图。确认身份、服装、四肢和附件都完整后才提交拆分。
+            </li>
+            <li>
+              Live2D Pro：先验收基础 PSD，再按同一 Persona Lock 生成所选动作和表情；每张状态图分别拆层，
+              通过语义差分检查后合并为隐藏状态层。
             </li>
             <li>浏览器完成网格和规范化运行时导出，生成期间不要关闭页面。</li>
             <li>

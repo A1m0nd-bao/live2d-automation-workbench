@@ -131,6 +131,61 @@ button:disabled {
   min-width: 0;
   width: 100%;
 }
+.workflow-mode {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 18px 0;
+  min-inline-size: 0;
+  padding: 0;
+  border: 0;
+}
+.workflow-mode button {
+  display: grid;
+  gap: 3px;
+  padding: 13px;
+  border: 1px solid #c9d3e2;
+  border-radius: 10px;
+  background: #fff;
+  color: #26364b;
+  text-align: left;
+}
+.workflow-mode button.is-selected {
+  border-color: #385fbd;
+  background: #edf3ff;
+  box-shadow: inset 0 0 0 1px #385fbd;
+}
+.workflow-mode small, .pro-state-picker small, .pro-task-card small {
+  color: #65758b;
+  font-size: 12px;
+}
+.pro-state-picker, .pro-task-card {
+  display: grid;
+  gap: 9px;
+  margin: 16px 0;
+  padding: 13px;
+  border: 1px solid #d9e4fb;
+  border-radius: 10px;
+  background: #f7f9ff;
+}
+.pro-state-picker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pro-state-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid #d6dfed;
+  border-radius: 999px;
+  background: white;
+  font-size: 12px;
+}
+.pro-state-picker label small { color: #8391a5; }
+.pro-task-card { margin-top: 0; }
+.pro-task-card .ghost-button { justify-self: start; }
 .production-visual {
   position: relative;
   height: 190px;
