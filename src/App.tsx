@@ -170,6 +170,44 @@ async function assertLive2dFriendlyFrame(source: Blob) {
   }
 }
 
+/**
+ * See-Through's current inference canvas is square.  Feeding it a 2:3 image
+ * directly makes some deployments centre-crop the legs before decomposition.
+ * Preserve every source pixel by centring the validated portrait on a square,
+ * transparent canvas instead of scaling or cropping it.
+ */
+async function padForSeeThrough(source: File) {
+  const url = URL.createObjectURL(source);
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('无法读取待提交的 Live2D 友好图。'));
+      image.src = url;
+    });
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    if (!width || !height) throw new Error('待提交的 Live2D 友好图尺寸无效。');
+    const edge = Math.max(width, height);
+    const canvas = document.createElement('canvas');
+    canvas.width = edge;
+    canvas.height = edge;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('浏览器无法创建 See-Through 安全画布。');
+    context.clearRect(0, 0, edge, edge);
+    context.drawImage(image, Math.round((edge - width) / 2), 0);
+    const png = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/png'),
+    );
+    if (!png) throw new Error('无法生成 See-Through 安全画布。');
+    return new File([png], source.name.replace(/\.[^.]+$/, '.png'), {
+      type: 'image/png',
+    });
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]),
     [hydrated, setHydrated] = useState(false);
@@ -430,14 +468,19 @@ export default function App() {
     const f =
       preparedImage ??
       (t.inputKind === 'image' ? await prepared(t) : await input(t));
-    setProgress('提交 Live2D 友好图到 See-Through…');
-    const r = await serviceRequest<Job>('submit', { image: f, name: f.name });
+    const splitterInput = await padForSeeThrough(f);
+    setProgress('已保留全身安全留白，提交到 See-Through…');
+    const r = await serviceRequest<Job>('submit', {
+      image: splitterInput,
+      name: splitterInput.name,
+    });
     if (!r.jobId)
       throw new Error(r.error || '服务未返回任务编号，请检查服务端后再重试。');
     update(t.id, {
       remoteJobId: r.jobId,
       remoteState: 'queued',
-      remoteMessage: r.message || '已提交，后台将自动下载 PSD。',
+      remoteMessage:
+        r.message || '已按全身安全画布提交，后台将自动下载 PSD。',
     });
   }
   async function startImagePipeline(t: Task) {
