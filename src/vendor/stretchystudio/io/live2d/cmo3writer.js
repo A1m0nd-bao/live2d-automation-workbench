@@ -3350,16 +3350,18 @@ export async function generateCmo3(input) {
             // 0.55 × BZ_W ≈ 15px for girl's BZ_W=730, down from 22px.
             const cfS = cf - spineCfShifts[r];
             const bowFactor = 1.5 * Math.sin(Math.PI * cfS) - 0.5; // +1 at spine, -0.5 at edges
-            pos[idx] += sign * 0.035 * t * bowFactor * BZ_W;
+            // Keep the torso lean readable without twisting the silhouette.
+            // The previous amplitude was too strong on narrow, full-body PSDs.
+            pos[idx] += sign * 0.022 * t * bowFactor * BZ_W;
 
             // Plus a uniform lean component (whole body shifts, not just bows).
             // Also reduced for the same reason: 0.02+0.015 → 0.015+0.01.
             const perspCf = sign < 0 ? cf : (1 - cf);
-            pos[idx] += sign * (0.015 + 0.01 * perspCf) * t * BZ_W;
+            pos[idx] += sign * (0.009 + 0.006 * perspCf) * t * BZ_W;
 
             // Y: lean side drops, far side rises — 3D depth. Measured spine
             // midpoint replaces fixed 0.5 so vertical kick aligns with spine.
-            const yShift = -sign * 0.025 * (0.5 - cfS) * t;
+            const yShift = -sign * 0.014 * (0.5 - cfS) * t;
             pos[idx + 1] += yShift * BZ_H;
           }
         }
