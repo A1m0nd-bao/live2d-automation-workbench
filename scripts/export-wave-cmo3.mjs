@@ -44,11 +44,10 @@ const actionIds = [
   'action_03_hand_on_hip_arms_only',
   'action_04_arms_crossed_crossed_arms',
   'action_05_thinking_arms_only',
-  'action_06_lean_forward_greeting_upper_body',
 ];
 const actions = actionIds.map((id) => manifest.variants.find((variant) => variant.id === id));
 if (actions.some((action) => !action)) {
-  throw new Error('PSD 缺少多动作导出所需的 action_02 至 action_06 图层组。');
+  throw new Error('PSD 缺少多动作导出所需的 action_02 至 action_05 图层组。');
 }
 const stateCount = actions.length + 1; // 0 = neutral, 1..5 = actionIds order
 const alternatePartByName = new Map();
