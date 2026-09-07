@@ -34,6 +34,7 @@ RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
 # A revocable browser-facing key. This is intentionally separate from the
 # relay-to-relay credential and from the ModelScope upstream API token.
 DEVICE_TOKEN = os.environ.get("MORPH_DEVICE_TOKEN", "")
+LOCAL_BOOTSTRAP = os.environ.get("MORPH_LOCAL_BOOTSTRAP", "").lower() in {"1", "true", "yes"}
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
@@ -356,6 +357,14 @@ async def health() -> dict[str, bool | str | int]:
         "split_limbs": SPLIT_LIMBS,
         "version": "stage-diagnostics-v1",
     }
+
+
+@app.get("/local-bootstrap")
+async def local_bootstrap(origin: str | None = Header(default=None)) -> dict[str, str]:
+    """One-click browser setup, available only from the loopback desktop bridge."""
+    if not LOCAL_BOOTSTRAP or not DEVICE_TOKEN or origin not in ALLOWED_ORIGINS:
+        raise HTTPException(status_code=404, detail="Local bootstrap is unavailable")
+    return {"deviceToken": DEVICE_TOKEN}
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)

@@ -13,6 +13,16 @@ let nonce = '';
 let listening = false;
 const pending = new Map<string, Pending>();
 
+function isRelayUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ||
+      (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost'));
+  } catch {
+    return false;
+  }
+}
+
 export function getDirectServiceConfig(): DirectServiceConfig | null {
   try {
     const value = JSON.parse(localStorage.getItem(DIRECT_SERVICE_STORAGE) || 'null');
@@ -20,7 +30,7 @@ export function getDirectServiceConfig(): DirectServiceConfig | null {
       value &&
       typeof value.relayUrl === 'string' &&
       typeof value.deviceToken === 'string' &&
-      /^https:\/\//.test(value.relayUrl) &&
+      isRelayUrl(value.relayUrl) &&
       value.deviceToken.length >= 16
     )
       return { relayUrl: value.relayUrl.replace(/\/$/, ''), deviceToken: value.deviceToken };
@@ -36,8 +46,8 @@ export function saveDirectServiceConfig(config: DirectServiceConfig | null) {
     return;
   }
   const relayUrl = config.relayUrl.trim().replace(/\/$/, '');
-  if (!/^https:\/\//.test(relayUrl))
-    throw new Error('Relay 地址必须是 HTTPS URL。');
+  if (!isRelayUrl(relayUrl))
+    throw new Error('Relay 地址须为 HTTPS，或本机 http://127.0.0.1 / localhost。');
   if (config.deviceToken.trim().length < 16)
     throw new Error('设备密钥至少需要 16 个字符。');
   localStorage.setItem(DIRECT_SERVICE_STORAGE, JSON.stringify({
@@ -48,6 +58,14 @@ export function saveDirectServiceConfig(config: DirectServiceConfig | null) {
 
 export function hasDirectServiceConfig() {
   return Boolean(getDirectServiceConfig());
+}
+
+export async function connectLocalRelay() {
+  const relayUrl = 'http://127.0.0.1:7861';
+  const response = await fetch(`${relayUrl}/local-bootstrap`, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error('未发现本机常驻桥接。');
+  const data = await response.json() as { deviceToken?: string };
+  saveDirectServiceConfig({ relayUrl, deviceToken: data.deviceToken || '' });
 }
 
 async function directServiceRequest<T>(

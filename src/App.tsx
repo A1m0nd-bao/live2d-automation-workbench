@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import {
   connectService,
+  connectLocalRelay,
   getDirectServiceConfig,
   hasDirectServiceConfig,
   saveDirectServiceConfig,
@@ -847,6 +848,11 @@ export default function App() {
                   }
                   try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); }
                 }}>{hasDirectServiceConfig() ? '直连已启用' : '连接服务'}</button>
+                <button className="ghost-button" disabled={busy || hasDirectServiceConfig()} onClick={() => void operate(async () => {
+                  await connectLocalRelay();
+                  setConnection('本机常驻桥接已接入；无需登录窗口。');
+                  await loadServerHistory();
+                })}>接入本机桥接</button>
                 <button className="ghost-button" onClick={() => {
                   const config = getDirectServiceConfig();
                   setDirectRelayUrl(config?.relayUrl || '');
