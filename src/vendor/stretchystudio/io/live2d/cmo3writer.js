@@ -229,7 +229,8 @@ export async function generateCmo3(input) {
       const [, pid] = x.shared('CParameterGuid', { uuid: uuid(), note: action.id });
       definition = {
         pid, id: action.id, name: action.name ?? action.id,
-        min: 0, max: 1, defaultVal: 0, decimalPlaces: 0,
+        min: action.min ?? 0, max: action.max ?? 1,
+        defaultVal: action.defaultVal ?? 0, decimalPlaces: 0,
       };
       paramDefs.push(definition);
     }
@@ -837,7 +838,8 @@ export async function generateCmo3(input) {
     const actionSwitch = m.actionSwitch ?? null;
     const actionParamPid = actionSwitch ? actionParamPids.get(actionSwitch.id) : null;
     const hasActionSwitch = !!actionParamPid &&
-      (actionSwitch.state === 'base' || actionSwitch.state === 'alternate');
+      (Array.isArray(actionSwitch.stateOpacities) ||
+        actionSwitch.state === 'base' || actionSwitch.state === 'alternate');
     const [kfBinding, pidKfb] = x.shared('KeyformBindingSource');
     const [kfGridMesh, pidKfgMesh] = x.shared('KeyformGridSource');
 
@@ -845,9 +847,42 @@ export async function generateCmo3(input) {
     let pidFormClosed = null;
     let bakedFormGuids = null;
     let neckCornerFormGuids = null; // [pidForm_-30, pidForm_+30]; 0 reuses pidFormMesh
-    let actionFormGuids = null; // [base form, alternate form]
+    let actionFormGuids = null; // one form per state for multi-action swaps
 
     if (hasActionSwitch) {
+      if (Array.isArray(actionSwitch.stateOpacities)) {
+        const stateCount = actionSwitch.stateOpacities.length;
+        actionFormGuids = [pidFormMesh];
+        for (let state = 1; state < stateCount; state += 1) {
+          const [, pidForm] = x.shared('CFormGuid', {
+            uuid: uuid(), note: `${meshName}_action_state_${state}`,
+          });
+          actionFormGuids.push(pidForm);
+        }
+        const kfog = x.sub(kfGridMesh, 'array_list', {
+          'xs.n': 'keyformsOnGrid', count: String(stateCount),
+        });
+        for (let state = 0; state < stateCount; state += 1) {
+          const kog = x.sub(kfog, 'KeyformOnGrid');
+          const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
+          const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
+          const kon = x.sub(kop, 'KeyOnParameter');
+          x.subRef(kon, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
+          x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = String(state);
+          x.subRef(kog, 'CFormGuid', actionFormGuids[state], { 'xs.n': 'keyformGuid' });
+        }
+        const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
+        x.subRef(kb, 'KeyformBindingSource', pidKfb);
+        x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
+        x.subRef(kfBinding, 'CParameterGuid', actionParamPid, { 'xs.n': 'parameterGuid' });
+        const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: String(stateCount) });
+        for (let state = 0; state < stateCount; state += 1) x.sub(keys, 'f').text = String(state);
+        x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
+        x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
+        x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
+        x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
+        x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = actionSwitch.id;
+      } else {
       // Cross-fade whole replacement parts over a configurable middle range.
       // The two endpoints keep a clean pose, while values between them blend
       // the old and new artwork. Cubism's CMO reader supports LINEAR here.
@@ -884,6 +919,7 @@ export async function generateCmo3(input) {
       x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
       x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
       x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = actionSwitch.id;
+      }
     } else if (hasBakedKeyforms) {
       // Multiple keyforms to reduce linear interpolation shrinkage
       bakedFormGuids = [];
@@ -1023,6 +1059,7 @@ export async function generateCmo3(input) {
       mi, meshName, meshId, pngPath, drawOrder: m.drawOrder ?? (500 + mi),
       pidDrawable, pidFormMesh, bakedFormGuids, pidFormClosed,
       neckCornerFormGuids, actionFormGuids, actionState: actionSwitch?.state ?? null,
+      actionStateOpacities: actionSwitch?.stateOpacities ?? null,
       pidMiGuid, pidTexGuid, pidExtMesh, pidExtTex, pidEmesh,
       pidImg, pidLayer,
       pidFset, pidTex2d, pidTie, pidTimi,
@@ -3834,13 +3871,18 @@ export async function generateCmo3(input) {
     };
 
     if (pm.actionFormGuids) {
-      // The source PSD contains a whole base arm mesh and a whole wave arm
-      // mesh. Give both action values the same geometry and change only the
-      // opacity; the nearest-neighbour binding above makes this a hard swap.
-      const isAlternate = pm.actionState === 'alternate';
-      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '2' });
-      emitArtMeshForm(kfList, pm.actionFormGuids[0], verts, isAlternate ? 0 : 1);
-      emitArtMeshForm(kfList, pm.actionFormGuids[1], verts, isAlternate ? 1 : 0);
+      const opacities = Array.isArray(pm.actionStateOpacities)
+        ? pm.actionStateOpacities
+        : (() => {
+            const isAlternate = pm.actionState === 'alternate';
+            return isAlternate ? [0, 1] : [1, 0];
+          })();
+      const kfList = x.sub(meshSrc, 'carray_list', {
+        'xs.n': 'keyforms', count: String(pm.actionFormGuids.length),
+      });
+      for (let state = 0; state < pm.actionFormGuids.length; state += 1) {
+        emitArtMeshForm(kfList, pm.actionFormGuids[state], verts, opacities[state] ?? 0);
+      }
     } else if (pm.hasBakedKeyforms) {
       // Keyforms to prevent interpolation shrinkage
       // Compute baked vertex positions by rotating each vertex around the elbow pivot
