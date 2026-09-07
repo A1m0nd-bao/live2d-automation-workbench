@@ -46,6 +46,8 @@ ALLOWED_ORIGINS = [
 INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
 SPLIT_LIMBS = os.environ.get("SEE_THROUGH_SPLIT_LIMBS", "true").lower() in {"1", "true", "yes"}
 MAX_ATTEMPTS = 3
+MAX_CONCURRENT_JOBS = max(1, int(os.environ.get("MORPH_MAX_CONCURRENT_JOBS", "1")))
+PROCESSING_SLOTS = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 ACTIVE: set[str] = set()
 
 
@@ -225,7 +227,10 @@ async def monitor(job_id: str) -> None:
     if job_id in ACTIVE:
         return
     ACTIVE.add(job_id)
+    acquired_slot = False
     try:
+        await PROCESSING_SLOTS.acquire()
+        acquired_slot = True
         source = DATA_ROOT / job_id / "source"
         if not source.exists():
             update_job(job_id, status="failed", message="原始参考图不存在", error="source image missing")
@@ -324,6 +329,8 @@ async def monitor(job_id: str) -> None:
                     update_job(job_id, status="queued", message="上次尝试失败，准备重试…", error=detail)
                     await asyncio.sleep(2**attempt)
     finally:
+        if acquired_slot:
+            PROCESSING_SLOTS.release()
         ACTIVE.discard(job_id)
 
 
