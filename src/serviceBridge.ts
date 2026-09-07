@@ -68,6 +68,29 @@ export async function connectLocalRelay() {
   saveDirectServiceConfig({ relayUrl, deviceToken: data.deviceToken || '' });
 }
 
+/**
+ * Read the private, per-job upstream event stream from a direct relay.
+ * This deliberately returns plain NDJSON instead of trying to expose relay
+ * credentials or a generic upstream console to the public Pages site.
+ */
+export async function serviceDiagnostics(jobId: string): Promise<string> {
+  const direct = getDirectServiceConfig();
+  if (!direct)
+    throw new Error('上游诊断仅在「接入本机桥接」或配置直连 Relay 后可查看。');
+  if (!/^[a-f0-9]{32}$/.test(jobId)) throw new Error('任务 ID 无效。');
+  const response = await fetch(`${direct.relayUrl}/jobs/${jobId}/diagnostics`, {
+    headers: { 'X-Morph-Device-Token': direct.deviceToken },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as {
+      detail?: string; error?: string; message?: string;
+    };
+    throw new Error(body.detail || body.error || body.message || `Relay 返回 ${response.status}`);
+  }
+  return response.text();
+}
+
 async function directServiceRequest<T>(
   config: DirectServiceConfig,
   command: Parameters<typeof serviceRequest>[0],

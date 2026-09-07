@@ -311,6 +311,7 @@ button:disabled {
 .visual-readout b { color: #fff; font-size: 13px; letter-spacing: .7px; }
 .service-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 24px; padding: 11px 13px; border-radius: 9px; background: #f5f8fd; color: #50637d; font-size: 12px; }
 .service-strip small { color: #8090a6; }
+.upstream-diagnostics { max-height: 360px; margin: 12px 0 0; padding: 12px; overflow: auto; border: 1px solid #dce6f5; border-radius: 8px; background: #101827; color: #d7e5ff; font: 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; white-space: pre-wrap; word-break: break-word; }
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #2bc58b; box-shadow: 0 0 0 4px #d9f8ec; }
 .task-card-grid { display: grid; gap: 10px; margin-top: 18px; }
 .task-card { display: grid; grid-template-columns: 39px minmax(0, 1fr) auto 18px; align-items: center; gap: 11px; min-height: 67px; padding: 11px; border: 1px solid #e8edf5; border-radius: 11px; color: #22334c; transition: border-color .18s ease, transform .18s ease, box-shadow .18s ease; }

@@ -27,6 +27,7 @@ import {
   getDirectServiceConfig,
   hasDirectServiceConfig,
   saveDirectServiceConfig,
+  serviceDiagnostics,
   serviceRequest,
 } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
@@ -239,7 +240,12 @@ export default function App() {
   const [selected, setSelected] = useState(''),
     [create, setCreate] = useState(false),
     [guide, setGuide] = useState(false),
-    [directSetup, setDirectSetup] = useState(false);
+    [directSetup, setDirectSetup] = useState(false),
+    [upstreamDiagnostics, setUpstreamDiagnostics] = useState<{
+      name: string;
+      jobId: string;
+      events: string;
+    } | null>(null);
   const [name, setName] = useState(''),
     [file, setFile] = useState<File | null>(null);
   const [directRelayUrl, setDirectRelayUrl] = useState(''),
@@ -662,6 +668,12 @@ export default function App() {
         setToast(`PSD 已保存，但自动生成未完成：${message}`);
       }
     }
+  }
+  async function inspectUpstream(t: Task) {
+    if (!t.remoteJobId) return;
+    setProgress('读取上游事件…');
+    const events = await serviceDiagnostics(t.remoteJobId);
+    setUpstreamDiagnostics({ name: t.name, jobId: t.remoteJobId, events });
   }
   useEffect(() => {
     if (!task?.remoteJobId || task.psdFile || task.remoteState === 'failed')
@@ -1207,15 +1219,26 @@ export default function App() {
                 </button>
               )}
             {task.remoteJobId && !task.psdFile && (
-              <button
-                className="ghost-button"
-                disabled={busy}
-                onClick={() => void operate(() => refresh(task))}
-              >
-                {task.remoteState === 'succeeded'
-                  ? '下载服务端 PSD'
-                  : '刷新状态 / 拉取 PSD'}
-              </button>
+              <>
+                <button
+                  className="ghost-button"
+                  disabled={busy}
+                  onClick={() => void operate(() => refresh(task))}
+                >
+                  {task.remoteState === 'succeeded'
+                    ? '下载服务端 PSD'
+                    : '刷新状态 / 拉取 PSD'}
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={busy || !hasDirectServiceConfig()}
+                  title={hasDirectServiceConfig() ? '查看此任务在 See-Through 上游的最近事件' : '请先点击「接入本机桥接」'}
+                  onClick={() => void operate(() => inspectUpstream(task))}
+                >
+                  查看上游诊断
+                </button>
+                {!hasDirectServiceConfig() && <small>接入本机桥接后可查看上游的限流、心跳、进度与完成事件。</small>}
+              </>
             )}
             <label className="field-label">
               重新导入输入文件
@@ -1344,6 +1367,17 @@ export default function App() {
           </div>
         </Modal>
       )}
+      {upstreamDiagnostics && (
+        <Modal title={`上游诊断 · ${upstreamDiagnostics.name}`} close={() => setUpstreamDiagnostics(null)}>
+          <p>
+            服务端任务：<code>{upstreamDiagnostics.jobId}</code>
+          </p>
+          <p>
+            这是本机 Relay 保存的最近上游事件。持续出现 <code>heartbeat</code> 但没有 <code>progress</code>、<code>complete</code> 或 <code>error</code>，通常表示上游接住了连接但没有实际产出。
+          </p>
+          <pre className="upstream-diagnostics">{formatUpstreamDiagnostics(upstreamDiagnostics.events)}</pre>
+        </Modal>
+      )}
       {guide && (
         <Modal title="流程与数据边界" close={() => setGuide(false)}>
           <ol className="guide-list">
@@ -1386,6 +1420,24 @@ export default function App() {
       )}
     </main>
   );
+}
+
+function formatUpstreamDiagnostics(events: string) {
+  const lines = events.trim().split('\n').filter(Boolean).slice(-60);
+  if (!lines.length) return '暂无事件。';
+  return lines.map((line) => {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      const timestamp = typeof event.at === 'string' ? event.at : typeof event.timestamp === 'string' ? event.timestamp : '';
+      const stage = typeof event.stage === 'string' ? event.stage : '';
+      const name = typeof event.event === 'string' ? event.event : '';
+      const attempt = typeof event.attempt === 'number' ? ` · 第 ${event.attempt} 次` : '';
+      const detail = typeof event.error === 'string' ? event.error : typeof event.message === 'string' ? event.message : '';
+      return [timestamp, stage || name, attempt, detail].filter(Boolean).join(' ');
+    } catch {
+      return line;
+    }
+  }).join('\n');
 }
 
 type ProFlowState = 'queued' | 'working' | 'done';
