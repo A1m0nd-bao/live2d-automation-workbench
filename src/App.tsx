@@ -1,5 +1,5 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import {
   Plus,
   X,
@@ -16,11 +16,16 @@ import {
   FileImage,
   ScanLine,
   ShieldCheck,
+  ArrowRight,
+  Combine,
+  GitBranch,
+  WandSparkles,
 } from 'lucide-react';
 import { connectService, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import { isJpeg, isPng } from './live2dPrep';
 import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
+import { mergeLive2dProPsd } from './live2dProMerge';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import './production.css';
 
@@ -47,6 +52,9 @@ type Task = {
   warnings?: string[];
   mode?: 'standard' | 'pro';
   proStateIds?: string[];
+  proStateAssets?: Record<string, { filename: string; uploadedAt: string }>;
+  proMergedFile?: string;
+  proMergeReportFile?: string;
   proStage?: 'persona_lock' | 'base_processing' | 'base_psd_ready' | 'state_generation' | 'state_decomposition' | 'merge_ready';
 };
 type Job = {
@@ -448,6 +456,56 @@ export default function App() {
       type: 'image/vnd.adobe.photoshop',
     });
   }
+  async function proStatePsd(t: Task, stateId: string) {
+    const asset = t.proStateAssets?.[stateId];
+    if (!asset) throw new Error('缺少该状态的 PSD。');
+    const blob = await readAsset(`${t.id}:pro-state:${stateId}:psd`);
+    if (!blob) throw new Error(`${asset.filename} 不在此浏览器，请重新导入。`);
+    return { data: await blob.arrayBuffer(), filename: asset.filename };
+  }
+  async function attachProStatePsd(t: Task, stateId: string, file: File) {
+    if (kind(file) !== 'psd')
+      throw new Error('状态输入应为 See-Through 输出的 PSD；状态原图会在后续队列入口单独提交。');
+    const state = selectedProStates(t.proStateIds ?? []).find((item) => item.id === stateId);
+    if (!state) throw new Error('这个状态不属于当前 Pro 任务。');
+    await saveAsset(`${t.id}:pro-state:${stateId}:psd`, file);
+    update(t.id, {
+      proStateAssets: {
+        ...t.proStateAssets,
+        [stateId]: { filename: file.name, uploadedAt: new Date().toLocaleString('zh-CN') },
+      },
+      proStage: 'state_decomposition',
+      remoteMessage: `${state.label} PSD 已保存；等待其他状态后即可执行本地语义合层。`,
+    });
+  }
+  async function mergeProStates(t: Task) {
+    if (!t.psdFile) throw new Error('请先准备基础 PSD。');
+    const states = selectedProStates(t.proStateIds ?? []);
+    const missing = states.filter((state) => !t.proStateAssets?.[state.id]);
+    if (missing.length)
+      throw new Error(`仍缺少状态 PSD：${missing.map((state) => state.label).join('、')}`);
+    setProgress('正在本地识别语义槽位并写入隐藏状态图层…');
+    const base = await psdInput(t);
+    const inputs = await Promise.all(states.map(async (state) => {
+      const source = await proStatePsd(t, state.id);
+      return { state, ...source };
+    }));
+    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs);
+    const filename = `${t.name}-live2d-pro-merged.psd`;
+    const reportName = `${t.name}-live2d-pro-merge-report.json`;
+    await saveAsset(`${t.id}:pro-merged-psd`, result.psd);
+    await saveAsset(`${t.id}:pro-merge-report`, new Blob([
+      JSON.stringify(result.report, null, 2),
+    ], { type: 'application/json' }));
+    update(t.id, {
+      proMergedFile: filename,
+      proMergeReportFile: reportName,
+      proStage: 'merge_ready',
+      qaPassed: false,
+      remoteMessage: `已合并 ${states.length} 个状态；替换层默认隐藏，等待 PSD 预览验收。`,
+    });
+    setToast('多状态 PSD 已在本地合并；请下载并在 Cubism 前检查替换层。');
+  }
   async function prepare(t: Task) {
     const source = await input(t);
     setProgress('豆包生图正在按 Live2D 规范重绘角色…');
@@ -564,7 +622,12 @@ export default function App() {
     return () => clearInterval(timer);
   }, [task]);
   async function generate(t: Task) {
-    const f = t.psdFile ? await psdInput(t) : await input(t);
+    const merged = t.proMergedFile
+      ? await readAsset(`${t.id}:pro-merged-psd`)
+      : undefined;
+    const f = merged
+      ? new File([merged], t.proMergedFile!, { type: 'image/vnd.adobe.photoshop' })
+      : t.psdFile ? await psdInput(t) : await input(t);
     const { generateCubism } = await import('./cubismEngine.js');
     const result = await generateCubism(f, t.name, setProgress);
     try {
@@ -739,16 +802,20 @@ export default function App() {
                 })}>检查服务</button>
               </div>
             </div>
-            <div className="pipeline">
-              {pipelineSteps.map(({ title, note, state: stepState, Icon }, index) => (
-                <article className={`pipeline-step ${stepState}`} key={title}>
-                  <div className="step-number"><Icon size={16} /></div>
-                  <div className="step-title"><h3>{title}</h3>{stepState === 'done' && <CheckCircle2 size={13} />}</div>
-                  <div className="step-content"><p>{note}</p></div>
-                  <div className="step-footer"><span>STEP {String(index + 1).padStart(2, '0')}</span><b>{stepState === 'done' ? '已完成' : stepState === 'working' ? '处理中' : '等待触发'}</b></div>
-                </article>
-              ))}
-            </div>
+            {featuredTask?.mode === 'pro' ? (
+              <ProProductionLine task={featuredTask} />
+            ) : (
+              <div className="pipeline">
+                {pipelineSteps.map(({ title, note, state: stepState, Icon }, index) => (
+                  <article className={`pipeline-step ${stepState}`} key={title}>
+                    <div className="step-number"><Icon size={16} /></div>
+                    <div className="step-title"><h3>{title}</h3>{stepState === 'done' && <CheckCircle2 size={13} />}</div>
+                    <div className="step-content"><p>{note}</p></div>
+                    <div className="step-footer"><span>STEP {String(index + 1).padStart(2, '0')}</span><b>{stepState === 'done' ? '已完成' : stepState === 'working' ? '处理中' : '等待触发'}</b></div>
+                  </article>
+                ))}
+              </div>
+            )}
             <div className="service-strip"><span className="live-dot" /> {connection} <small>上传图片后由服务端持续跟踪 PSD，不依赖页面保持打开。</small></div>
           </section>
           <section className="bottom-grid">
@@ -924,7 +991,62 @@ export default function App() {
                   下载 Pro 状态清单与提示词约束
                 </button>
                 {task.proStage === 'base_psd_ready' && (
-                  <small>基础 PSD 已完成。下一项是批量状态生图、逐张 See-Through 拆层与语义差分合并。</small>
+                  <small>基础 PSD 已完成。导入每个状态经 See-Through 拆分后的 PSD，随后可在此浏览器本地合层。</small>
+                )}
+                {task.psdFile && (
+                  <section className="pro-state-imports">
+                    <div>
+                      <b>状态 PSD 收集</b>
+                      <small>每个文件应对应同一 Persona Lock 下的一个状态，并与基础 PSD 画布一致。</small>
+                    </div>
+                    {selectedProStates(task.proStateIds ?? []).map((state) => {
+                      const asset = task.proStateAssets?.[state.id];
+                      return (
+                        <label key={state.id}>
+                          <span>{state.kind === 'action' ? '动作' : '表情'} · {state.label}</span>
+                          <input
+                            disabled={busy}
+                            type="file"
+                            accept=".psd"
+                            onChange={(event) => {
+                              const selectedFile = event.target.files?.[0];
+                              if (selectedFile)
+                                void operate(() => attachProStatePsd(task, state.id, selectedFile));
+                              event.target.value = '';
+                            }}
+                          />
+                          <small>{asset ? `已就绪：${asset.filename}` : '等待状态 PSD'}</small>
+                        </label>
+                      );
+                    })}
+                    <button
+                      className="primary-button"
+                      disabled={busy || selectedProStates(task.proStateIds ?? []).some((state) => !task.proStateAssets?.[state.id])}
+                      onClick={() => void operate(() => mergeProStates(task))}
+                    >
+                      本地合并为多状态 PSD
+                    </button>
+                  </section>
+                )}
+                {task.proMergedFile && (
+                  <>
+                    <button
+                      className="ghost-button"
+                      disabled={busy}
+                      onClick={() => void operate(() => download(task, 'pro-merged-psd', task.proMergedFile!))}
+                    >
+                      下载多状态合并 PSD
+                    </button>
+                    {task.proMergeReportFile && (
+                      <button
+                        className="ghost-button"
+                        disabled={busy}
+                        onClick={() => void operate(() => download(task, 'pro-merge-report', task.proMergeReportFile!))}
+                      >
+                        下载合层质检报告
+                      </button>
+                    )}
+                  </>
                 )}
               </section>
             )}
@@ -1158,6 +1280,79 @@ export default function App() {
         </Modal>
       )}
     </main>
+  );
+}
+
+type ProFlowState = 'queued' | 'working' | 'done';
+function proFlowState(task: Task, step: 'source' | 'persona' | 'basePsd' | 'states' | 'statePsd' | 'merge' | 'delivery'): ProFlowState {
+  const stage = task.proStage;
+  const expectedStates = task.proStateIds?.length || 0;
+  const collectedStates = Object.keys(task.proStateAssets || {}).filter((id) => task.proStateIds?.includes(id)).length;
+  if (step === 'source') return task.inputFile ? 'done' : 'queued';
+  if (step === 'persona') return task.preparedFile ? 'done' : stage === 'persona_lock' || stage === 'base_processing' ? 'working' : 'queued';
+  if (step === 'basePsd') return task.psdFile ? 'done' : task.remoteJobId ? 'working' : 'queued';
+  if (step === 'states') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : task.psdFile ? 'working' : 'queued';
+  if (step === 'statePsd') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : collectedStates ? 'working' : task.psdFile ? 'working' : 'queued';
+  if (step === 'merge') return stage === 'merge_ready' ? 'done' : stage === 'state_decomposition' ? 'working' : 'queued';
+  return task.hasGenerated ? 'done' : stage === 'merge_ready' ? 'working' : 'queued';
+}
+
+function ProFlowNode({
+  title,
+  note,
+  state,
+  children,
+}: {
+  title: string;
+  note: string;
+  state: ProFlowState;
+  children: ReactNode;
+}) {
+  return (
+    <article className={`pro-flow-node ${state}`}>
+      <div className="pro-flow-icon">{children}</div>
+      <div><b>{title}</b><small>{note}</small></div>
+      <span>{state === 'done' ? '已完成' : state === 'working' ? '处理中' : '等待'}</span>
+    </article>
+  );
+}
+
+function ProProductionLine({ task }: { task: Task }) {
+  const states = selectedProStates(task.proStateIds ?? []);
+  return (
+    <section className="pro-production-line" aria-label="Live2D Pro 双分支生产线">
+      <div className="pro-flow-heading">
+        <div><p className="eyebrow">LIVE2D PRO / DUAL PATH</p><h3>基础形态与状态形态会在合层前分别质检</h3></div>
+        <span><GitBranch size={15} /> {states.length} 个选定状态</span>
+      </div>
+      <div className="pro-flow-entry">
+        <ProFlowNode title="人物角色图" note={task.referenceName} state={proFlowState(task, 'source')}><UploadCloud size={17} /></ProFlowNode>
+        <ArrowRight className="pro-flow-arrow" size={19} />
+        <ProFlowNode title="Persona Lock" note="身份、服装、镜头固定" state={proFlowState(task, 'persona')}><WandSparkles size={17} /></ProFlowNode>
+      </div>
+      <div className="pro-flow-fork">
+        <div className="pro-flow-lane base-lane">
+          <div className="pro-lane-label"><span>基础形态</span><small>中立全身主图</small></div>
+          <ArrowRight className="pro-flow-arrow" size={19} />
+          <ProFlowNode title="See-Through" note="基础图拆分 PSD" state={proFlowState(task, 'basePsd')}><Layers3 size={17} /></ProFlowNode>
+        </div>
+        <div className="pro-flow-lane state-lane">
+          <div className="pro-lane-label"><span>状态形态</span><small>Persona Lock 差分图</small></div>
+          <ArrowRight className="pro-flow-arrow" size={19} />
+          <ProFlowNode title="批量状态图" note="生成或导入每个指定状态" state={proFlowState(task, 'states')}><FileImage size={17} /></ProFlowNode>
+          <ArrowRight className="pro-flow-arrow" size={19} />
+          <ProFlowNode title="逐张 See-Through" note="每个状态独立拆分 PSD" state={proFlowState(task, 'statePsd')}><Layers3 size={17} /></ProFlowNode>
+        </div>
+      </div>
+      <div className="pro-state-chips" aria-label="本任务选择的状态">
+        {states.map((state) => <span key={state.id}>{state.kind === 'action' ? '动作' : '表情'} · {state.label}</span>)}
+      </div>
+      <div className="pro-flow-exit">
+        <ProFlowNode title="语义差分合层" note="写入默认隐藏的 action / expression 图层" state={proFlowState(task, 'merge')}><Combine size={17} /></ProFlowNode>
+        <ArrowRight className="pro-flow-arrow" size={19} />
+        <ProFlowNode title="Cubism 交付" note="CMO3 整理，MOC3 官方编译验收" state={proFlowState(task, 'delivery')}><Box size={17} /></ProFlowNode>
+      </div>
+    </section>
   );
 }
 
