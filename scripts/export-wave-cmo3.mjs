@@ -157,11 +157,13 @@ for (let index = 0; index < kept.length; index += 1) {
     // were painted in front of the shirt, and the full greeting action has a
     // deliberate internal stack (front hair → face → clothes → back hair).
     drawOrder: alternate ? (kept.length - index) : (assignment?.drawOrder ?? (kept.length - index)),
-    actionSwitch: {
-      id: 'ParamAction',
-      name: 'Action',
-      stateOpacities,
-    },
+    // Keep untouched parts on the native rig path. In particular, eyes must
+    // remain eligible for ParamEye{L,R}Open closure keyforms, and hair/body
+    // must remain eligible for the natural physics warps. Only a part whose
+    // opacity actually changes between action states needs Action keyforms.
+    actionSwitch: stateOpacities.some((value) => value !== stateOpacities[0])
+      ? { id: 'ParamAction', name: 'Action', stateOpacities }
+      : null,
   });
 }
 
