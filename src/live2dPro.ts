@@ -115,6 +115,9 @@ const candidateNames = (slot: string) => ({
   eyes: ['eyes', 'eyewhite-l', 'eyewhite-r', 'eyelash-l', 'eyelash-r', 'irides-l', 'irides-r'],
   brows: ['brows', 'eyebrow-l', 'eyebrow-r'],
   mouth_nose: ['mouth_nose', 'mouth', 'nose'],
+  // See-Through commonly retains the source Photoshop spacing here, while
+  // the merged PSD protocol uses an underscore. Treat both as one slot.
+  front_hair: ['front_hair', 'front hair', 'fronthair'],
 }[slot] ?? [slot]);
 
 /**

@@ -9,6 +9,7 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "build:pages": "vite build --config vite.pages.config.ts",
+    "validate:live2d-pro": "node scripts/validate-live2d-pro-case.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
     "format": "oxfmt"
