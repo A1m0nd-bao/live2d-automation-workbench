@@ -153,10 +153,11 @@ for (let index = 0; index < kept.length; index += 1) {
     texWidth: parsed.width,
     texHeight: parsed.height,
     tag: matchTag(slot),
-    // importPsd returns PSD layers from front → back. Cubism draws a larger
-    // drawOrder on top, so preserving the raw index reverses the artwork
-    // (the back hair obscures the face, as seen in the first verification).
-    drawOrder: assignment?.drawOrder ?? (kept.length - index),
+    // Base parts use their canonical armature order.  Alternate action art
+    // must instead retain its own PSD stack position: crossed/thinking arms
+    // were painted in front of the shirt, and the full greeting action has a
+    // deliberate internal stack (front hair → face → clothes → back hair).
+    drawOrder: alternate ? (kept.length - index) : (assignment?.drawOrder ?? (kept.length - index)),
     actionSwitch: {
       id: 'ParamAction',
       name: 'Action',
