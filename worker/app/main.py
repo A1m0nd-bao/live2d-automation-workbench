@@ -361,6 +361,22 @@ async def read_job(job_id: str, x_relay_token: str | None = Header(default=None)
     return get_job(job_id)
 
 
+@app.get("/jobs/{job_id}/source")
+async def download_source(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
+    """Return the actual Live2D-friendly image submitted to See-Through."""
+    require_relay_token(x_relay_token)
+    job = get_job(job_id)
+    path = DATA_ROOT / job_id / "source"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Submitted source image is not available")
+    content_type, suffix = source_image_type(path)
+    return FileResponse(
+        path,
+        media_type=content_type,
+        filename=f"{job.name}-live2d-input{suffix}",
+    )
+
+
 @app.get("/jobs/{job_id}/output")
 async def download_output(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
     require_relay_token(x_relay_token)

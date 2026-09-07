@@ -134,6 +134,20 @@ export async function GET(request: Request) {
         },
       });
     }
+    if (url.searchParams.get('source') === '1') {
+      const source = await relay(`/jobs/${encodeURIComponent(jobId)}/source`);
+      if (!source.ok)
+        return json({ error: await errorText(source) }, source.status);
+      return new Response(source.body, {
+        headers: {
+          'Content-Type':
+            source.headers.get('Content-Type') ?? 'application/octet-stream',
+          'Content-Disposition':
+            source.headers.get('Content-Disposition') ?? 'attachment',
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
     const job = await relay(`/jobs/${encodeURIComponent(jobId)}`);
     if (!job.ok) return json({ error: await errorText(job) }, job.status);
     return json((await job.json()) as RelayJob);

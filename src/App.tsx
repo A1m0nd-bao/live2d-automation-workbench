@@ -126,6 +126,50 @@ async function asPreparedPng(data: ArrayBuffer) {
   }
 }
 
+async function assertLive2dFriendlyFrame(source: Blob) {
+  const url = URL.createObjectURL(source);
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => resolve();
+      image.onerror = () => reject(new Error('无法读取豆包生图结果。'));
+      image.src = url;
+    });
+    const { naturalWidth: width, naturalHeight: height } = image;
+    if (!width || !height || height / width < 1.35)
+      throw new Error(
+        '豆包结果不是完整的 2:3 左右竖构图，已拦截，避免把半身或裁腿图送入拆层。请重试生成。',
+      );
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return;
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    let transparent = 0;
+    let visibleBottom = -1;
+    for (let y = 0; y < height; y += 1)
+      for (let x = 0; x < width; x += 1) {
+        const alpha = pixels[(y * width + x) * 4 + 3];
+        if (alpha < 240) transparent += 1;
+        if (alpha > 16) visibleBottom = y;
+      }
+    // Alpha outputs let us reliably reject a character whose body reaches the
+    // image edge. Solid-background fallbacks cannot be segmented safely here.
+    if (
+      transparent > width * height * 0.01 &&
+      visibleBottom >= height - Math.max(8, Math.round(height * 0.025))
+    )
+      throw new Error(
+        '豆包结果的角色贴到了画幅底边，可能缺少脚部；已拦截，避免生成不合格 PSD。请重试生成。',
+      );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]),
     [hydrated, setHydrated] = useState(false);
@@ -362,6 +406,7 @@ export default function App() {
         name: source.name,
       });
       const png = await asPreparedPng(data);
+      await assertLive2dFriendlyFrame(png);
       const filename = `${t.name}-live2d-friendly.png`;
       await saveAsset(
         `${t.id}:prepared`,
