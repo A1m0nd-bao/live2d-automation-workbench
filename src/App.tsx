@@ -70,17 +70,17 @@ const stage = (t: Task) =>
         ? '待生成运行时包'
         : t.psdFile || t.inputKind === 'stretch'
           ? '待确认输入'
-          : t.inputKind === 'image' && !t.preparedFile
-            ? t.prepState === 'failed'
-              ? '豆包生图预处理失败'
-              : '待豆包生图预处理'
           : t.remoteState === 'succeeded'
             ? 'PSD 已生成 · 待下载'
             : t.remoteState === 'failed'
               ? '拆分失败'
               : t.remoteJobId
                 ? '后台拆分中'
-                : '待提交参考图';
+                : t.inputKind === 'image' && !t.preparedFile
+                  ? t.prepState === 'failed'
+                    ? '豆包生图预处理失败'
+                    : '待豆包生图预处理'
+                  : '待提交参考图';
 const kind = (f: File) =>
   /\.psd$/i.test(f.name)
     ? 'psd'
