@@ -369,6 +369,26 @@ export default function App() {
     setHydrated(true);
   }, []);
   useEffect(() => {
+    // A local setup link carries its values in the URL fragment, which is not
+    // sent to GitHub Pages.  It configures only this browser, then immediately
+    // removes itself from the visible URL so a device key is never retained in
+    // page history or copied links.
+    const setup = new URLSearchParams(window.location.hash.slice(1));
+    if (setup.get('morph-direct-setup') !== '1') return;
+    try {
+      saveDirectServiceConfig({
+        relayUrl: setup.get('relay') || '',
+        deviceToken: setup.get('device') || '',
+      });
+      setConnection('直连常驻 Relay 已在此浏览器启用；无需登录窗口。');
+      setToast('直连 Relay 已启用。');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : '直连配置无效。');
+    } finally {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+  }, []);
+  useEffect(() => {
     if (!hydrated || historyLoaded.current) return;
     historyLoaded.current = true;
     // Public Pages may not have its authenticated bridge open yet.  In that
