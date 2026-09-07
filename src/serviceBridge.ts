@@ -1,6 +1,8 @@
 export const SERVICE_ORIGIN =
   'https://morph-live2d-workbench.shehaoli.chatgpt.site';
 const CHANNEL = 'morph-service-v1';
+const DIRECT_SERVICE_STORAGE = 'morph.direct-relay.v1';
+export type DirectServiceConfig = { relayUrl: string; deviceToken: string };
 type Pending = {
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
@@ -10,6 +12,83 @@ let popup: Window | null = null;
 let nonce = '';
 let listening = false;
 const pending = new Map<string, Pending>();
+
+export function getDirectServiceConfig(): DirectServiceConfig | null {
+  try {
+    const value = JSON.parse(localStorage.getItem(DIRECT_SERVICE_STORAGE) || 'null');
+    if (
+      value &&
+      typeof value.relayUrl === 'string' &&
+      typeof value.deviceToken === 'string' &&
+      /^https:\/\//.test(value.relayUrl) &&
+      value.deviceToken.length >= 16
+    )
+      return { relayUrl: value.relayUrl.replace(/\/$/, ''), deviceToken: value.deviceToken };
+  } catch {
+    /* malformed browser-only configuration is ignored */
+  }
+  return null;
+}
+
+export function saveDirectServiceConfig(config: DirectServiceConfig | null) {
+  if (!config) {
+    localStorage.removeItem(DIRECT_SERVICE_STORAGE);
+    return;
+  }
+  const relayUrl = config.relayUrl.trim().replace(/\/$/, '');
+  if (!/^https:\/\//.test(relayUrl))
+    throw new Error('Relay 地址必须是 HTTPS URL。');
+  if (config.deviceToken.trim().length < 16)
+    throw new Error('设备密钥至少需要 16 个字符。');
+  localStorage.setItem(DIRECT_SERVICE_STORAGE, JSON.stringify({
+    relayUrl,
+    deviceToken: config.deviceToken.trim(),
+  }));
+}
+
+export function hasDirectServiceConfig() {
+  return Boolean(getDirectServiceConfig());
+}
+
+async function directServiceRequest<T>(
+  config: DirectServiceConfig,
+  command: Parameters<typeof serviceRequest>[0],
+  payload: { image?: Blob; name?: string; jobId?: string },
+): Promise<T> {
+  if (command === 'prepare' || command === 'prepHealth')
+    throw new Error('直连 Relay 不执行生图预处理；请上传已完成 Persona Lock 的全身状态图。');
+  let path = '/health';
+  let init: RequestInit = {
+    headers: { 'X-Morph-Device-Token': config.deviceToken },
+  };
+  if (command === 'history') path = '/jobs?limit=40';
+  if (command === 'submit') {
+    if (!payload.image) throw new Error('缺少参考图。');
+    const form = new FormData();
+    form.append('image', payload.image, payload.name || 'reference.png');
+    path = `/jobs?name=${encodeURIComponent((payload.name || 'character').replace(/\.[^.]+$/, ''))}`;
+    init = { method: 'POST', body: form, headers: { 'X-Morph-Device-Token': config.deviceToken } };
+  }
+  if (command === 'status' || command === 'output') {
+    if (!/^[a-f0-9]{32}$/.test(payload.jobId || '')) throw new Error('任务 ID 无效。');
+    path = `/jobs/${payload.jobId}${command === 'output' ? '/output' : ''}`;
+  }
+  const response = await fetch(`${config.relayUrl}${path}`, {
+    ...init,
+    signal: AbortSignal.timeout(command === 'submit' ? 90_000 : 45_000),
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { detail?: string; error?: string; message?: string };
+    throw new Error(body.detail || body.error || body.message || `Relay 返回 ${response.status}`);
+  }
+  if (command === 'output') return response.arrayBuffer() as Promise<T>;
+  const result = await response.json() as { id?: string; [key: string]: unknown };
+  if (command === 'submit')
+    return { jobId: result.id, status: result.status, message: result.message } as T;
+  if (command === 'health')
+    return { ready: Boolean(result.ok), message: result.ok ? '直连常驻队列已就绪。' : '直连 Relay 缺少上游凭据。' } as T;
+  return result as T;
+}
 
 export function connectService() {
   if (window.location.origin === SERVICE_ORIGIN) return;
@@ -57,6 +136,8 @@ export async function serviceRequest<T>(
     | 'output',
   payload: { image?: Blob; name?: string; jobId?: string } = {},
 ): Promise<T> {
+  const direct = getDirectServiceConfig();
+  if (direct) return directServiceRequest<T>(direct, command, payload);
   if (window.location.origin === SERVICE_ORIGIN) {
     let path =
       command === 'prepare' || command === 'prepHealth'

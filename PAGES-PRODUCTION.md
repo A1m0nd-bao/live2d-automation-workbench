@@ -1,7 +1,11 @@
 # GitHub Pages production path
 
 - Public UI: https://a1m0nd-bao.github.io/live2d-automation-workbench/
-- Private service connection: existing Sites `/pages-bridge`; access policy unchanged.
+- Private service connection: existing Sites `/pages-bridge` remains as a
+  compatibility fallback. The preferred GitHub Pages route is **直连设置**:
+  configure a Relay HTTPS URL plus `MORPH_DEVICE_TOKEN` once per browser to
+  avoid the Sites login popup. The token is a revocable Relay access key, not
+  a ModelScope or Ark credential.
 - Image preparation: private `POST /api/live2d-prep` uses Doubao Seedream reference-image editing with the source as the identity lock, then requires human approval before See-Through submission. Configure `VOLCENGINE_ARK_API_KEY` as a Sites secret; never use a Vite variable. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
 - Inference: existing authenticated relay, server queue and saved task states.
 - PSD → CMO3: pinned browser-side StretchyStudio compatibility exporter; no ModelScope key needed for existing PSD.
@@ -12,7 +16,7 @@ Import accepted PSD when creating a task, confirm input QA, generate, then downl
 
 Task metadata uses the existing localStorage key; actual inputs and outputs use IndexedDB. An older task with only filenames needs its file reimported. Changing origins/devices or clearing site data does not migrate files. Keep downloaded backups. Closing Pages stops browser generation, but not an already submitted server inference job.
 
-The popup permits only the configured Pages origin and window.opener. Replies require service origin, window reference, random connection nonce and request ID. It exposes fixed health/submit/status/output operations, not arbitrary URLs. Credentials remain in the private service environment. Public visitors without access cannot use this private inference service, but can process their own PSD locally.
+The popup permits only the configured Pages origin and window.opener. Replies require service origin, window reference, random connection nonce and request ID. It exposes fixed health/submit/status/output operations, not arbitrary URLs. Credentials remain in the private service environment. Direct mode sends only the dedicated device token to the Relay; the Relay CORS allow-list must contain `https://a1m0nd-bao.github.io`, and its upstream credentials remain server-only. Public visitors without the device token cannot use the queue, but can process their own PSD locally.
 
 ## Compatibility and acceptance
 

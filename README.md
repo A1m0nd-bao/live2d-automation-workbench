@@ -90,6 +90,7 @@ pip install -r requirements.txt
 
 export SEE_THROUGH_API_TOKEN="ms-..."
 export MORPH_RELAY_TOKEN="replace-with-a-random-secret"
+export MORPH_DEVICE_TOKEN="$(openssl rand -hex 32)"
 uvicorn app.main:app --host 0.0.0.0 --port 7860
 ```
 
@@ -109,6 +110,7 @@ MODELSCOPE_API_TOKEN=ModelScope API Token
 - Relay 适合部署到支持持久化 `/mnt/data` 的 CPU-only ModelScope Studio。
 - Relay 部署配置见 [`worker/ms_deploy.json`](worker/ms_deploy.json)。
 - 生产环境请为 Relay 配置 HTTPS、持久化磁盘和强随机 `MORPH_RELAY_TOKEN`。
+  若要免登录使用 GitHub Pages，请额外配置独立的 `MORPH_DEVICE_TOKEN`，然后在工作台的“直连设置”中填写 Relay HTTPS 地址与该设备密钥；不要将 `MORPH_RELAY_TOKEN` 或上游 Token 填入浏览器。
 
 ## 隐私与安全
 

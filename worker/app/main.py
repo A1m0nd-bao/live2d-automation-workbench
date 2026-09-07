@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sqlite3
 import uuid
 from contextlib import asynccontextmanager
@@ -18,6 +19,7 @@ from urllib.parse import quote, urlsplit, unquote
 
 import httpx
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -29,6 +31,17 @@ UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.
 # Use an explicit, relay-specific secret for outbound inference.
 MODELSCOPE_TOKEN = os.environ.get("SEE_THROUGH_API_TOKEN", "")
 RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
+# A revocable browser-facing key. This is intentionally separate from the
+# relay-to-relay credential and from the ModelScope upstream API token.
+DEVICE_TOKEN = os.environ.get("MORPH_DEVICE_TOKEN", "")
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get(
+        "MORPH_ALLOWED_ORIGINS",
+        "https://a1m0nd-bao.github.io,http://localhost:4173,http://127.0.0.1:4173",
+    ).split(",")
+    if origin.strip()
+]
 INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
 SPLIT_LIMBS = os.environ.get("SEE_THROUGH_SPLIT_LIMBS", "true").lower() in {"1", "true", "yes"}
 MAX_ATTEMPTS = 3
@@ -101,9 +114,20 @@ def update_job(job_id: str, **changes: Any) -> None:
         )
 
 
-def require_relay_token(x_relay_token: str | None) -> None:
-    if RELAY_TOKEN and x_relay_token != RELAY_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid relay token")
+def require_relay_token(
+    x_relay_token: str | None,
+    x_morph_device_token: str | None,
+) -> None:
+    """Allow the private proxy or one configured browser device, never both secrets interchangeably."""
+    proxy_ok = bool(RELAY_TOKEN and x_relay_token and secrets.compare_digest(x_relay_token, RELAY_TOKEN))
+    device_ok = bool(DEVICE_TOKEN and x_morph_device_token and secrets.compare_digest(x_morph_device_token, DEVICE_TOKEN))
+    if proxy_ok or device_ok:
+        return
+    # Preserve existing local-development behavior only when no auth was
+    # configured at all. Production documentation requires DEVICE_TOKEN.
+    if not RELAY_TOKEN and not DEVICE_TOKEN:
+        return
+    raise HTTPException(status_code=401, detail="Invalid relay or device token")
 
 
 def file_data(path: str, name: str, content_type: str) -> dict[str, Any]:
@@ -313,6 +337,14 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Morph See-Through Relay", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-Relay-Token", "X-Morph-Device-Token"],
+    expose_headers=["Content-Disposition"],
+)
 
 
 @app.get("/health")
@@ -327,8 +359,8 @@ async def health() -> dict[str, bool | str | int]:
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)
-async def create_job(image: UploadFile = File(...), name: str = "character", x_relay_token: str | None = Header(default=None)) -> JobStatus:
-    require_relay_token(x_relay_token)
+async def create_job(image: UploadFile = File(...), name: str = "character", x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
+    require_relay_token(x_relay_token, x_morph_device_token)
     if image.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(status_code=415, detail="Only PNG and JPEG input is supported")
     job_id = uuid.uuid4().hex
@@ -343,9 +375,9 @@ async def create_job(image: UploadFile = File(...), name: str = "character", x_r
 
 
 @app.get("/jobs", response_model=list[JobHistory])
-async def list_jobs(limit: int = 40, x_relay_token: str | None = Header(default=None)) -> list[JobHistory]:
+async def list_jobs(limit: int = 40, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> list[JobHistory]:
     """Return recent queue records so a fresh browser can recover its history."""
-    require_relay_token(x_relay_token)
+    require_relay_token(x_relay_token, x_morph_device_token)
     safe_limit = min(max(limit, 1), 100)
     with db() as connection:
         rows = connection.execute(
@@ -356,15 +388,15 @@ async def list_jobs(limit: int = 40, x_relay_token: str | None = Header(default=
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)
-async def read_job(job_id: str, x_relay_token: str | None = Header(default=None)) -> JobStatus:
-    require_relay_token(x_relay_token)
+async def read_job(job_id: str, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
+    require_relay_token(x_relay_token, x_morph_device_token)
     return get_job(job_id)
 
 
 @app.get("/jobs/{job_id}/source")
-async def download_source(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
+async def download_source(job_id: str, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> FileResponse:
     """Return the actual Live2D-friendly image submitted to See-Through."""
-    require_relay_token(x_relay_token)
+    require_relay_token(x_relay_token, x_morph_device_token)
     job = get_job(job_id)
     path = DATA_ROOT / job_id / "source"
     if not path.exists():
@@ -378,8 +410,8 @@ async def download_source(job_id: str, x_relay_token: str | None = Header(defaul
 
 
 @app.get("/jobs/{job_id}/output")
-async def download_output(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
-    require_relay_token(x_relay_token)
+async def download_output(job_id: str, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> FileResponse:
+    require_relay_token(x_relay_token, x_morph_device_token)
     job = get_job(job_id)
     if job.status != "succeeded" or not job.output_psd:
         raise HTTPException(status_code=409, detail="PSD is not ready")
@@ -387,8 +419,8 @@ async def download_output(job_id: str, x_relay_token: str | None = Header(defaul
 
 
 @app.get("/jobs/{job_id}/diagnostics")
-async def diagnostics(job_id: str, x_relay_token: str | None = Header(default=None)) -> FileResponse:
-    require_relay_token(x_relay_token)
+async def diagnostics(job_id: str, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> FileResponse:
+    require_relay_token(x_relay_token, x_morph_device_token)
     get_job(job_id)
     path = DATA_ROOT / job_id / "events.jsonl"
     if not path.exists():

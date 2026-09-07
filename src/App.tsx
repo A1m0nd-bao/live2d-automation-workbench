@@ -21,7 +21,13 @@ import {
   GitBranch,
   WandSparkles,
 } from 'lucide-react';
-import { connectService, serviceRequest } from './serviceBridge';
+import {
+  connectService,
+  getDirectServiceConfig,
+  hasDirectServiceConfig,
+  saveDirectServiceConfig,
+  serviceRequest,
+} from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import { isJpeg, isPng } from './live2dPrep';
 import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
@@ -231,9 +237,12 @@ export default function App() {
     [hydrated, setHydrated] = useState(false);
   const [selected, setSelected] = useState(''),
     [create, setCreate] = useState(false),
-    [guide, setGuide] = useState(false);
+    [guide, setGuide] = useState(false),
+    [directSetup, setDirectSetup] = useState(false);
   const [name, setName] = useState(''),
     [file, setFile] = useState<File | null>(null);
+  const [directRelayUrl, setDirectRelayUrl] = useState(''),
+    [directDeviceToken, setDirectDeviceToken] = useState('');
   const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
@@ -559,12 +568,32 @@ export default function App() {
     });
   }
   async function startImagePipeline(t: Task) {
+    if (hasDirectServiceConfig()) {
+      const source = await input(t);
+      setProgress('正在验证已完成 Persona Lock 的全身输入…');
+      await assertLive2dFriendlyFrame(source);
+      const filename = `${t.name}-live2d-friendly.png`;
+      await saveAsset(`${t.id}:prepared`, source);
+      update(t.id, {
+        preparedFile: filename,
+        prepState: 'succeeded',
+        prepAccepted: true,
+        prepMessage: '直连模式：已使用上传的全身 Persona Lock 图，不再要求网页登录。',
+      });
+      await submitToSeeThrough(t, new File([source], filename, { type: source.type || 'image/png' }));
+      setToast('已通过直连队列提交 See-Through；无需登录弹窗。');
+      return;
+    }
     const preparedImage = await prepare(t);
     await submitToSeeThrough(t, preparedImage);
     setToast('已自动生成友好图并提交 See-Through；PSD 完成后会自动下载。');
   }
   async function startProBasePipeline(t: Task) {
     update(t.id, { proStage: 'base_processing' });
+    if (hasDirectServiceConfig()) {
+      await startImagePipeline(t);
+      return;
+    }
     const preparedImage = await prepare(t);
     await submitToSeeThrough(t, preparedImage);
     setToast('Pro 基础状态已提交 See-Through；基础 PSD 完成后将进入多状态生成。');
@@ -791,7 +820,19 @@ export default function App() {
                 <h2>当前角色生产线</h2>
               </div>
               <div className="header-actions">
-                <button className="ghost-button" onClick={() => { try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); } }}>连接服务</button>
+                <button className="ghost-button" onClick={() => {
+                  if (hasDirectServiceConfig()) {
+                    setConnection('当前使用直连常驻 Relay；无需登录窗口。');
+                    return;
+                  }
+                  try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); }
+                }}>{hasDirectServiceConfig() ? '直连已启用' : '连接服务'}</button>
+                <button className="ghost-button" onClick={() => {
+                  const config = getDirectServiceConfig();
+                  setDirectRelayUrl(config?.relayUrl || '');
+                  setDirectDeviceToken(config?.deviceToken || '');
+                  setDirectSetup(true);
+                }}>直连设置</button>
                 <button className="ghost-button" disabled={busy} onClick={() => void operate(() => loadServerHistory(true))}>同步历史</button>
                 <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
                   const [relay, prep] = await Promise.allSettled([serviceRequest<{ ready?: boolean; message?: string }>('health'), serviceRequest<{ ready?: boolean; message?: string }>('prepHealth')]);
@@ -967,6 +1008,44 @@ export default function App() {
           >
             保存并建立任务
           </button>
+        </Modal>
+      )}
+      {directSetup && (
+        <Modal title="直连常驻 Relay" close={() => setDirectSetup(false)}>
+          <p>
+            配置一次后，GitHub Pages 会直接访问你的常驻队列，不再弹出登录窗口。
+            设备密钥只保存在这台浏览器，可在 Relay 环境中随时更换。
+          </p>
+          <label className="field-label">
+            Relay HTTPS 地址
+            <input placeholder="https://your-relay.example.com" value={directRelayUrl} onChange={(event) => setDirectRelayUrl(event.target.value)} />
+          </label>
+          <label className="field-label">
+            设备密钥
+            <input type="password" autoComplete="off" value={directDeviceToken} onChange={(event) => setDirectDeviceToken(event.target.value)} />
+          </label>
+          <div className="modal-actions">
+            <button className="primary-button" onClick={() => {
+              try {
+                saveDirectServiceConfig({ relayUrl: directRelayUrl, deviceToken: directDeviceToken });
+                setConnection('直连配置已保存；后续提交不再需要登录窗口。');
+                setDirectSetup(false);
+                setToast('直连 Relay 已启用。');
+              } catch (error) {
+                setToast(error instanceof Error ? error.message : '直连配置无效。');
+              }
+            }}>保存直连设置</button>
+            {hasDirectServiceConfig() && (
+              <button className="ghost-button" onClick={() => {
+                saveDirectServiceConfig(null);
+                setDirectRelayUrl('');
+                setDirectDeviceToken('');
+                setConnection('直连设置已清除；将回退到私有登录服务。');
+                setDirectSetup(false);
+              }}>清除本机直连设置</button>
+            )}
+          </div>
+          <small>直连模式不执行云端生图预处理：请上传已完成 Persona Lock 的全身图，或直接导入 PSD。</small>
         </Modal>
       )}
       {task && !create && (
