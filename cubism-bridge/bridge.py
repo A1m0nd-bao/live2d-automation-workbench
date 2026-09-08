@@ -121,6 +121,7 @@ async def main() -> int:
     parser.add_argument("--wait", action="store_true", help="Keep waiting for the user to approve this bridge in Cubism.")
     args = parser.parse_args()
 
+    waiting_for_server = False
     while True:
         try:
             async with CubismClient(args.uri) as client:
@@ -134,7 +135,9 @@ async def main() -> int:
         except OSError:
             if not args.wait:
                 raise
-            print(f"等待 Cubism 在 {args.uri} 开启本机接口…", flush=True)
+            if not waiting_for_server:
+                print(f"等待 Cubism 在 {args.uri} 开启本机接口…", flush=True)
+                waiting_for_server = True
             await asyncio.sleep(1)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
