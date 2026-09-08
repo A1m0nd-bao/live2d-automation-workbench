@@ -90,6 +90,32 @@ class CubismClient:
     async def is_approved(self) -> bool:
         return bool((await self.request("GetIsApproval")).get("Result"))
 
+    async def is_edit_approved(self) -> bool:
+        """Return whether Cubism granted this bridge its separate edit permission."""
+        return bool((await self.request("GetIsEditApproval")).get("Result"))
+
+    async def probe_edit_transaction(self) -> None:
+        """Exercise Cubism's edit transaction without changing the open model.
+
+        This is deliberately a capability probe: it opens an edit transaction,
+        sends a status message, and then cancels the transaction.  Cubism must
+        restore the pre-transaction state and not append an undo item.
+        """
+        if not await self.is_edit_approved():
+            raise PermissionError(
+                "Cubism 尚未授予编辑权限。请在「外部应用程序集成的设置」中勾选本桥接器的“编辑”。"
+            )
+        started = await self.request("EditBegin", {"Silent": True})
+        if not started.get("Result"):
+            raise CubismProtocolError("Cubism 未能开始编辑事务。")
+        try:
+            await self.request("EditSendLog", {"Message": "Live2D Automation Workbench: edit capability probe"})
+            await self.request("EditSendProgress", {"Value": 1.0})
+        finally:
+            ended = await self.request("EditEnd", {"Cancel": True})
+            if not ended.get("Result"):
+                raise CubismProtocolError("Cubism 未能撤销并结束编辑事务。")
+
     async def snapshot(self) -> dict[str, Any]:
         if not await self.is_approved():
             raise PermissionError(
@@ -124,6 +150,11 @@ async def main() -> int:
         action="store_true",
         help="Keep the approved bridge connected after writing a snapshot.",
     )
+    parser.add_argument(
+        "--probe-edit",
+        action="store_true",
+        help="Verify edit permission using a canceled transaction that does not change the model.",
+    )
     args = parser.parse_args()
 
     waiting_for_server = False
@@ -155,6 +186,9 @@ async def main() -> int:
                 args.out.parent.mkdir(parents=True, exist_ok=True)
                 args.out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
                 print(f"已保存只读模型结构：{args.out}", flush=True)
+                if args.probe_edit:
+                    await client.probe_edit_transaction()
+                    print("编辑事务探针通过：模型未被改动，事务已撤销。", flush=True)
                 if args.keep_alive:
                     print("快照完成；保持与 Cubism 的只读连接。", flush=True)
                     await asyncio.Event().wait()
