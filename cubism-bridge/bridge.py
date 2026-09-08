@@ -131,7 +131,17 @@ async def main() -> int:
                         raise PermissionError("等待 Cubism 授权。重新运行时加入 --wait，或先在 Cubism 授权。")
                     print("已连接 Cubism；等待普通访问授权…", flush=True)
                     await asyncio.sleep(1)
-                snapshot = await client.snapshot()
+                while True:
+                    try:
+                        snapshot = await client.snapshot()
+                        break
+                    except CubismProtocolError as error:
+                        if not args.wait or "Model not found" not in str(error):
+                            raise
+                        if not waiting_for_model:
+                            print("Cubism 已授权；等待打开一个 CMO3 模型…", flush=True)
+                            waiting_for_model = True
+                        await asyncio.sleep(1)
             break
         except OSError:
             if not args.wait:
@@ -139,13 +149,6 @@ async def main() -> int:
             if not waiting_for_server:
                 print(f"等待 Cubism 在 {args.uri} 开启本机接口…", flush=True)
                 waiting_for_server = True
-            await asyncio.sleep(1)
-        except CubismProtocolError as error:
-            if not args.wait or "Model not found" not in str(error):
-                raise
-            if not waiting_for_model:
-                print("Cubism 已授权；等待打开一个 CMO3 模型…", flush=True)
-                waiting_for_model = True
             await asyncio.sleep(1)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
