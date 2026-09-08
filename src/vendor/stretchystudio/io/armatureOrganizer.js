@@ -14,11 +14,16 @@
 // pose model out of the site artifact is essential for GitHub Pages; the
 // browser caches the model after its first successful inference.
 let _ortPromise = null;
+const ONNX_RUNTIME_URL =
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist/ort.min.mjs';
 
 async function _ensureOrt() {
   if (_ortPromise) return _ortPromise;
   _ortPromise = (async () => {
-    const module = await import('onnxruntime-web');
+    // Keep both the runtime and its WASM binary external. Bundling the WASM
+    // creates a 27 MB file, which exceeds the Pages per-file limit even though
+    // it is only needed after the user starts an auto-rig.
+    const module = await import(/* @vite-ignore */ ONNX_RUNTIME_URL);
     const ort = module.env ? module : (module.default || module);
     // A single WASM thread works without cross-origin-isolation headers, which
     // keeps both GitHub Pages and the private workbench usable.

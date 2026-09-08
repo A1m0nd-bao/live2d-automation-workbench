@@ -12,7 +12,8 @@ const engine = readFileSync(
 );
 
 test('auto-rig loads DWPose in-browser and keeps a cached fallback-safe session', () => {
-  assert.match(organizer, /import\('onnxruntime-web'\)/);
+  assert.match(organizer, /onnxruntime-web@1\.29\.0\/dist\/ort\.min\.mjs/);
+  assert.match(organizer, /@vite-ignore/);
   assert.match(organizer, /export async function getDWPoseSession/);
   assert.match(organizer, /DWPOSE_URL/);
   assert.doesNotMatch(organizer, /兼容构建只使用图层边界估算骨架/);
