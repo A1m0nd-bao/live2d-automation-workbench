@@ -94,7 +94,7 @@ export async function serviceDiagnostics(jobId: string): Promise<string> {
 async function directServiceRequest<T>(
   config: DirectServiceConfig,
   command: Parameters<typeof serviceRequest>[0],
-  payload: { image?: Blob; name?: string; jobId?: string },
+  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' },
 ): Promise<T> {
   if (command === 'prepare' || command === 'prepHealth')
     throw new Error('直连 Relay 不执行生图预处理；请上传已完成 Persona Lock 的全身状态图。');
@@ -175,7 +175,7 @@ export async function serviceRequest<T>(
     | 'submit'
     | 'status'
     | 'output',
-  payload: { image?: Blob; name?: string; jobId?: string } = {},
+  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' } = {},
 ): Promise<T> {
   const direct = getDirectServiceConfig();
   if (direct) return directServiceRequest<T>(direct, command, payload);
@@ -189,6 +189,8 @@ export async function serviceRequest<T>(
       if (!payload.image) throw new Error('缺少参考图');
       const form = new FormData();
       form.append('image', payload.image, payload.name);
+      if (command === 'prepare' && payload.provider)
+        form.append('provider', payload.provider);
       init = { method: 'POST', body: form };
     }
     if (command === 'status' || command === 'output') {

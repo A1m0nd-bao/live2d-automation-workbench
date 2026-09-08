@@ -43,6 +43,8 @@ export default function PrivateBridgePage() {
             throw new Error('参考图须小于 20 MB。');
           const form = new FormData();
           form.append('image', payload.image, payload.name || 'reference.png');
+          if (command === 'prepare' && (payload?.provider === 'doubao' || payload?.provider === 'image2'))
+            form.append('provider', payload.provider);
           init = { method: 'POST', body: form };
         } else if (command === 'status' || command === 'output') {
           if (!/^[a-f0-9]{32}$/.test(payload?.jobId ?? ''))

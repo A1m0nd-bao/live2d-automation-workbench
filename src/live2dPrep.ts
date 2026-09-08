@@ -2,6 +2,20 @@ export const LIVE2D_PREP_MODEL = 'doubao-seedream-4-5-251128';
 // Seedream 4.5 requires a generated image of at least 3,686,400 pixels.
 export const LIVE2D_PREP_SIZE = '1536x2400';
 
+export type Live2dPrepProvider = 'doubao' | 'image2';
+
+export const LIVE2D_PREP_PROVIDERS: Record<Live2dPrepProvider, {
+  label: string;
+  shortLabel: string;
+}> = {
+  doubao: { label: '豆包 Seedream', shortLabel: '豆包生图' },
+  image2: { label: 'Image-2', shortLabel: 'Image-2 生图' },
+};
+
+export function live2dPrepProviderLabel(provider: Live2dPrepProvider | undefined) {
+  return LIVE2D_PREP_PROVIDERS[provider ?? 'doubao'].shortLabel;
+}
+
 /**
  * A deliberately small, repeatable character lock for one source image.
  * It prepares an input for PSD decomposition; it does not claim to rig it.

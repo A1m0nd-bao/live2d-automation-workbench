@@ -6,7 +6,10 @@
   configure a Relay HTTPS URL plus `MORPH_DEVICE_TOKEN` once per browser to
   avoid the Sites login popup. The token is a revocable Relay access key, not
   a ModelScope or Ark credential.
-- Image preparation: private `POST /api/live2d-prep` uses Doubao Seedream reference-image editing with the source as the identity lock, then requires human approval before See-Through submission. Configure `VOLCENGINE_ARK_API_KEY` as a Sites secret; never use a Vite variable. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
+- Image preparation: the task dialog offers **豆包 Seedream** and **Image-2**. Both use the same source-identity lock and Live2D-friendly prompt before See-Through submission. Provider choice is browser task metadata only; secrets remain in the private service.
+  - Doubao: configure `VOLCENGINE_ARK_API_KEY` as a Sites secret. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
+  - Image-2: configure `IMAGE2_API_URL` and `IMAGE2_API_KEY` as Sites secrets, with optional `IMAGE2_MODEL` (defaults to `image-2`). The adapter sends an OpenAI-compatible image-edit multipart request containing `image`, `prompt`, `model`, `size`, and `response_format=b64_json`; the endpoint must return PNG/JPEG bytes or `data[0].b64_json`. Use `IMAGE2_AUTH_HEADER` and `IMAGE2_AUTH_PREFIX` only when the node does not use `Authorization: Bearer <key>`.
+  Never place either provider's key in a Vite variable, direct Relay setup, GitHub Pages artifact, or browser storage.
 - Inference: existing authenticated relay, server queue and saved task states.
 - PSD → CMO3: pinned browser-side StretchyStudio compatibility exporter; no ModelScope key needed for existing PSD.
 

@@ -31,7 +31,13 @@ import {
   serviceRequest,
 } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
-import { isJpeg, isPng } from './live2dPrep';
+import {
+  isJpeg,
+  isPng,
+  LIVE2D_PREP_PROVIDERS,
+  live2dPrepProviderLabel,
+  type Live2dPrepProvider,
+} from './live2dPrep';
 import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
 import { mergeLive2dProPsd } from './live2dProMerge';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
@@ -49,6 +55,7 @@ type Task = {
   inputFile?: string;
   inputKind?: string;
   preparedFile?: string;
+  prepProvider?: Live2dPrepProvider;
   prepState?: 'queued' | 'succeeded' | 'failed';
   prepMessage?: string;
   prepAccepted?: boolean;
@@ -104,8 +111,8 @@ const stage = (t: Task) =>
                 ? '后台拆分中'
                 : t.inputKind === 'image' && !t.preparedFile
                   ? t.prepState === 'failed'
-                    ? '豆包生图预处理失败'
-                    : '待豆包生图预处理'
+                    ? '生图预处理失败'
+                    : '待生图预处理'
                   : '待提交参考图';
 const kind = (f: File) =>
   /\.psd$/i.test(f.name)
@@ -126,14 +133,14 @@ function validate(f: File) {
 async function asPreparedPng(data: ArrayBuffer) {
   if (isPng(data)) return new Blob([data], { type: 'image/png' });
   if (!isJpeg(data))
-    throw new Error('豆包生图返回的文件不是 PNG 或 JPEG。');
+    throw new Error('生图服务返回的文件不是 PNG 或 JPEG。');
   const source = new Blob([data], { type: 'image/jpeg' });
   const url = URL.createObjectURL(source);
   try {
     const image = new Image();
     await new Promise<void>((resolve, reject) => {
       image.onload = () => resolve();
-      image.onerror = () => reject(new Error('无法读取豆包生图返回的 JPEG。'));
+      image.onerror = () => reject(new Error('无法读取生图服务返回的 JPEG。'));
       image.src = url;
     });
     const canvas = document.createElement('canvas');
@@ -145,7 +152,7 @@ async function asPreparedPng(data: ArrayBuffer) {
     const png = await new Promise<Blob | null>((resolve) =>
       canvas.toBlob(resolve, 'image/png'),
     );
-    if (!png) throw new Error('无法把豆包生图 JPEG 转为 PNG。');
+    if (!png) throw new Error('无法把生图服务 JPEG 转为 PNG。');
     return png;
   } finally {
     URL.revokeObjectURL(url);
@@ -158,13 +165,13 @@ async function assertLive2dFriendlyFrame(source: Blob) {
     const image = new Image();
     await new Promise<void>((resolve, reject) => {
       image.onload = () => resolve();
-      image.onerror = () => reject(new Error('无法读取豆包生图结果。'));
+      image.onerror = () => reject(new Error('无法读取生图服务结果。'));
       image.src = url;
     });
     const { naturalWidth: width, naturalHeight: height } = image;
     if (!width || !height || height / width < 1.35)
       throw new Error(
-        '豆包结果不是完整的 2:3 左右竖构图，已拦截，避免把半身或裁腿图送入拆层。请重试生成。',
+        '生成结果不是完整的 2:3 左右竖构图，已拦截，避免把半身或裁腿图送入拆层。请重试生成。',
       );
 
     const canvas = document.createElement('canvas');
@@ -189,7 +196,7 @@ async function assertLive2dFriendlyFrame(source: Blob) {
       visibleBottom >= height - Math.max(8, Math.round(height * 0.025))
     )
       throw new Error(
-        '豆包结果的角色贴到了画幅底边，可能缺少脚部；已拦截，避免生成不合格 PSD。请重试生成。',
+        '生成结果的角色贴到了画幅底边，可能缺少脚部；已拦截，避免生成不合格 PSD。请重试生成。',
       );
   } finally {
     URL.revokeObjectURL(url);
@@ -251,6 +258,7 @@ export default function App() {
   const [directRelayUrl, setDirectRelayUrl] = useState(''),
     [directDeviceToken, setDirectDeviceToken] = useState('');
   const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
+  const [prepProvider, setPrepProvider] = useState<Live2dPrepProvider>('doubao');
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
     'action_03_hand_on_hip_arms_only',
@@ -544,15 +552,18 @@ export default function App() {
   }
   async function prepare(t: Task) {
     const source = await input(t);
-    setProgress('豆包生图正在按 Live2D 规范重绘角色…');
+    const provider = t.prepProvider ?? 'doubao';
+    const providerLabel = live2dPrepProviderLabel(provider);
+    setProgress(`${providerLabel} 正在按 Live2D 规范重绘角色…`);
     update(t.id, {
       prepState: 'queued',
-      prepMessage: '正在生成 Live2D 友好图…',
+      prepMessage: `${providerLabel} 正在生成 Live2D 友好图…`,
     });
     try {
       const data = await serviceRequest<ArrayBuffer>('prepare', {
         image: source,
         name: source.name,
+        provider,
       });
       const png = await asPreparedPng(data);
       await assertLive2dFriendlyFrame(png);
@@ -565,12 +576,12 @@ export default function App() {
         preparedFile: filename,
         prepState: 'succeeded',
         prepAccepted: true,
-        prepMessage: '已生成 Live2D 友好图，正在自动提交拆分。',
+        prepMessage: `${providerLabel} 已生成 Live2D 友好图，正在自动提交拆分。`,
       });
       return new File([png], filename, { type: 'image/png' });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : '豆包生图预处理失败。';
+        error instanceof Error ? error.message : `${providerLabel} 生图预处理失败。`;
       update(t.id, { prepState: 'failed', prepMessage: message });
       throw error;
     }
@@ -964,6 +975,20 @@ export default function App() {
               <b>Live2D Pro</b><small>同角色多动作 / 表情差分</small>
             </button>
           </fieldset>
+          <fieldset className="workflow-mode" aria-label="角色整理生图提供方">
+            <legend>角色整理生图</legend>
+            {(Object.entries(LIVE2D_PREP_PROVIDERS) as Array<[Live2dPrepProvider, typeof LIVE2D_PREP_PROVIDERS.doubao]>).map(([provider, details]) => (
+              <button
+                key={provider}
+                type="button"
+                className={prepProvider === provider ? 'is-selected' : ''}
+                onClick={() => setPrepProvider(provider)}
+              >
+                <b>{details.label}</b>
+                <small>身份保持 · 全身中立构图</small>
+              </button>
+            ))}
+          </fieldset>
           {productionMode === 'pro' && (
             <section className="pro-state-picker">
               <b>选择首批状态</b>
@@ -1024,6 +1049,7 @@ export default function App() {
                   referenceName: file.name,
                   inputFile: file.name,
                   inputKind: k,
+                  prepProvider: k === 'image' ? prepProvider : undefined,
                   psdFile: k === 'psd' ? file.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
                   mode: productionMode,

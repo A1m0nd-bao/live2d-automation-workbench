@@ -15,12 +15,29 @@ const code = ts.transpileModule(
   },
 ).outputText;
 vm.runInNewContext(code, { module, exports: module.exports, Uint8Array });
-const { isPng, isJpeg, LIVE2D_PREP_MODEL, LIVE2D_PREP_SIZE, live2dPrepPrompt } =
+const {
+  isPng,
+  isJpeg,
+  LIVE2D_PREP_MODEL,
+  LIVE2D_PREP_SIZE,
+  LIVE2D_PREP_PROVIDERS,
+  live2dPrepProviderLabel,
+  live2dPrepPrompt,
+} =
   module.exports;
 
 test('Live2D preprocessing targets Doubao Seedream image editing with a portrait source canvas', () => {
   assert.equal(LIVE2D_PREP_MODEL, 'doubao-seedream-4-5-251128');
   assert.equal(LIVE2D_PREP_SIZE, '1536x2400');
+});
+
+test('preprocessing offers provider choices without putting keys in browser configuration', () => {
+  assert.deepEqual(Object.keys(LIVE2D_PREP_PROVIDERS).sort(), ['doubao', 'image2']);
+  assert.equal(live2dPrepProviderLabel('image2'), 'Image-2 生图');
+  assert.match(
+    readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
+    /IMAGE2_API_KEY/,
+  );
 });
 
 test('character lock requires full-body, identity preservation and rejects topology drift', () => {
