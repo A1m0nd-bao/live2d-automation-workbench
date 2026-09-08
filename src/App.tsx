@@ -78,6 +78,11 @@ type Job = {
   message?: string;
   error?: string;
 };
+type PrepHealth = {
+  ready?: boolean;
+  message?: string;
+  providers?: Partial<Record<Live2dPrepProvider, { ready?: boolean; message?: string }>>;
+};
 type HistoryJob = Job & {
   id: string;
   name: string;
@@ -554,6 +559,14 @@ export default function App() {
     const source = await input(t);
     const provider = t.prepProvider ?? 'doubao';
     const providerLabel = live2dPrepProviderLabel(provider);
+    const health = await serviceRequest<PrepHealth>('prepHealth');
+    const providerHealth = health.providers?.[provider];
+    if (provider === 'image2' && !providerHealth?.ready)
+      throw new Error(
+        providerHealth?.message || 'Image-2 尚未部署到当前私有生图服务；不会回退到豆包，请先完成服务端配置。',
+      );
+    if (provider === 'doubao' && health.ready === false)
+      throw new Error(health.message || '豆包生图服务当前不可用。');
     setProgress(`${providerLabel} 正在按 Live2D 规范重绘角色…`);
     update(t.id, {
       prepState: 'queued',
