@@ -9,7 +9,8 @@ import {
 export const runtime = 'edge';
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const ARK_URL = 'https://ark.cn-beijing.volces.com/api/v3/images/generations';
-const IMAGE2_DEFAULT_MODEL = 'image-2';
+const IMAGE2_DEFAULT_MODEL = 'openai/gpt-image-2';
+const IMAGE2_GATEWAY_URL = 'https://ai-gateway.vercel.sh/v1/images/edits';
 type PrepProvider = 'doubao' | 'image2';
 
 function json(body: unknown, status = 200) {
@@ -25,11 +26,8 @@ function arkKey() {
 
 function image2Config() {
   return {
-    url: process.env.IMAGE2_API_URL ?? '',
-    key: process.env.IMAGE2_API_KEY ?? '',
+    key: process.env.AI_GATEWAY_API_KEY ?? '',
     model: process.env.IMAGE2_MODEL ?? IMAGE2_DEFAULT_MODEL,
-    authHeader: process.env.IMAGE2_AUTH_HEADER ?? 'Authorization',
-    authPrefix: process.env.IMAGE2_AUTH_PREFIX ?? 'Bearer ',
   };
 }
 
@@ -43,13 +41,13 @@ function availability(provider: PrepProvider) {
         : '豆包生图尚未配置 VOLCENGINE_ARK_API_KEY。',
     };
   const config = image2Config();
-  const ready = Boolean(config.url && config.key);
+  const ready = Boolean(config.key);
   return {
     ready,
     model: config.model,
     message: ready
       ? 'Image-2 Live2D 预处理已就绪。'
-      : 'Image-2 尚未配置 IMAGE2_API_URL 和 IMAGE2_API_KEY。',
+      : 'Image-2 尚未配置 AI_GATEWAY_API_KEY。',
   };
 }
 
@@ -156,16 +154,19 @@ export async function POST(request: Request) {
 
 async function requestImage2(image: File, input: ArrayBuffer) {
   const config = image2Config();
-  const body = new FormData();
-  body.set('image', new Blob([input], { type: image.type }), image.name || 'reference.png');
-  body.set('model', config.model);
-  body.set('prompt', live2dPrepPrompt());
-  body.set('size', LIVE2D_PREP_SIZE);
-  body.set('response_format', 'b64_json');
-  return fetch(config.url, {
+  return fetch(IMAGE2_GATEWAY_URL, {
     method: 'POST',
-    headers: { [config.authHeader]: `${config.authPrefix}${config.key}` },
-    body,
+    headers: {
+      Authorization: `Bearer ${config.key}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      prompt: live2dPrepPrompt(),
+      images: [{ image_url: `data:${image.type};base64,${base64(input)}` }],
+      size: LIVE2D_PREP_SIZE,
+      response_format: 'b64_json',
+    }),
     signal: AbortSignal.timeout(180_000),
   });
 }

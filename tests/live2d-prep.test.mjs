@@ -36,7 +36,11 @@ test('preprocessing offers provider choices without putting keys in browser conf
   assert.equal(live2dPrepProviderLabel('image2'), 'Image-2 生图');
   assert.match(
     readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
-    /IMAGE2_API_KEY/,
+    /AI_GATEWAY_API_KEY/,
+  );
+  assert.match(
+    readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
+    /https:\/\/ai-gateway\.vercel\.sh\/v1\/images\/edits/,
   );
 });
 
