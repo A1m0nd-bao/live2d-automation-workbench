@@ -119,6 +119,11 @@ async def main() -> int:
     parser.add_argument("--uri", default=DEFAULT_URI)
     parser.add_argument("--out", type=Path, default=Path.cwd() / "cubism-bridge" / "snapshots" / "cubism-model-structure.json")
     parser.add_argument("--wait", action="store_true", help="Keep waiting for the user to approve this bridge in Cubism.")
+    parser.add_argument(
+        "--keep-alive",
+        action="store_true",
+        help="Keep the approved bridge connected after writing a snapshot.",
+    )
     args = parser.parse_args()
 
     waiting_for_server = False
@@ -147,7 +152,13 @@ async def main() -> int:
                             print("Cubism 已授权；等待打开一个 CMO3 模型…", flush=True)
                             waiting_for_model = True
                         await asyncio.sleep(1)
-            break
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
+                print(f"已保存只读模型结构：{args.out}", flush=True)
+                if args.keep_alive:
+                    print("快照完成；保持与 Cubism 的只读连接。", flush=True)
+                    await asyncio.Event().wait()
+            return 0
         except OSError:
             if not args.wait:
                 raise
@@ -155,12 +166,6 @@ async def main() -> int:
                 print(f"等待 Cubism 在 {args.uri} 开启本机接口…", flush=True)
                 waiting_for_server = True
             await asyncio.sleep(1)
-
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n")
-    print(f"已保存只读模型结构：{args.out}")
-    return 0
-
 
 if __name__ == "__main__":
     try:
