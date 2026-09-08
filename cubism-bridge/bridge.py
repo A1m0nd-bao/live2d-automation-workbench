@@ -123,6 +123,7 @@ async def main() -> int:
 
     waiting_for_server = False
     waiting_for_model = False
+    waiting_for_edit_permission = False
     while True:
         try:
             async with CubismClient(args.uri) as client:
@@ -137,8 +138,12 @@ async def main() -> int:
                         break
                     except CubismProtocolError as error:
                         if not args.wait or "Model not found" not in str(error):
-                            raise
-                        if not waiting_for_model:
+                            if not args.wait or "Edit permission is required" not in str(error):
+                                raise
+                            if not waiting_for_edit_permission:
+                                print("已连接模型；Cubism 要求编辑权限才能读取结构，保持连接并等待授权…", flush=True)
+                                waiting_for_edit_permission = True
+                        elif not waiting_for_model:
                             print("Cubism 已授权；等待打开一个 CMO3 模型…", flush=True)
                             waiting_for_model = True
                         await asyncio.sleep(1)
