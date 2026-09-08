@@ -10,8 +10,24 @@
  */
 
 
+// Load the runtime only when a user starts an auto-rig.  Keeping the 128 MB
+// pose model out of the site artifact is essential for GitHub Pages; the
+// browser caches the model after its first successful inference.
+let _ortPromise = null;
+
 async function _ensureOrt() {
-  throw new Error('此兼容构建只使用图层边界估算骨架，不下载 DWPose。');
+  if (_ortPromise) return _ortPromise;
+  _ortPromise = (async () => {
+    const module = await import('onnxruntime-web');
+    const ort = module.env ? module : (module.default || module);
+    // A single WASM thread works without cross-origin-isolation headers, which
+    // keeps both GitHub Pages and the private workbench usable.
+    ort.env.wasm.numThreads = 1;
+    ort.env.wasm.wasmPaths =
+      'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.29.0/dist/';
+    return ort;
+  })();
+  return _ortPromise;
 }
 
 
@@ -225,12 +241,12 @@ export function estimateSkeletonFromBounds(layers, psdW, psdH) {
 
 /* ─── DWPose ONNX inference ─────────────────────────────────────────────────── */
 
-const DWPOSE_CDN = 'https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5/pose_landmark_full.tflite';
 // The actual DWPose model — whole-body 133-point, 288×384 input
 export const DWPOSE_URL = 'https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx';
 
 /** Cache the session across imports so we only download / compile once. */
 let _cachedSession = null;
+let _cachedSessionPromise = null;
 
 /**
  * Load the ONNX session from a URL or ArrayBuffer.
@@ -245,8 +261,37 @@ export async function loadDWPoseSession(payload) {
   return _cachedSession;
 }
 
+/**
+ * Retrieve and initialize DWPose once per browser session. The model stays
+ * outside the published app bundle and is cached by the browser HTTP cache.
+ */
+export async function getDWPoseSession(onStatus) {
+  if (_cachedSession) return _cachedSession;
+  if (_cachedSessionPromise) return _cachedSessionPromise;
+  _cachedSessionPromise = (async () => {
+    onStatus?.('首次使用：正在下载 AI 姿态模型…');
+    const response = await fetch(DWPOSE_URL);
+    if (!response.ok)
+      throw new Error(`DWPose 模型下载失败（${response.status}）。`);
+    const payload = await response.arrayBuffer();
+    // Avoid attempting to compile a small HTML error page returned by a proxy.
+    if (payload.byteLength < 10 * 1024 * 1024)
+      throw new Error('DWPose 模型文件不完整。');
+    onStatus?.('正在初始化 AI 姿态模型…');
+    return loadDWPoseSession(payload);
+  })();
+  try {
+    return await _cachedSessionPromise;
+  } finally {
+    _cachedSessionPromise = null;
+  }
+}
+
 /** Discard the cached session (e.g. on error). */
-export function clearDWPoseSession() { _cachedSession = null; }
+export function clearDWPoseSession() {
+  _cachedSession = null;
+  _cachedSessionPromise = null;
+}
 
 /**
  * Composite all PSD layers onto a single canvas and run DWPose inference.
@@ -263,7 +308,7 @@ export async function runDWPose(layers, psdW, psdH, onnxSession, onStatus) {
   const TARGET_W = 288;
   const TARGET_H = 384;
 
-  onStatus?.('Compositing character…');
+  onStatus?.('正在合成角色姿态图…');
 
   // Build composite from ImageData layers (ag-psd gives us imageData on each layer)
   const tmp = document.createElement('canvas');
@@ -294,7 +339,7 @@ export async function runDWPose(layers, psdW, psdH, onnxSession, onStatus) {
   pctx.fillRect(0, 0, TARGET_W, TARGET_H);
   pctx.drawImage(tmp, padX, padY, newW, newH);
 
-  onStatus?.('Running DWPose inference…');
+  onStatus?.('正在识别四肢与关节位置…');
 
   // ImageNet normalisation (same as prototype)
   const imgData  = pctx.getImageData(0, 0, TARGET_W, TARGET_H).data;

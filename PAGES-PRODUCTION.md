@@ -20,7 +20,7 @@ The popup permits only the configured Pages origin and window.opener. Replies re
 
 ## Compatibility and acceptance
 
-Engine: StretchyStudio 24a83a27ba43e43e9d2e3de5e33994594e6199c2, MIT, with native warp nodes omitted from a copy before standard auto-rig export. This avoids the reproduced upper-body-loss path. Hand-authored native warp lattices are not losslessly converted. Skeleton estimation uses layer bounds, not DWPose.
+Engine: StretchyStudio 24a83a27ba43e43e9d2e3de5e33994594e6199c2, MIT, with native warp nodes omitted from a copy before standard auto-rig export. This avoids the reproduced upper-body-loss path. Hand-authored native warp lattices are not losslessly converted. PSD → Cubism generation uses DWPose in the browser to refine limb and joint pivots from the neutral composite, then keeps See-Through layer tags as the source of truth for part parenting. The model is downloaded on first use and cached by the browser; when it cannot load, generation automatically falls back to layer-bound skeleton estimation.
 
 Local UI test on 2026-09-05: imported the accepted 1024×1024 ana.psd, generated 24 part meshes, downloaded ana-pages-compat.cmo3 and opened it in Cubism 5.3.03. Full-body default display verified. Parameter motion quality and MOC3 compilation remain separate acceptance steps; file generation alone never marks them passed.
 

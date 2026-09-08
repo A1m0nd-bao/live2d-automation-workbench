@@ -6,6 +6,8 @@ import {
   matchTag,
   analyzeGroups,
   estimateSkeletonFromBounds,
+  getDWPoseSession,
+  runDWPose,
   buildArmatureNodes,
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
@@ -50,6 +52,30 @@ const png = (canvas) =>
 
 const replacementMatches = (base, replacement) =>
   base === replacement || replacement === base.replace(/-[lr]$/, '');
+
+// PSD layer names are still the source of truth for parenting. DWPose refines
+// the anatomical pivots from the rendered character, while the bounds-based
+// skeleton remains a safe fallback for points the model cannot return.
+function poseAssistedSkeleton(boundsSkeleton, poseSkeleton, width, height) {
+  const result = { ...boundsSkeleton };
+  for (const [name, point] of Object.entries(poseSkeleton ?? {})) {
+    if (
+      !point ||
+      !Number.isFinite(point.x) ||
+      !Number.isFinite(point.y) ||
+      point.x < 0 ||
+      point.y < 0 ||
+      point.x > width ||
+      point.y > height
+    )
+      continue;
+    result[name] = point;
+  }
+  // DWPose has no head-base landmark; retaining the semantic face anchor keeps
+  // face and hair parenting stable for anime PSDs.
+  result.headBase = boundsSkeleton.headBase;
+  return result;
+}
 
 function buildVariantAnimations(variants, layers, ids) {
   const layerIds = new Map(layers.map((layer, index) => [layer.name, ids[index]]));
@@ -148,6 +174,7 @@ export async function generateCubism(
       const layers = [...parsed.layers];
       const candidates = [
         'handwear',
+        'legwear',
         'footwear',
         'irides',
         'eyebrow',
@@ -197,8 +224,35 @@ export async function generateCubism(
         throw new Error(
           '图层名称无法识别。请使用 See-Through 命名的分层 PSD，或导入 .stretch 工程。',
         );
+      const boundsSkeleton = estimateSkeletonFromBounds(layers, width, height);
+      let skeleton = boundsSkeleton;
+      try {
+        const session = await getDWPoseSession(onProgress);
+        // Alternate expression/action layers must not be visible to the pose
+        // model; its anchors should describe the neutral production pose only.
+        const poseLayers = layers.filter(isInitiallyVisible);
+        const poseSkeleton = await runDWPose(
+          poseLayers,
+          width,
+          height,
+          session,
+          onProgress,
+        );
+        skeleton = poseAssistedSkeleton(
+          boundsSkeleton,
+          poseSkeleton,
+          width,
+          height,
+        );
+        warnings.push('已使用 DWPose AI 姿态识别优化四肢、躯干与关节枢轴。');
+      } catch (error) {
+        // Model delivery and WASM support vary by browser/network. Exporting a
+        // usable CMO3 is more important than making the pipeline wait forever.
+        const detail = error instanceof Error ? error.message : '未知错误';
+        warnings.push(`AI 姿态辅助未完成，已回退为图层边界骨架：${detail}`);
+      }
       const { groupDefs, assignments } = buildArmatureNodes(
-        estimateSkeletonFromBounds(layers, width, height),
+        skeleton,
         analyzeGroups(tags),
         layers,
         ids,
