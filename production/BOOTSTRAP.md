@@ -13,7 +13,7 @@ The public GitHub Pages site remains a read-only showcase until it is built with
 5. Add these two GitHub repository secrets, then redeploy Pages:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_PUBLISHABLE_KEY`
-6. Add the same browser-safe values to the private Site build environment. Separately give only the persistent worker/API `MORPH_SUPABASE_URL` and `MORPH_SUPABASE_SERVICE_ROLE_KEY`; that private key must never be put in GitHub Pages, frontend files, or a `VITE_` variable.
+6. Add the same browser-safe values to the private Site runtime environment as `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`. Separately give only the persistent worker/API `MORPH_SUPABASE_URL` and `MORPH_SUPABASE_SERVICE_ROLE_KEY`; that private key must never be put in GitHub Pages, frontend files, or a `VITE_` variable.
 
 ## Retention and access model
 

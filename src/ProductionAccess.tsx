@@ -3,6 +3,7 @@ import { LogIn, LogOut, Mail, ShieldCheck } from 'lucide-react';
 import type { Session } from '@supabase/supabase-js';
 import {
   currentProductionSession,
+  loadProductionConfig,
   productionClient,
   productionConfig,
   sendProductionMagicLink,
@@ -13,12 +14,16 @@ type Props = { onSessionChange: (session: Session | null) => void };
 
 /** Real email auth surface; visitors can still view the public showcase. */
 export function ProductionAccess({ onSessionChange }: Props) {
-  const configured = Boolean(productionConfig());
+  const [configured, setConfigured] = useState(Boolean(productionConfig()));
   const [session, setSession] = useState<Session | null>(null);
   const [email, setEmail] = useState('');
   const [open, setOpen] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    void loadProductionConfig().then((config) => setConfigured(Boolean(config)));
+  }, []);
 
   useEffect(() => {
     if (!configured) return;

@@ -9,13 +9,33 @@ function value(name: 'VITE_SUPABASE_URL' | 'VITE_SUPABASE_PUBLISHABLE_KEY') {
 }
 
 export function productionConfig(): ProductionConfig | null {
+  if (runtimeConfig) return runtimeConfig;
   const url = value('VITE_SUPABASE_URL').replace(/\/$/, '');
   const publishableKey = value('VITE_SUPABASE_PUBLISHABLE_KEY');
   if (!url.startsWith('https://') || !publishableKey) return null;
   return { url, publishableKey };
 }
 
+let runtimeConfig: ProductionConfig | null = null;
 let client: SupabaseClient | null = null;
+
+/** Private Sites can read browser-safe values at runtime; static Pages uses VITE_. */
+export async function loadProductionConfig() {
+  if (productionConfig()) return productionConfig();
+  try {
+    const response = await fetch('/api/production-config', { cache: 'no-store' });
+    if (!response.ok) return null;
+    const value = await response.json() as { url?: unknown; publishableKey?: unknown };
+    if (typeof value.url !== 'string' || typeof value.publishableKey !== 'string') return null;
+    const url = value.url.trim().replace(/\/$/, '');
+    const publishableKey = value.publishableKey.trim();
+    if (!url.startsWith('https://') || !publishableKey) return null;
+    runtimeConfig = { url, publishableKey };
+    return runtimeConfig;
+  } catch {
+    return null;
+  }
+}
 
 export function productionClient() {
   const config = productionConfig();
