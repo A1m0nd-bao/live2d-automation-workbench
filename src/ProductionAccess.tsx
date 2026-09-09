@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { GitBranch, LogOut, ShieldCheck } from 'lucide-react';
 import type { MorphUser } from './morphBackend';
-import { backendConfig, currentBackendUser, loadBackendConfig, loginWithGithub, signOutBackend } from './morphBackend';
+import { backendConfig, currentBackendAuthState, loadBackendConfig, loginWithGithub, signOutBackend, watchBackendAuth } from './morphBackend';
 
 type Props = { onUserChange: (user: MorphUser | null) => void };
 
@@ -13,11 +13,30 @@ export function ProductionAccess({ onUserChange }: Props) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => { void loadBackendConfig().then((config) => setConfigured(Boolean(config))); }, []);
-  useEffect(() => {
+
+  const refreshIdentity = useCallback(() => {
     if (!configured) return;
-    void currentBackendUser().then((next) => { setUser(next); onUserChange(next); })
-      .catch(() => setNotice('生产工作区还未完成初始化。'));
+    void currentBackendAuthState().then((next) => {
+      if (next.state === 'ready') {
+        setUser(next.user);
+        setNotice('');
+        onUserChange(next.user);
+        return;
+      }
+      setUser(null);
+      onUserChange(null);
+      setNotice(next.state === 'needs-approval'
+        ? `GitHub 已验证 ${next.email}，但它尚未被批准进入工作区。请将该邮箱加入 access_allowlist 后刷新。`
+        : '');
+    }).catch(() => setNotice('生产工作区还未完成数据初始化。'));
   }, [configured, onUserChange]);
+
+  useEffect(() => {
+    refreshIdentity();
+    if (!configured) return;
+    const subscription = watchBackendAuth(refreshIdentity);
+    return () => subscription.unsubscribe();
+  }, [configured, refreshIdentity]);
 
   if (!configured)
     return <span className="production-access production-access--setup"><ShieldCheck size={14} /> 公开展示模式</span>;

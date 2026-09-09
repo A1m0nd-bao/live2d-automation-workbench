@@ -6,6 +6,11 @@ export type MorphUser = {
   role: 'admin' | 'creator';
 };
 
+export type BackendAuthState =
+  | { state: 'signed-out' }
+  | { state: 'needs-approval'; email: string }
+  | { state: 'ready'; user: MorphUser };
+
 type RuntimeConfig = { supabaseUrl: string; publishableKey: string };
 let runtimeConfig: RuntimeConfig | null = null;
 let client: SupabaseClient | null = null;
@@ -54,18 +59,29 @@ function safeFilename(value: string) {
   return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180) || 'artifact.bin';
 }
 
-async function userProfile(): Promise<MorphUser | null> {
+export async function currentBackendAuthState(): Promise<BackendAuthState> {
   const api = supabase();
   const { data: { user }, error } = await api.auth.getUser();
-  if (error || !user?.email) return null;
+  if (error || !user?.email) return { state: 'signed-out' };
   const { data: profile, error: profileError } = await api
     .from('profiles').select('id, email, role').eq('id', user.id).maybeSingle();
   if (profileError) throw new Error('生产工作区尚未完成数据初始化。');
-  if (!profile) return null;
-  return { id: profile.id, email: profile.email, role: profile.role === 'admin' ? 'admin' : 'creator' };
+  if (!profile) return { state: 'needs-approval', email: user.email };
+  return {
+    state: 'ready',
+    user: { id: profile.id, email: profile.email, role: profile.role === 'admin' ? 'admin' : 'creator' },
+  };
 }
 
-export async function currentBackendUser() { return userProfile(); }
+export async function currentBackendUser() {
+  const state = await currentBackendAuthState();
+  return state.state === 'ready' ? state.user : null;
+}
+
+/** Keeps the GitHub Pages UI in sync after OAuth returns to the browser. */
+export function watchBackendAuth(onChange: () => void) {
+  return supabase().auth.onAuthStateChange(() => onChange()).data.subscription;
+}
 
 /** Start GitHub OAuth. The database allowlist rejects accounts that are not approved. */
 export async function loginWithGithub() {
