@@ -11,7 +11,10 @@ function setup(blocked = false) {
     addEventListener: (name, listener) => { listeners[name] = listener; },
     setTimeout: fn => { const id = ++sequence; timers.set(id, () => { timers.delete(id); fn(); }); return id; }, clearTimeout: id => timers.delete(id) };
   const code = ts.transpileModule(readFileSync(new URL('../src/serviceBridge.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  vm.runInNewContext(code, { module, exports: module.exports, window, crypto: { randomUUID: () => `id-${++sequence}` }, URLSearchParams, Map, Error });
+  const policy = { exports: {} };
+  const policyCode = ts.transpileModule(readFileSync(new URL('../src/prepPolicy.ts', import.meta.url), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+  vm.runInNewContext(policyCode, { module: policy, exports: policy.exports });
+  vm.runInNewContext(code, { module, exports: module.exports, require: (id) => { assert.equal(id, './prepPolicy'); return policy.exports; }, window, crypto: { randomUUID: () => `id-${++sequence}` }, URLSearchParams, Map, Error });
   return { api: module.exports, popup, timers, reply(patch = {}) { listeners.message({ origin: module.exports.SERVICE_ORIGIN, source: popup, data: { ...message, result: { ready: true } }, ...patch }); }, getMessage: () => message };
 }
 

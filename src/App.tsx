@@ -22,7 +22,8 @@ import {
   GitBranch,
   WandSparkles,
 } from 'lucide-react';
-import { hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
+import { connectService, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
+import { selectPreparation, type PrepMode } from './prepPolicy';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import {
   isJpeg,
@@ -51,7 +52,8 @@ type Task = {
   inputKind?: string;
   preparedFile?: string;
   prepProvider?: Live2dPrepProvider;
-  prepState?: 'queued' | 'succeeded' | 'failed';
+  prepMode?: PrepMode;
+  prepState?: 'queued' | 'succeeded' | 'user-confirmed' | 'failed';
   prepMessage?: string;
   prepAccepted?: boolean;
   qaPassed?: boolean;
@@ -262,6 +264,7 @@ export default function App() {
     [directDeviceToken, setDirectDeviceToken] = useState('');
   const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
   const [prepProvider, setPrepProvider] = useState<Live2dPrepProvider>('doubao');
+  const [prepMode, setPrepMode] = useState<PrepMode>('generate');
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
     'action_03_hand_on_hip_arms_only',
@@ -387,7 +390,15 @@ export default function App() {
     try {
       const data = JSON.parse(localStorage.getItem(STORAGE) || '[]');
       if (Array.isArray(data))
-        setTasks(data.filter((t) => t && typeof t.id === 'string'));
+        setTasks(data.filter((t) => t && typeof t.id === 'string').map((t: Task) => {
+          if (!t.prepMessage?.startsWith('直连模式：')) return t;
+          // Preserve existing jobs/artifacts; never silently re-submit old work.
+          return { ...t, prepAccepted: false,
+            prepState: t.remoteJobId ? undefined : 'failed',
+            preparedFile: t.remoteJobId ? t.preparedFile : undefined,
+            prepMessage: '历史直传输入：未经过生图处理，也未经过 AI 验收。已有拆分任务保留；未提交任务需重新处理。',
+          };
+        }));
     } catch {
       /* old corrupt metadata is ignored */
     }
@@ -464,7 +475,7 @@ export default function App() {
       productionAttempted.current.add(item.id);
       update(item.id, { cloudSyncState: 'syncing' });
       void readAsset(`${item.id}:input`)
-        .then((source) => createProjectFromLocalTask(item, source))
+        .then((source) => createProjectFromLocalTask(item, source ?? null))
         .then(({ projectId }) => {
           update(item.id, { cloudProjectId: projectId, cloudSyncState: 'synced' });
         })
@@ -570,6 +581,8 @@ export default function App() {
     });
   }
   async function prepared(t: Task) {
+    if (t.prepState !== 'succeeded' && t.prepState !== 'user-confirmed')
+      throw new Error('此输入尚未完成生图处理或用户确认，不能提交拆分。');
     const blob = await readAsset(`${t.id}:prepared`);
     if (!blob || !t.preparedFile)
       throw new Error('Live2D 友好图不在此浏览器，请重新生成。');
@@ -635,23 +648,24 @@ export default function App() {
     setToast('多状态 PSD 已在本地合并；请下载并在 Cubism 前检查替换层。');
   }
   async function prepare(t: Task) {
-    const source = await input(t);
     const provider = t.prepProvider ?? 'doubao';
     const providerLabel = live2dPrepProviderLabel(provider);
-    const health = await serviceRequest<PrepHealth>('prepHealth');
-    const providerHealth = health.providers?.[provider];
-    if (provider === 'image2' && !providerHealth?.ready)
-      throw new Error(
-        providerHealth?.message || 'Image-2 尚未部署到当前私有生图服务；不会回退到豆包，请先完成服务端配置。',
-      );
-    if (provider === 'doubao' && health.ready === false)
-      throw new Error(health.message || '豆包生图服务当前不可用。');
-    setProgress(`${providerLabel} 正在按 Live2D 规范重绘角色…`);
-    update(t.id, {
-      prepState: 'queued',
-      prepMessage: `${providerLabel} 正在生成 Live2D 友好图…`,
-    });
+    update(t.id, { prepState: 'queued', prepAccepted: false, prepMessage: `正在连接${providerLabel}服务…` });
     try {
+      const source = await input(t);
+      const health = await serviceRequest<PrepHealth>('prepHealth');
+      const providerHealth = health.providers?.[provider];
+      if (provider === 'image2' && !providerHealth?.ready)
+        throw new Error(
+          providerHealth?.message || 'Image-2 尚未部署到当前私有生图服务；不会回退到豆包，请先完成服务端配置。',
+        );
+      if (provider === 'doubao' && !(providerHealth?.ready ?? health.ready))
+        throw new Error(providerHealth?.message || health.message || '豆包生图服务当前不可用。');
+      setProgress(`${providerLabel} 正在按 Live2D 规范重绘角色…`);
+      update(t.id, {
+        prepState: 'queued',
+        prepMessage: `${providerLabel} 正在生成 Live2D 友好图…`,
+      });
       const data = await serviceRequest<ArrayBuffer>('prepare', {
         image: source,
         name: source.name,
@@ -668,13 +682,13 @@ export default function App() {
         preparedFile: filename,
         prepState: 'succeeded',
         prepAccepted: true,
-        prepMessage: `${providerLabel} 已生成 Live2D 友好图，正在自动提交拆分。`,
+        prepMessage: `${providerLabel} 已返回处理图；构图基础检查通过（非 AI 语义验收），正在提交拆分。`,
       });
       return new File([png], filename, { type: 'image/png' });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : `${providerLabel} 生图预处理失败。`;
-      update(t.id, { prepState: 'failed', prepMessage: message });
+      update(t.id, { prepState: 'failed', prepAccepted: false, prepMessage: message });
       throw error;
     }
   }
@@ -698,34 +712,35 @@ export default function App() {
     });
   }
   async function startImagePipeline(t: Task) {
-    if (hasDirectServiceConfig()) {
-      const source = await input(t);
-      setProgress('正在验证已完成 Persona Lock 的全身输入…');
-      await assertLive2dFriendlyFrame(source);
-      const filename = `${t.name}-live2d-friendly.png`;
-      await saveAsset(`${t.id}:prepared`, source);
-      update(t.id, {
-        preparedFile: filename,
-        prepState: 'succeeded',
-        prepAccepted: true,
-        prepMessage: '直连模式：已使用上传的全身 Persona Lock 图，不再要求网页登录。',
-      });
-      await submitToSeeThrough(t, new File([source], filename, { type: source.type || 'image/png' }));
-      setToast('已通过直连队列提交 See-Through；无需登录弹窗。');
-      return;
-    }
-    const preparedImage = await prepare(t);
+    const preparedImage = await selectPreparation(t.prepMode, {
+      generate: () => prepare(t),
+      confirmedSource: async () => {
+        try {
+          const source = await input(t);
+          setProgress('正在进行用户确认图的构图基础检查…');
+          await assertLive2dFriendlyFrame(source);
+          const png = await asPreparedPng(await source.arrayBuffer());
+          const filename = `${t.name}-user-confirmed.png`;
+          await saveAsset(`${t.id}:prepared`, png);
+          update(t.id, {
+            preparedFile: filename,
+            prepState: 'user-confirmed',
+            prepAccepted: false,
+            prepMessage: '用户明确确认使用已处理图；已跳过生图，仅做构图基础检查，非 AI 验收。',
+          });
+          return new File([png], filename, { type: 'image/png' });
+        } catch (error) {
+          update(t.id, { prepState: 'failed', prepAccepted: false, prepMessage: error instanceof Error ? error.message : '输入检查失败。' });
+          throw error;
+        }
+      },
+    });
     await submitToSeeThrough(t, preparedImage);
-    setToast('已自动生成友好图并提交 See-Through；PSD 完成后会自动下载。');
+    setToast('已提交 See-Through；PSD 完成后会自动下载。');
   }
   async function startProBasePipeline(t: Task) {
     update(t.id, { proStage: 'base_processing' });
-    if (hasDirectServiceConfig()) {
-      await startImagePipeline(t);
-      return;
-    }
-    const preparedImage = await prepare(t);
-    await submitToSeeThrough(t, preparedImage);
+    await startImagePipeline(t);
     setToast('Pro 基础状态已提交 See-Through；基础 PSD 完成后将进入多状态生成。');
   }
   async function refresh(t: Task) {
@@ -835,7 +850,8 @@ export default function App() {
       preparedFile: undefined,
       prepState: undefined,
       prepMessage: undefined,
-      prepAccepted: k === 'image',
+      prepAccepted: false,
+      prepMode: 'generate',
       psdFile: k === 'psd' ? f.name : undefined,
       remoteJobId: undefined,
       remoteState: undefined,
@@ -1060,6 +1076,13 @@ export default function App() {
               </button>
             ))}
           </fieldset>
+          <label className="field-label">
+            <span><input type="checkbox" checked={prepMode === 'confirmed-source'}
+              onChange={(e) => setPrepMode(e.target.checked ? 'confirmed-source' : 'generate')} />
+              我确认这张图已处理完毕，跳过生图直接拆层</span>
+            <small>默认调用上方选中的一个生图服务。勾选只代表用户确认，不代表 AI 验收；直连设置不会跳过生图。</small>
+          </label>
+          <button type="button" className="ghost-button" onClick={() => void operate(async () => connectService())}>连接生图服务（登录）</button>
           {productionMode === 'pro' && (
             <section className="pro-state-picker">
               <b>选择首批状态</b>
@@ -1121,6 +1144,7 @@ export default function App() {
                   inputFile: file.name,
                   inputKind: k,
                   prepProvider: k === 'image' ? prepProvider : undefined,
+                  prepMode: k === 'image' ? prepMode : undefined,
                   psdFile: k === 'psd' ? file.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
                   mode: productionMode,
@@ -1134,6 +1158,7 @@ export default function App() {
                 setCreate(false);
                 setName('');
                 setFile(null);
+                setPrepMode('generate');
                 if (k === 'image') {
                   if (productionMode === 'pro') await startProBasePipeline(next);
                   else await startImagePipeline(next);
@@ -1180,7 +1205,7 @@ export default function App() {
               }}>清除本机直连设置</button>
             )}
           </div>
-          <small>直连模式不执行云端生图预处理：请上传已完成 Persona Lock 的全身图，或直接导入 PSD。</small>
+          <small>直连只负责 See-Through 拆分队列；原图仍会调用所选生图服务，需连接私有生图服务并登录。只有新建任务时明确勾选“跳过生图”才直传。</small>
         </Modal>
       )}
       {task && !create && (
@@ -1268,6 +1293,8 @@ export default function App() {
               !task.preparedFile &&
               !task.remoteJobId &&
               task.prepState === 'failed' && (
+                <>
+                <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => connectService())}>连接生图服务（登录）</button>
                 <button
                   className="primary-button"
                   disabled={busy}
@@ -1275,6 +1302,7 @@ export default function App() {
                 >
                   重试自动化处理
                 </button>
+                </>
               )}
             {task.preparedFile && (
               <>
@@ -1287,7 +1315,7 @@ export default function App() {
                     )
                   }
                 >
-                  下载 Live2D 友好图
+                  下载拆分输入图
                 </button>
                 {preparedPreview && (
                   <figure>
@@ -1296,9 +1324,9 @@ export default function App() {
                     <img
                       className="psd-preview"
                       src={preparedPreview}
-                      alt="经预处理的 Live2D 角色参考"
+                      alt="本任务的拆分输入图"
                     />
-                    <figcaption>自动化预处理结果；已自动投递 See-Through。</figcaption>
+                    <figcaption>{task.prepMessage || '拆分输入图；预处理来源尚未确认。'}{task.remoteJobId ? '已提交拆分队列。' : '尚未提交拆分队列。'}</figcaption>
                   </figure>
                 )}
               </>
@@ -1306,7 +1334,7 @@ export default function App() {
             {!task.psdFile &&
               task.inputKind !== 'stretch' &&
               !task.remoteJobId &&
-              (task.inputKind !== 'image' || task.prepAccepted) && (
+              (task.inputKind !== 'image' || (task.preparedFile && (task.prepState === 'succeeded' || task.prepState === 'user-confirmed'))) && (
                 <button
                   className="primary-button"
                   disabled={busy}

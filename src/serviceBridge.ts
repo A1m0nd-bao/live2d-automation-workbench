@@ -1,3 +1,5 @@
+import { isPrepCommand } from './prepPolicy';
+
 export const SERVICE_ORIGIN =
   'https://morph-live2d-workbench.shehaoli.chatgpt.site';
 const CHANNEL = 'morph-service-v1';
@@ -178,7 +180,9 @@ export async function serviceRequest<T>(
   payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' } = {},
 ): Promise<T> {
   const direct = getDirectServiceConfig();
-  if (direct) return directServiceRequest<T>(direct, command, payload);
+  // Relay owns decomposition only. Generation always uses the private prep
+  // service, even when decomposition is configured for direct/local transport.
+  if (direct && !isPrepCommand(command)) return directServiceRequest<T>(direct, command, payload);
   if (window.location.origin === SERVICE_ORIGIN) {
     let path =
       command === 'prepare' || command === 'prepHealth'

@@ -2,9 +2,9 @@
 
 - Public UI: https://a1m0nd-bao.github.io/live2d-automation-workbench/
 - Private service connection: existing Sites `/pages-bridge` remains as a
-  compatibility fallback. The preferred GitHub Pages route is **直连设置**:
+  image-preparation path. For decomposition only, the preferred GitHub Pages route is **直连设置**:
   configure a Relay HTTPS URL plus `MORPH_DEVICE_TOKEN` once per browser to
-  avoid the Sites login popup. The token is a revocable Relay access key, not
+  avoid the Sites login popup for decomposition. Generation still requires the private service login. The token is a revocable Relay access key, not
   a ModelScope or Ark credential.
 - Image preparation: the task dialog offers **豆包 Seedream** and **Image-2**. Both use the same source-identity lock and Live2D-friendly prompt before See-Through submission. Provider choice is browser task metadata only; secrets remain in the private service.
   - Doubao: configure `VOLCENGINE_ARK_API_KEY` as a Sites secret. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
@@ -15,7 +15,7 @@
 
 ## Use
 
-Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. For a PNG/JPG reference, first connect the private service in its login popup, create a Live2D-friendly Doubao Seedream edit, inspect it, approve it, then submit the approved edit. The original and approved image remain separate browser assets. The reference is sent directly from the private service to Ark as a base64 data URL; no bucket or public object URL is created. Open a task to resume status polling and retrieve its PSD. No fabricated completion percentages are shown.
+Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. PNG/JPG tasks default to generation by the selected provider (Doubao OR Image-2), regardless of direct Relay settings. Connect the private generation service using the new-task or retry login button. Missing login, provider configuration or generation failure stops the task before See-Through; no provider fallback or source-image fallback occurs. A user may explicitly check “已处理，跳过生图” for that task; this is recorded as `user-confirmed`, never as generated/AI-approved. Replacing the input resets to generation. Basic aspect-ratio/alpha-margin checks are not semantic Live2D QA. Existing legacy direct-pass jobs are preserved and labelled as unverified; unsubmitted legacy passes must be reprocessed.
 
 Task metadata uses the existing localStorage key; actual inputs and outputs use IndexedDB. An older task with only filenames needs its file reimported. Changing origins/devices or clearing site data does not migrate files. Keep downloaded backups. Closing Pages stops browser generation, but not an already submitted server inference job.
 
@@ -29,7 +29,7 @@ Local UI test on 2026-09-05: imported the accepted 1024×1024 ana.psd, generated
 
 ## Checks
 
-`node --test tests/service-bridge.test.mjs tests/live2d-prep.test.mjs`
+`node --test scripts/test-prep-policy.mjs tests/service-bridge.test.mjs tests/live2d-prep.test.mjs`
 
 `npx tsc --noEmit`
 
