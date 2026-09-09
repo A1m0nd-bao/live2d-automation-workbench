@@ -113,6 +113,9 @@ export async function generateCmo3(input) {
     // Native project physics rules (project.physicsRules[]). When non-empty,
     // these override the hardcoded PHYSICS_RULES default in physics.js.
     physicsRules = null,
+    // Optional bounded elbow/knee flex controls derived from DWPose.  Each is
+    // emitted only if a matching split limb mesh exists.
+    limbBends = [],
   } = input;
 
   // ── Phase 0 diagnostic log (only populated when generateRig is on) ──
@@ -216,6 +219,34 @@ export async function generateCmo3(input) {
       min: p.min ?? 0, max: p.max ?? 1, defaultVal: p.default ?? 0,
       decimalPlaces: 3,
     });
+  }
+
+  // Live2D has no standard IDs for limb flex.  Use stable custom IDs so an
+  // artist can locate them immediately in Cubism's parameter palette.  The
+  // range is intentionally 0..1: neutral → subtle → small flex, never a
+  // hyperextension or a generated full-body pose.
+  const limbBendParamPids = new Map();
+  const meshLimbBendIds = new Set(
+    meshes.map((mesh) => mesh.limbBend?.id).filter(Boolean),
+  );
+  for (const definition of limbBends) {
+    if (!definition?.id || !meshLimbBendIds.has(definition.id)) continue;
+    if (limbBendParamPids.has(definition.id)) continue;
+    let paramDef = paramDefs.find((param) => param.id === definition.id);
+    if (!paramDef) {
+      const [, pid] = x.shared('CParameterGuid', { uuid: uuid(), note: definition.id });
+      paramDef = {
+        pid,
+        id: definition.id,
+        name: definition.name ?? definition.id,
+        min: 0,
+        max: 1,
+        defaultVal: 0,
+        decimalPlaces: 2,
+      };
+      paramDefs.push(paramDef);
+    }
+    limbBendParamPids.set(definition.id, paramDef.pid);
   }
 
   // Action switches deliberately live in the authoring CMO3 (unlike runtime
@@ -840,6 +871,15 @@ export async function generateCmo3(input) {
     const hasActionSwitch = !!actionParamPid &&
       (Array.isArray(actionSwitch.stateOpacities) ||
         actionSwitch.state === 'base' || actionSwitch.state === 'alternate');
+    const limbBend = m.limbBend ?? null;
+    const limbBendParamPid = limbBend ? limbBendParamPids.get(limbBend.id) : null;
+    const hasLimbBend = !hasBakedKeyforms && !hasEyelidClosure
+      && !hasNeckCornerShapekeys && !hasActionSwitch
+      && !!limbBendParamPid
+      && Number.isFinite(limbBend?.pivot?.x)
+      && Number.isFinite(limbBend?.pivot?.y)
+      && Number.isFinite(limbBend?.endpoint?.x)
+      && Number.isFinite(limbBend?.endpoint?.y);
     const [kfBinding, pidKfb] = x.shared('KeyformBindingSource');
     const [kfGridMesh, pidKfgMesh] = x.shared('KeyformGridSource');
 
@@ -848,6 +888,7 @@ export async function generateCmo3(input) {
     let bakedFormGuids = null;
     let neckCornerFormGuids = null; // [pidForm_-30, pidForm_+30]; 0 reuses pidFormMesh
     let actionFormGuids = null; // one form per state for multi-action swaps
+    let limbBendFormGuids = null; // [rest, subtle, small flex]
 
     if (hasActionSwitch) {
       if (Array.isArray(actionSwitch.stateOpacities)) {
@@ -1031,6 +1072,45 @@ export async function generateCmo3(input) {
       x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
       x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
       x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = 'ParamAngleX';
+    } else if (hasLimbBend) {
+      // Three safe, one-way keyforms: 0 neutral, 0.5 subtle, 1 small flex.
+      // This intentionally lives below the action-switch branch: alternate
+      // hand art stays a discrete production state rather than being bent as
+      // an unrelated side effect.
+      const [, pidFormSubtle] = x.shared('CFormGuid', {
+        uuid: uuid(), note: `${meshName}_${limbBend.id}_subtle`,
+      });
+      const [, pidFormFlex] = x.shared('CFormGuid', {
+        uuid: uuid(), note: `${meshName}_${limbBend.id}_flex`,
+      });
+      limbBendFormGuids = [pidFormMesh, pidFormSubtle, pidFormFlex];
+      const kfog = x.sub(kfGridMesh, 'array_list', {
+        'xs.n': 'keyformsOnGrid', count: '3',
+      });
+      for (let i = 0; i < limbBendFormGuids.length; i++) {
+        const kog = x.sub(kfog, 'KeyformOnGrid');
+        const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
+        const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
+        const kon = x.sub(kop, 'KeyOnParameter');
+        x.subRef(kon, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
+        x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = String(i);
+        x.subRef(kog, 'CFormGuid', limbBendFormGuids[i], { 'xs.n': 'keyformGuid' });
+      }
+      const kb = x.sub(kfGridMesh, 'array_list', {
+        'xs.n': 'keyformBindings', count: '1',
+      });
+      x.subRef(kb, 'KeyformBindingSource', pidKfb);
+      x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
+      x.subRef(kfBinding, 'CParameterGuid', limbBendParamPid, { 'xs.n': 'parameterGuid' });
+      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '3' });
+      x.sub(keys, 'f').text = '0.0';
+      x.sub(keys, 'f').text = '0.5';
+      x.sub(keys, 'f').text = '1.0';
+      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
+      x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
+      x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
+      x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
+      x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = limbBend.id;
     } else {
       // Standard single keyform bound to ParamOpacity
       const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
@@ -1058,14 +1138,15 @@ export async function generateCmo3(input) {
     perMesh.push({
       mi, meshName, meshId, pngPath, drawOrder: m.drawOrder ?? (500 + mi),
       pidDrawable, pidFormMesh, bakedFormGuids, pidFormClosed,
-      neckCornerFormGuids, actionFormGuids, actionState: actionSwitch?.state ?? null,
+      neckCornerFormGuids, actionFormGuids, limbBendFormGuids,
+      actionState: actionSwitch?.state ?? null,
       actionStateOpacities: actionSwitch?.stateOpacities ?? null,
       pidMiGuid, pidTexGuid, pidExtMesh, pidExtTex, pidEmesh,
       pidImg, pidLayer,
       pidFset, pidTex2d, pidTie, pidTimi,
       pidKfb, pidKfgMesh,
       tieSup, hasBakedKeyforms, hasEyelidClosure, closureSide,
-      hasNeckCornerShapekeys,
+      hasNeckCornerShapekeys, hasLimbBend, limbBend,
       vertices: m.vertices,
       triangles: m.triangles,
       uvs: m.uvs,
@@ -4113,6 +4194,63 @@ export async function generateCmo3(input) {
       emitArtMeshForm(kfList, pm.neckCornerFormGuids[0], negVerts); // −30
       emitArtMeshForm(kfList, pm.pidFormMesh, verts);                //   0 (rest)
       emitArtMeshForm(kfList, pm.neckCornerFormGuids[1], posVerts); // +30
+    } else if (pm.hasLimbBend) {
+      // A local, smoothly weighted hinge.  Vertices above the detected joint
+      // remain fixed; the section from joint to wrist/ankle gains up to 7° for
+      // elbows and 5° for knees.  This avoids the unstable, large-scale
+      // rotation that a generic deformer would create on a single PSD layer.
+      const { pivot, endpoint, maxAngle = 5 } = pm.limbBend;
+      const dirX = endpoint.x - pivot.x;
+      const dirY = endpoint.y - pivot.y;
+      const dirLength = Math.hypot(dirX, dirY) || 1;
+      const unitX = dirX / dirLength;
+      const unitY = dirY / dirLength;
+      // In a front-facing illustration, flex toward the character centre.
+      // This derives the sign from the actual detected limb position rather
+      // than assuming a PSD's left/right naming convention is screen-space.
+      const angleSign = endpoint.x < canvasW / 2 ? -1 : 1;
+      const smoothstep = (value) => value * value * (3 - 2 * value);
+      const bendCanvas = (amount) => {
+        const positions = new Array(canvasVerts.length);
+        const maxRad = angleSign * maxAngle * amount * Math.PI / 180;
+        for (let i = 0; i < numVerts; i++) {
+          const vx = canvasVerts[i * 2];
+          const vy = canvasVerts[i * 2 + 1];
+          const dx = vx - pivot.x;
+          const dy = vy - pivot.y;
+          // A short blend band just above/below the joint prevents a crease
+          // across a layer that contains both upper and lower limb artwork.
+          const along = (dx * unitX + dy * unitY) / dirLength;
+          const weight = smoothstep(Math.max(0, Math.min(1, (along + 0.08) / 0.92)));
+          const rad = maxRad * weight;
+          const cos = Math.cos(rad);
+          const sin = Math.sin(rad);
+          positions[i * 2] = pivot.x + dx * cos - dy * sin;
+          positions[i * 2 + 1] = pivot.y + dx * sin + dy * cos;
+        }
+        return positions;
+      };
+      const toLocal = (canvasArr) => {
+        if (rwBox) {
+          return canvasArr.map((value, index) =>
+            index % 2 === 0
+              ? (value - rwBox.gridMinX) / rwBox.gridW
+              : (value - rwBox.gridMinY) / rwBox.gridH,
+          );
+        }
+        if (dfOrigin) {
+          return canvasArr.map((value, index) =>
+            value - (index % 2 === 0 ? dfOrigin.x : dfOrigin.y),
+          );
+        }
+        return canvasArr;
+      };
+      const subtleVerts = toLocal(bendCanvas(0.5));
+      const flexVerts = toLocal(bendCanvas(1));
+      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '3' });
+      emitArtMeshForm(kfList, pm.limbBendFormGuids[0], verts);
+      emitArtMeshForm(kfList, pm.limbBendFormGuids[1], subtleVerts);
+      emitArtMeshForm(kfList, pm.limbBendFormGuids[2], flexVerts);
     } else {
       // Single keyform at rest position
       const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: '1' });

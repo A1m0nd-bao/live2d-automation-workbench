@@ -77,6 +77,26 @@ function poseAssistedSkeleton(boundsSkeleton, poseSkeleton, width, height) {
   return result;
 }
 
+// These are deliberately modest, one-directional production controls.  They
+// are not pose synthesis: a three-state mesh keyform only flexes the limb
+// below the detected elbow/knee, leaving the neutral illustration intact.
+function buildAutoLimbBends(skeleton, width, height) {
+  const validPoint = (point) =>
+    point && Number.isFinite(point.x) && Number.isFinite(point.y) &&
+    point.x >= 0 && point.y >= 0 && point.x <= width && point.y <= height;
+  const specs = [
+    ['handwear-l', 'ParamArmLBend', 'Arm L Bend', 'arm', skeleton.lElbow, skeleton.lWrist, 7],
+    ['handwear-r', 'ParamArmRBend', 'Arm R Bend', 'arm', skeleton.rElbow, skeleton.rWrist, 7],
+    ['legwear-l', 'ParamLegLBend', 'Leg L Bend', 'leg', skeleton.lKnee, skeleton.lAnkle, 5],
+    ['legwear-r', 'ParamLegRBend', 'Leg R Bend', 'leg', skeleton.rKnee, skeleton.rAnkle, 5],
+  ];
+  return specs
+    .filter(([, , , , pivot, endpoint]) => validPoint(pivot) && validPoint(endpoint))
+    .map(([tag, id, name, kind, pivot, endpoint, maxAngle]) => ({
+      tag, id, name, kind, pivot, endpoint, maxAngle,
+    }));
+}
+
 function buildVariantAnimations(variants, layers, ids) {
   const layerIds = new Map(layers.map((layer, index) => [layer.name, ids[index]]));
   const tracksForVariant = (variant) => {
@@ -263,6 +283,10 @@ export async function generateCubism(
         canvas: { width, height },
         textures: [],
         parameters: [],
+        // The generated CMO3 receives four optional, bounded controls:
+        // 0 (neutral), 0.5 (subtle), 1 (small flex).  They are only emitted
+        // when the PSD has separately named left/right limb layers.
+        autoLimbBends: buildAutoLimbBends(skeleton, width, height),
         // Discrete production states are exported as Cubism parameters rather
         // than interpolated mesh poses.  Start with the safest useful case:
         // base arms ↔ action_02 wave arms.  Both endpoint states contain a

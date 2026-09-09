@@ -289,6 +289,12 @@ export async function exportLive2DProject(project, images, opts = {}) {
     const actionState = actionSwitch
       ? (part.variant === actionSwitch.variantId ? 'alternate' : 'base')
       : null;
+    // PSD auto-rig supplies named, separate limb layers plus DWPose pivots.
+    // Keep this explicit metadata with the mesh so CMO3 keyforms can bend only
+    // the segment below an elbow/knee rather than rotating a whole body part.
+    const limbBend = (project.autoLimbBends ?? []).find(
+      (definition) => definition.tag === matchTag(meshName),
+    ) ?? null;
 
     meshes.push({
       name: meshName,
@@ -313,6 +319,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
         name: actionSwitch.name,
         state: actionState,
       } : null,
+      limbBend,
     });
   }
 
@@ -344,6 +351,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     generatePhysics,
     physicsDisabledCategories,
     physicsRules: project.physicsRules ?? [],
+    limbBends: project.autoLimbBends ?? [],
   });
 
   // Generate .can3 animation file if there are animations with deformer parameters
