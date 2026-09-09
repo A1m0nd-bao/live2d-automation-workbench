@@ -100,11 +100,19 @@ export function watchBackendAuth(onChange: () => void) {
 
 /** Start GitHub OAuth. The database allowlist rejects accounts that are not approved. */
 export async function loginWithGithub() {
-  const { error } = await supabase().auth.signInWithOAuth({
+  const { data, error } = await supabase().auth.signInWithOAuth({
     provider: 'github',
-    options: { redirectTo: CANONICAL_WORKBENCH_URL, scopes: 'read:user user:email' },
+    options: {
+      redirectTo: CANONICAL_WORKBENCH_URL,
+      scopes: 'read:user user:email',
+      // GitHub Pages is static. Explicit navigation is more reliable than
+      // depending on an SDK-side redirect that some embedded browsers suppress.
+      skipBrowserRedirect: true,
+    },
   });
   if (error) throw new Error(error.message);
+  if (!data.url) throw new Error('GitHub 授权地址未返回，请检查 Supabase 的 GitHub Provider 配置。');
+  window.location.assign(data.url);
 }
 
 export async function signOutBackend() {
