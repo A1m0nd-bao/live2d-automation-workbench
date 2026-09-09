@@ -9,6 +9,9 @@ export type MorphUser = {
 type RuntimeConfig = { supabaseUrl: string; publishableKey: string };
 let runtimeConfig: RuntimeConfig | null = null;
 let client: SupabaseClient | null = null;
+// GitHub Pages is the canonical public workbench. Keeping this fixed prevents
+// an email link requested from a temporary preview from returning users there.
+const CANONICAL_WORKBENCH_URL = 'https://a1m0nd-bao.github.io/live2d-automation-workbench/';
 
 function configuredFromBuild(): RuntimeConfig | null {
   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -70,7 +73,7 @@ export async function loginWithAccess(email: string) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('请输入有效的工作邮箱。');
   const { error } = await supabase().auth.signInWithOtp({
     email: address,
-    options: { shouldCreateUser: false, emailRedirectTo: window.location.origin },
+    options: { shouldCreateUser: false, emailRedirectTo: CANONICAL_WORKBENCH_URL },
   });
   if (error) throw new Error(error.message);
 }
