@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { GitBranch, LogOut, ShieldCheck } from 'lucide-react';
 import type { MorphUser } from './morphBackend';
-import { backendConfig, currentBackendAuthState, loadBackendConfig, loginWithGithub, signOutBackend, watchBackendAuth } from './morphBackend';
+import { backendConfig, currentBackendAuthState, loadBackendConfig, loginWithGithub, oauthCallbackError, signOutBackend, watchBackendAuth } from './morphBackend';
 
 type Props = { onUserChange: (user: MorphUser | null) => void };
 
@@ -27,7 +27,7 @@ export function ProductionAccess({ onUserChange }: Props) {
       onUserChange(null);
       setNotice(next.state === 'needs-approval'
         ? `GitHub 已验证 ${next.email}，但它尚未被批准进入工作区。请将该邮箱加入 access_allowlist 后刷新。`
-        : '');
+        : (oauthCallbackError() ? `GitHub 登录未完成：${oauthCallbackError()}` : ''));
     }).catch(() => setNotice('生产工作区还未完成数据初始化。'));
   }, [configured, onUserChange]);
 

@@ -28,6 +28,21 @@ function configuredFromBuild(): RuntimeConfig | null {
 
 export function backendConfig() { return runtimeConfig ?? configuredFromBuild(); }
 
+/**
+ * Supabase reports OAuth failures in either the query string or URL fragment.
+ * Read this only after its client has had a chance to consume a successful
+ * callback, so a valid access token is never mistaken for an error.
+ */
+export function oauthCallbackError() {
+  if (typeof window === 'undefined') return null;
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const query = new URLSearchParams(window.location.search);
+  const params = hash.get('error') ? hash : query;
+  const error = params.get('error');
+  if (!error) return null;
+  return params.get('error_description') || params.get('error_code') || error;
+}
+
 function supabase() {
   const config = backendConfig();
   if (!config) throw new Error('生产工作区尚未配置。');
