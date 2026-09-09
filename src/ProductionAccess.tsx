@@ -1,16 +1,14 @@
 import { useEffect, useState } from 'react';
-import { LogIn, LogOut, Mail, ShieldCheck } from 'lucide-react';
+import { GitBranch, LogOut, ShieldCheck } from 'lucide-react';
 import type { MorphUser } from './morphBackend';
-import { backendConfig, currentBackendUser, loadBackendConfig, loginWithAccess, signOutBackend } from './morphBackend';
+import { backendConfig, currentBackendUser, loadBackendConfig, loginWithGithub, signOutBackend } from './morphBackend';
 
 type Props = { onUserChange: (user: MorphUser | null) => void };
 
-/** Supabase email sign-in links. Accounts are invited by an administrator; public sign-up is disabled. */
+/** GitHub OAuth. Supabase's access allowlist approves users before profiles are created. */
 export function ProductionAccess({ onUserChange }: Props) {
   const [configured, setConfigured] = useState(Boolean(backendConfig()));
   const [user, setUser] = useState<MorphUser | null>(null);
-  const [email, setEmail] = useState('');
-  const [linkSent, setLinkSent] = useState(false);
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -30,18 +28,14 @@ export function ProductionAccess({ onUserChange }: Props) {
       }}><LogOut size={14} /> 退出</button>
     </div>;
   return <div className="production-access production-access--login">
-    {!linkSent ? <>
-      <input aria-label="工作邮箱" type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="工作邮箱" />
-      <button type="button" className="access-button" disabled={busy} onClick={() => {
-        setBusy(true); setNotice('');
-        void loginWithAccess(email).then(() => { setLinkSent(true); setNotice('登录链接已发送至邮箱。'); })
-          .catch((error) => setNotice(error instanceof Error ? error.message : '发送登录链接失败。')).finally(() => setBusy(false));
-      }}><LogIn size={14} /> {busy ? '发送中…' : '发送登录链接'}</button>
-    </> : <>
-      <span className="access-link-sent"><ShieldCheck size={14} /> 请点击邮件中的登录链接</span>
-      <button type="button" className="access-button access-button--quiet" onClick={() => { setLinkSent(false); }}>更换邮箱</button>
-    </>}
-    <small className="access-notice"><Mail size={12} /> 仅受邀成员可通过邮箱登录链接进入。</small>
+    <button type="button" className="access-button" disabled={busy} onClick={() => {
+      setBusy(true); setNotice('正在前往 GitHub 授权…');
+      void loginWithGithub().catch((error) => {
+        setNotice(error instanceof Error ? error.message : '无法开始 GitHub 登录。');
+        setBusy(false);
+      });
+    }}><GitBranch size={14} /> {busy ? '正在跳转…' : '使用 GitHub 登录'}</button>
+    <small className="access-notice"><ShieldCheck size={12} /> 仅管理员预先批准的 GitHub 邮箱可进入。</small>
     {notice && <small className="access-notice">{notice}</small>}
   </div>;
 }

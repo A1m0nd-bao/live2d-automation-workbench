@@ -67,13 +67,11 @@ async function userProfile(): Promise<MorphUser | null> {
 
 export async function currentBackendUser() { return userProfile(); }
 
-/** Request an invitation-only email sign-in link using Supabase's free default mailer. */
-export async function loginWithAccess(email: string) {
-  const address = email.trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('请输入有效的工作邮箱。');
-  const { error } = await supabase().auth.signInWithOtp({
-    email: address,
-    options: { shouldCreateUser: false, emailRedirectTo: CANONICAL_WORKBENCH_URL },
+/** Start GitHub OAuth. The database allowlist rejects accounts that are not approved. */
+export async function loginWithGithub() {
+  const { error } = await supabase().auth.signInWithOAuth({
+    provider: 'github',
+    options: { redirectTo: CANONICAL_WORKBENCH_URL, scopes: 'read:user user:email' },
   });
   if (error) throw new Error(error.message);
 }

@@ -322,16 +322,6 @@ button:disabled {
 .production-access > span { display: inline-flex; align-items: center; gap: 5px; }
 .production-access--setup { color: #72819a; }
 .production-access--login { flex-wrap: wrap; justify-content: flex-end; }
-.production-access--login input {
-  width: 146px;
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid #d4dfef;
-  border-radius: 8px;
-  background: #fff;
-  color: #26364b;
-  font-size: 12px;
-}
 .production-access--login .access-notice { flex-basis: 100%; text-align: right; }
 .access-button {
   display: inline-flex;
