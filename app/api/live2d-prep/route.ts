@@ -165,6 +165,8 @@ async function requestImage2(image: File, input: ArrayBuffer) {
       prompt: live2dPrepPrompt(),
       images: [{ image_url: `data:${image.type};base64,${base64(input)}` }],
       size: LIVE2D_PREP_SIZE,
+      background: 'transparent',
+      output_format: 'png',
       response_format: 'b64_json',
     }),
     signal: AbortSignal.timeout(180_000),

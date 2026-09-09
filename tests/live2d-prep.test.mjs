@@ -42,6 +42,14 @@ test('preprocessing offers provider choices without putting keys in browser conf
     readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
     /https:\/\/ai-gateway\.vercel\.sh\/v1\/images\/edits/,
   );
+  assert.match(
+    readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
+    /background: 'transparent'/,
+  );
+  assert.match(
+    readFileSync(new URL('../app/api/live2d-prep/route.ts', import.meta.url), 'utf8'),
+    /output_format: 'png'/,
+  );
 });
 
 test('character lock requires full-body, identity preservation and rejects topology drift', () => {
