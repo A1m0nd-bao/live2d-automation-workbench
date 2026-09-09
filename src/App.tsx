@@ -1,5 +1,6 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import type { Session } from '@supabase/supabase-js';
 import {
   Plus,
   X,
@@ -21,15 +22,7 @@ import {
   GitBranch,
   WandSparkles,
 } from 'lucide-react';
-import {
-  connectService,
-  connectLocalRelay,
-  getDirectServiceConfig,
-  hasDirectServiceConfig,
-  saveDirectServiceConfig,
-  serviceDiagnostics,
-  serviceRequest,
-} from './serviceBridge';
+import { hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import {
   isJpeg,
@@ -41,6 +34,8 @@ import {
 import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
 import { mergeLive2dProPsd } from './live2dProMerge';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
+import { ProductionAccess } from './ProductionAccess';
+import { createProjectFromLocalTask, uploadProjectArtifact } from './productionLedger';
 import './production.css';
 
 type Task = {
@@ -71,6 +66,9 @@ type Task = {
   proMergedFile?: string;
   proMergeReportFile?: string;
   proStage?: 'persona_lock' | 'base_processing' | 'base_psd_ready' | 'state_generation' | 'state_decomposition' | 'merge_ready';
+  cloudProjectId?: string;
+  cloudSyncState?: 'syncing' | 'synced' | 'failed';
+  cloudArtifactKeys?: string[];
 };
 type Job = {
   jobId?: string;
@@ -278,8 +276,15 @@ export default function App() {
     [progress, setProgress] = useState(''),
     [preview, setPreview] = useState(''),
     [preparedPreview, setPreparedPreview] = useState('');
+  const [productionSession, setProductionSession] = useState<Session | null>(null);
+  const handleProductionSession = useCallback((session: Session | null) => {
+    setProductionSession(session);
+  }, []);
   const lock = useRef(false);
   const historyLoaded = useRef(false);
+  const productionSyncing = useRef(new Set<string>());
+  const productionAttempted = useRef(new Set<string>());
+  const productionArtifactsSyncing = useRef(new Set<string>());
   const task = tasks.find((t) => t.id === selected);
   const featuredTask = task ?? tasks[0];
   const runningCount = tasks.filter(
@@ -416,6 +421,31 @@ export default function App() {
     void loadServerHistory().catch(() => {});
   }, [hydrated]);
   useEffect(() => {
+    if (!hydrated) return;
+    let alive = true;
+    const synchronize = async () => {
+      const [relay, prep] = await Promise.allSettled([
+        serviceRequest<{ ready?: boolean; message?: string }>('health'),
+        serviceRequest<{ ready?: boolean; message?: string }>('prepHealth'),
+      ]);
+      if (!alive) return;
+      const relayMessage = relay.status === 'fulfilled'
+        ? (relay.value.ready ? 'See-Through 服务端队列就绪' : relay.value.message || 'See-Through 服务不可用')
+        : 'See-Through 正在等待服务端授权';
+      const prepMessage = prep.status === 'fulfilled'
+        ? (prep.value.ready ? '角色整理服务就绪' : prep.value.message || '角色整理服务不可用')
+        : '角色整理服务正在等待授权';
+      setConnection(`${relayMessage}；${prepMessage}。`);
+      if (relay.status === 'fulfilled') void loadServerHistory().catch(() => {});
+    };
+    void synchronize();
+    const timer = window.setInterval(() => void synchronize(), 30_000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, [hydrated]);
+  useEffect(() => {
     if (hydrated) {
       try {
         localStorage.setItem(STORAGE, JSON.stringify(tasks));
@@ -424,6 +454,55 @@ export default function App() {
       }
     }
   }, [tasks, hydrated]);
+  useEffect(() => {
+    if (!hydrated || !productionSession) return;
+    const pending = tasks.filter((item) =>
+      !item.cloudProjectId && !productionAttempted.current.has(item.id) && !productionSyncing.current.has(item.id),
+    );
+    for (const item of pending) {
+      productionSyncing.current.add(item.id);
+      productionAttempted.current.add(item.id);
+      update(item.id, { cloudSyncState: 'syncing' });
+      void readAsset(`${item.id}:input`)
+        .then((source) => createProjectFromLocalTask(item, source))
+        .then(({ projectId }) => {
+          update(item.id, { cloudProjectId: projectId, cloudSyncState: 'synced' });
+        })
+        .catch((error) => {
+          update(item.id, { cloudSyncState: 'failed' });
+          setToast(error instanceof Error ? `团队账本未同步：${error.message}` : '团队账本同步失败。');
+        })
+        .finally(() => productionSyncing.current.delete(item.id));
+    }
+  }, [tasks, hydrated, productionSession]);
+  useEffect(() => {
+    if (!hydrated || !productionSession) return;
+    const candidates: Array<{ task: Task; key: string; suffix: string; kind: 'prepared_image' | 'psd' | 'cmo3' | 'moc3_bundle' | 'stretch' | 'report' | 'preview'; filename?: string }> = [];
+    for (const item of tasks) {
+      if (!item.cloudProjectId) continue;
+      if (item.preparedFile) candidates.push({ task: item, key: 'prepared', suffix: 'prepared', kind: 'prepared_image', filename: item.preparedFile });
+      if (item.psdFile) candidates.push({ task: item, key: 'psd', suffix: 'psd', kind: 'psd', filename: item.psdFile });
+      if (item.cmoFile) candidates.push({ task: item, key: 'cmo', suffix: 'cmo', kind: 'cmo3', filename: item.cmoFile });
+      if (item.runtimeFile) candidates.push({ task: item, key: 'runtime', suffix: 'runtime', kind: 'moc3_bundle', filename: item.runtimeFile });
+      if (item.hasGenerated) candidates.push({ task: item, key: 'bundle', suffix: 'bundle', kind: 'moc3_bundle', filename: `${item.name}-bundle.zip` });
+      if (item.hasGenerated) candidates.push({ task: item, key: 'stretch', suffix: 'stretch', kind: 'stretch', filename: `${item.name}.stretch` });
+      if (item.hasGenerated) candidates.push({ task: item, key: 'preview', suffix: 'preview', kind: 'preview', filename: `${item.name}-preview.png` });
+      if (item.proMergeReportFile) candidates.push({ task: item, key: 'pro-merge-report', suffix: 'pro-merge-report', kind: 'report', filename: item.proMergeReportFile });
+    }
+    for (const candidate of candidates) {
+      const token = `${candidate.task.id}:${candidate.key}`;
+      if (candidate.task.cloudArtifactKeys?.includes(candidate.key) || productionArtifactsSyncing.current.has(token)) continue;
+      productionArtifactsSyncing.current.add(token);
+      void readAsset(`${candidate.task.id}:${candidate.suffix}`)
+        .then((blob) => {
+          if (!blob || !candidate.filename) throw new Error(`${candidate.filename || candidate.key} 不在当前浏览器。`);
+          return uploadProjectArtifact({ projectId: candidate.task.cloudProjectId!, kind: candidate.kind, filename: candidate.filename, blob });
+        })
+        .then(() => update(candidate.task.id, { cloudArtifactKeys: [...(candidate.task.cloudArtifactKeys || []), candidate.key] }))
+        .catch((error) => setToast(error instanceof Error ? `产物未同步：${error.message}` : '产物未同步到团队账本。'))
+        .finally(() => productionArtifactsSyncing.current.delete(token));
+    }
+  }, [tasks, hydrated, productionSession]);
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(''), 6500);
@@ -802,10 +881,13 @@ export default function App() {
       <section className="workspace">
         <header className="topbar">
           <div className="crumbs">生产任务 / Live2D 流程</div>
-          <button className="help" onClick={() => setGuide(true)}>
-            <CircleHelp size={18} />
-            流程指南
-          </button>
+          <div className="topbar-actions">
+            <ProductionAccess onSessionChange={handleProductionSession} />
+            <button className="help" onClick={() => setGuide(true)}>
+              <CircleHelp size={18} />
+              流程指南
+            </button>
+          </div>
         </header>
         <div className="workspace-scroll">
           <section className="intro-row">
@@ -876,33 +958,9 @@ export default function App() {
                 <p className="eyebrow">AUTOMATED PIPELINE</p>
                 <h2>当前角色生产线</h2>
               </div>
-              <div className="header-actions">
-                <button className="ghost-button" onClick={() => {
-                  if (hasDirectServiceConfig()) {
-                    setConnection('当前使用直连常驻 Relay；无需登录窗口。');
-                    return;
-                  }
-                  try { connectService(); setConnection('请在连接窗口登录，再点击检查连接。'); } catch (e) { setToast(String(e)); }
-                }}>{hasDirectServiceConfig() ? '直连已启用' : '连接服务'}</button>
-                <button className="ghost-button" disabled={busy || hasDirectServiceConfig()} onClick={() => void operate(async () => {
-                  await connectLocalRelay();
-                  setConnection('本机常驻桥接已接入；无需登录窗口。');
-                  await loadServerHistory();
-                })}>接入本机桥接</button>
-                <button className="ghost-button" onClick={() => {
-                  const config = getDirectServiceConfig();
-                  setDirectRelayUrl(config?.relayUrl || '');
-                  setDirectDeviceToken(config?.deviceToken || '');
-                  setDirectSetup(true);
-                }}>直连设置</button>
-                <button className="ghost-button" disabled={busy} onClick={() => void operate(() => loadServerHistory(true))}>同步历史</button>
-                <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
-                  const [relay, prep] = await Promise.allSettled([serviceRequest<{ ready?: boolean; message?: string }>('health'), serviceRequest<{ ready?: boolean; message?: string }>('prepHealth')]);
-                  const relayMessage = relay.status === 'fulfilled' ? (relay.value.ready ? 'See-Through 已就绪' : relay.value.message) : relay.reason instanceof Error ? relay.reason.message : 'See-Through 不可用';
-                  const prepMessage = prep.status === 'fulfilled' ? (prep.value.ready ? '豆包生图已就绪' : prep.value.message) : prep.reason instanceof Error ? prep.reason.message : '豆包生图不可用';
-                  setConnection(`${relayMessage}；${prepMessage}`);
-                  if (relay.status === 'fulfilled') await loadServerHistory();
-                })}>检查服务</button>
+              <div className="automation-status">
+                <span className="live-dot" /> 自动追踪已开启
+                <small>{productionSession ? '已登录工作区；任务与产物将写入项目账本。' : '当前为公开展示或本地任务；登录生产工作区后启用团队账本。'}</small>
               </div>
             </div>
             {featuredTask?.mode === 'pro' ? (
@@ -1422,9 +1480,8 @@ export default function App() {
           <ol className="guide-list">
             <li>有 PSD：直接新建任务并导入，确认图层质量后点击生成。</li>
             <li>
-              仅有原图：连接私有服务、登录、检查连接，先用豆包生图
-              生成全身中立的 Live2D
-              友好图。确认身份、服装、四肢和附件都完整后才提交拆分。
+              仅有原图：上传后会自动进入角色整理、全身构图检查与 See-Through 队列；无需连接服务、检查服务或手动刷新。
+              确认身份、服装、四肢和附件都完整后才进入拆分。
             </li>
             <li>
               Live2D Pro：先验收基础 PSD，再按同一 Persona Lock 生成所选动作和表情；每张状态图分别拆层，
@@ -1437,7 +1494,7 @@ export default function App() {
             </li>
           </ol>
           <p>
-            本机文件和 Cubism 产物保存在此浏览器；服务端队列记录会自动同步，因此刷新或更换浏览器仍可看到任务状态。PSD 成功后请尽快下载备份，服务端任务持久化不等于永久资产存储。
+            未登录的公开展示仍使用浏览器临时存储。生产工作区启用后，项目、任务状态、审核记录与正式产物会迁移到私有团队账本；服务端队列会自动同步，刷新页面不需要手动检查。
           </p>
           <p>
             兼容路径固定 StretchyStudio
