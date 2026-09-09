@@ -1,17 +1,15 @@
 export const runtime = 'edge';
 
-/**
- * This exposes only the browser-safe Cloudflare Worker origin. Its R2/D1
- * bindings and bootstrap secret are never present in a frontend response.
- */
+/** Exposes only Supabase's browser-safe URL and publishable key. */
 export async function GET() {
-  const apiUrl = (process.env.MORPH_API_URL ?? '').trim().replace(/\/$/, '');
-  if (!apiUrl.startsWith('https://'))
+  const supabaseUrl = (process.env.SUPABASE_URL ?? '').trim().replace(/\/$/, '');
+  const supabasePublishableKey = (process.env.SUPABASE_PUBLISHABLE_KEY ?? '').trim();
+  if (!supabaseUrl.startsWith('https://') || !supabasePublishableKey)
     return Response.json({ configured: false }, {
       status: 503,
       headers: { 'Cache-Control': 'no-store' },
     });
-  return Response.json({ apiUrl }, {
+  return Response.json({ supabaseUrl, supabasePublishableKey }, {
     headers: { 'Cache-Control': 'no-store' },
   });
 }

@@ -1,21 +1,21 @@
 # Morph production workspace bootstrap
 
-The public GitHub Pages site remains a read-only showcase until it is built with the public `VITE_MORPH_API_URL` below. Once an invited member signs in, the workbench creates a project record and copies source files plus available PSD/CMO3/MOC3 artifacts to a private R2 bucket. R2 and D1 credentials never enter the browser.
+The production workspace uses a Supabase project owned by the operator: email OTP identifies invited members, Postgres holds the project ledger, and the private `morph-assets` Storage bucket holds source images, PSDs, CMO3/MOC3 bundles, previews, and reports. The public GitHub Pages showcase contains only the Supabase URL and publishable key; database access is constrained by Row Level Security (RLS).
 
 ## One-time setup
 
-1. Create a Cloudflare account owned by you or your company, add an API hostname under a domain you control, then create one D1 database and one private R2 bucket. No shehaoli account is involved.
-2. Apply `cloudflare-backend/migrations/0001_initial.sql` with Wrangler, then deploy `cloudflare-backend`.
-3. Create a Zero Trust Access application in the same Cloudflare account for the API domain. Enable Cloudflare One-time PIN, and allow only explicit company emails or approved email domains. It sends the email code itself, so no separate mail provider is required.
-4. Set Worker variables `MORPH_ALLOWED_ORIGINS`, `MORPH_ACCESS_TEAM_DOMAIN`, `MORPH_ACCESS_AUD`, and `MORPH_ADMIN_EMAILS`; protect only `/v1/access/exchange` with the Access application. The allowed admin email provisions itself on its first successful OTP login.
-5. Add GitHub secret `VITE_MORPH_API_URL`, then redeploy Pages. Add the same value to the private Site runtime variable `MORPH_API_URL`.
+1. In Supabase SQL Editor, run `supabase/migrations/20260909085841_production_foundation.sql`. It creates the private Storage bucket, tables, audit trail, and ownership policies.
+2. In Authentication > Sign In / Providers > Email, keep Email enabled and disable new user sign-ups. The workbench uses Supabase's default one-time email link, so custom SMTP and editable email templates are not required.
+3. Invite the first operator from Authentication > Users > Invite user. After accepting the invitation, set their profile role to `admin` in SQL Editor: `update public.profiles set role = 'admin' where email = '<operator-email>';`.
+4. Add the browser-safe values to GitHub Actions secrets: `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`, then redeploy GitHub Pages. Add the same values to the private preview runtime as `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`.
 
-## Retention and access model
+## Access and retention model
 
-- Original input, PSD, CMO3/MOC3 packages, and `.stretch` are permanent project assets.
-- Previews and reports are marked diagnostic and receive a 30-day `delete_after` timestamp for the cleanup worker.
-- Creators can read and create only their own projects; administrators can see every project, read audit logs, and decide reviews. Access invitations are managed as explicit email rules in the Cloudflare Zero Trust dashboard for this first release.
+- A creator can create, read, and upload only to their own projects.
+- An administrator can read every project, manage profile roles, review deliveries, and read the audit log.
+- Original input, PSD, CMO3/MOC3 packages, and `.stretch` are permanent project assets. Previews and reports are marked diagnostic with a 30-day deletion timestamp.
+- The `service_role` key and database password never enter GitHub Pages, the private preview, or browser code.
 
-## Current migration boundary
+## Current automation boundary
 
-The existing See-Through relay already has a persistent SQLite queue and restart recovery. Its job-state mirror and the browser-only Cubism export must be moved into the private worker next; until then, a browser tab is still required while Cubism export is executing. This is intentionally shown as a boundary rather than represented as completed server automation.
+The existing See-Through relay already has a persistent SQLite queue and restart recovery. The browser currently mirrors task metadata and available artifacts to Supabase after a user signs in. Moving relay job-state mirroring into the persistent worker and moving browser-only Cubism export to a compatible worker remain the next server-automation slice; a browser tab is still needed during Cubism export today.

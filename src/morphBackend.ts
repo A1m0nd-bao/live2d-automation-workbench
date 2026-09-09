@@ -1,109 +1,114 @@
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+
 export type MorphUser = {
   id: string;
   email: string;
   role: 'admin' | 'creator';
-  expiresAt: string;
 };
 
-type RuntimeConfig = { apiUrl: string };
-const SESSION_KEY = 'morph.production.session.v1';
+type RuntimeConfig = { supabaseUrl: string; publishableKey: string };
 let runtimeConfig: RuntimeConfig | null = null;
+let client: SupabaseClient | null = null;
 
 function configuredFromBuild(): RuntimeConfig | null {
-  const value = import.meta.env.VITE_MORPH_API_URL;
-  if (typeof value !== 'string' || !value.trim().startsWith('https://')) return null;
-  return { apiUrl: value.trim().replace(/\/$/, '') };
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const publishableKey = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
+  if (typeof supabaseUrl !== 'string' || !supabaseUrl.trim().startsWith('https://')) return null;
+  if (typeof publishableKey !== 'string' || !publishableKey.trim()) return null;
+  return { supabaseUrl: supabaseUrl.trim().replace(/\/$/, ''), publishableKey: publishableKey.trim() };
 }
 
-export function backendConfig() {
-  return runtimeConfig ?? configuredFromBuild();
+export function backendConfig() { return runtimeConfig ?? configuredFromBuild(); }
+
+function supabase() {
+  const config = backendConfig();
+  if (!config) throw new Error('生产工作区尚未配置。');
+  if (!client)
+    client = createClient(config.supabaseUrl, config.publishableKey, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    });
+  return client;
 }
 
-/** Private Sites read this public API address at runtime; GitHub Pages uses VITE_. */
+/** GitHub Pages uses VITE_ at build time; the private preview reads browser-safe values at runtime. */
 export async function loadBackendConfig() {
   if (backendConfig()) return backendConfig();
   try {
     const response = await fetch('/api/production-config', { cache: 'no-store' });
     if (!response.ok) return null;
-    const body = await response.json() as { apiUrl?: unknown };
-    if (typeof body.apiUrl !== 'string' || !body.apiUrl.trim().startsWith('https://')) return null;
-    runtimeConfig = { apiUrl: body.apiUrl.trim().replace(/\/$/, '') };
-    return runtimeConfig;
-  } catch {
-    return null;
-  }
-}
-
-function token() {
-  try { return localStorage.getItem(SESSION_KEY) || ''; } catch { return ''; }
-}
-function storeToken(value: string | null) {
-  try {
-    if (value) localStorage.setItem(SESSION_KEY, value);
-    else localStorage.removeItem(SESSION_KEY);
-  } catch { /* unavailable browser storage is treated as a signed-out state */ }
-}
-
-async function request<T>(path: string, init: RequestInit = {}) {
-  const config = backendConfig();
-  if (!config) throw new Error('生产后端尚未配置。');
-  const headers = new Headers(init.headers);
-  const value = token();
-  if (value) headers.set('Authorization', `Bearer ${value}`);
-  const response = await fetch(`${config.apiUrl}${path}`, { ...init, headers });
-  const contentType = response.headers.get('content-type') || '';
-  const body = contentType.includes('application/json')
-    ? await response.json().catch(() => ({})) as { error?: string }
-    : { error: await response.text() };
-  if (!response.ok) throw new Error(body.error || `服务返回 ${response.status}`);
-  return body as T;
-}
-
-export async function currentBackendUser() {
-  if (!token()) return null;
-  try { return (await request<{ user: MorphUser }>('/v1/auth/me')).user; }
-  catch { storeToken(null); return null; }
-}
-
-export async function loginWithAccess() {
-  const config = backendConfig();
-  if (!config) throw new Error('生产后端尚未配置。');
-  const nonce = crypto.randomUUID();
-  const popup = window.open(
-    `${config.apiUrl}/v1/access/exchange?${new URLSearchParams({ return_origin: window.location.origin, nonce })}`,
-    'morph-cloudflare-access',
-    'popup,width=520,height=680',
-  );
-  if (!popup) throw new Error('浏览器拦截了邮箱登录窗口，请允许弹出窗口后重试。');
-  return new Promise<MorphUser>((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      window.removeEventListener('message', receive);
-      reject(new Error('登录超时，请在登录窗口完成邮箱验证码。'));
-    }, 5 * 60_000);
-    const receive = (event: MessageEvent) => {
-      if (event.origin !== config.apiUrl) return;
-      const body = event.data as { channel?: string; nonce?: string; token?: string; user?: MorphUser } | null;
-      if (body?.channel !== 'morph-access-v1' || body.nonce !== nonce || !body.token || !body.user) return;
-      window.clearTimeout(timer);
-      window.removeEventListener('message', receive);
-      storeToken(body.token);
-      resolve(body.user);
+    const body = await response.json() as { supabaseUrl?: unknown; supabasePublishableKey?: unknown };
+    if (typeof body.supabaseUrl !== 'string' || !body.supabaseUrl.trim().startsWith('https://')) return null;
+    if (typeof body.supabasePublishableKey !== 'string' || !body.supabasePublishableKey.trim()) return null;
+    runtimeConfig = {
+      supabaseUrl: body.supabaseUrl.trim().replace(/\/$/, ''),
+      publishableKey: body.supabasePublishableKey.trim(),
     };
-    window.addEventListener('message', receive);
-  });
+    return runtimeConfig;
+  } catch { return null; }
 }
 
-export function signOutBackend() { storeToken(null); }
+function safeFilename(value: string) {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 180) || 'artifact.bin';
+}
+
+async function userProfile(): Promise<MorphUser | null> {
+  const api = supabase();
+  const { data: { user }, error } = await api.auth.getUser();
+  if (error || !user?.email) return null;
+  const { data: profile, error: profileError } = await api
+    .from('profiles').select('id, email, role').eq('id', user.id).maybeSingle();
+  if (profileError) throw new Error('生产工作区尚未完成数据初始化。');
+  if (!profile) return null;
+  return { id: profile.id, email: profile.email, role: profile.role === 'admin' ? 'admin' : 'creator' };
+}
+
+export async function currentBackendUser() { return userProfile(); }
+
+/** Request an invitation-only email sign-in link using Supabase's free default mailer. */
+export async function loginWithAccess(email: string) {
+  const address = email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(address)) throw new Error('请输入有效的工作邮箱。');
+  const { error } = await supabase().auth.signInWithOtp({
+    email: address,
+    options: { shouldCreateUser: false, emailRedirectTo: window.location.origin },
+  });
+  if (error) throw new Error(error.message);
+}
+
+export async function signOutBackend() {
+  if (!backendConfig()) return;
+  await supabase().auth.signOut();
+}
 
 export async function createBackendProject(input: { title: string; inputMode: string; metadata: Record<string, unknown> }) {
-  return request<{ project: { id: string } }>('/v1/projects', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
-  });
+  const project = {
+    id: crypto.randomUUID(), title: input.title.trim().slice(0, 160), input_mode: input.inputMode,
+    metadata: input.metadata,
+  };
+  const { data, error } = await supabase().from('projects').insert(project).select('id').single();
+  if (error) throw new Error(error.message);
+  return { project: { id: data.id as string } };
 }
 
 export async function uploadBackendArtifact(input: { projectId: string; kind: string; filename: string; blob: Blob; retentionClass: 'permanent' | 'diagnostic' }) {
-  const query = new URLSearchParams({ kind: input.kind, filename: input.filename, retention: input.retentionClass });
-  return request<{ artifact: { id: string; storageKey: string } }>(`/v1/projects/${input.projectId}/assets?${query}`, {
-    method: 'PUT', headers: { 'Content-Type': input.blob.type || 'application/octet-stream' }, body: input.blob,
+  const id = crypto.randomUUID();
+  const filename = safeFilename(input.filename);
+  const storagePath = `${input.projectId}/${input.kind}/${id}-${filename}`;
+  const api = supabase();
+  const { error: uploadError } = await api.storage.from('morph-assets').upload(storagePath, input.blob, {
+    contentType: input.blob.type || 'application/octet-stream', upsert: false,
   });
+  if (uploadError) throw new Error(uploadError.message);
+  const { error: artifactError } = await api.from('artifacts').insert({
+    id, project_id: input.projectId, kind: input.kind, storage_path: storagePath, filename,
+    mime_type: input.blob.type || 'application/octet-stream', byte_size: input.blob.size,
+    retention_class: input.retentionClass,
+    delete_after: input.retentionClass === 'diagnostic'
+      ? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString() : null,
+  });
+  if (artifactError) {
+    await api.storage.from('morph-assets').remove([storagePath]);
+    throw new Error(artifactError.message);
+  }
+  return { artifact: { id, storageKey: storagePath } };
 }

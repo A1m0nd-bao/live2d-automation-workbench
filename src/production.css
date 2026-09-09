@@ -321,6 +321,18 @@ button:disabled {
 .production-access { position: relative; color: #52637c; font-size: 12px; }
 .production-access > span { display: inline-flex; align-items: center; gap: 5px; }
 .production-access--setup { color: #72819a; }
+.production-access--login { flex-wrap: wrap; justify-content: flex-end; }
+.production-access--login input {
+  width: 146px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid #d4dfef;
+  border-radius: 8px;
+  background: #fff;
+  color: #26364b;
+  font-size: 12px;
+}
+.production-access--login .access-notice { flex-basis: 100%; text-align: right; }
 .access-button {
   display: inline-flex;
   align-items: center;
@@ -332,6 +344,7 @@ button:disabled {
   color: #36537f;
   font-size: 12px;
 }
+.access-button--quiet { border-color: transparent; background: transparent; color: #73839b; }
 .access-popover {
   position: absolute;
   z-index: 20;

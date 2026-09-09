@@ -29,8 +29,9 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run build:pages
         env:
-          # Public Worker origin only. R2/D1 credentials never enter Pages.
-          VITE_MORPH_API_URL: ${{ secrets.VITE_MORPH_API_URL }}
+          # These are browser-safe values. Database and storage privileges are enforced with RLS.
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
