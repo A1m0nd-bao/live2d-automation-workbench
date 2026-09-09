@@ -1,18 +1,17 @@
 export const runtime = 'edge';
 
 /**
- * This returns only Supabase's browser-safe values. The service-role key is
- * deliberately not read here and remains confined to worker/API environments.
+ * This exposes only the browser-safe Cloudflare Worker origin. Its R2/D1
+ * bindings and bootstrap secret are never present in a frontend response.
  */
 export async function GET() {
-  const url = (process.env.SUPABASE_URL ?? '').trim().replace(/\/$/, '');
-  const publishableKey = (process.env.SUPABASE_PUBLISHABLE_KEY ?? '').trim();
-  if (!url.startsWith('https://') || !publishableKey)
+  const apiUrl = (process.env.MORPH_API_URL ?? '').trim().replace(/\/$/, '');
+  if (!apiUrl.startsWith('https://'))
     return Response.json({ configured: false }, {
       status: 503,
       headers: { 'Cache-Control': 'no-store' },
     });
-  return Response.json({ url, publishableKey }, {
+  return Response.json({ apiUrl }, {
     headers: { 'Cache-Control': 'no-store' },
   });
 }

@@ -1,0 +1,7 @@
+{
+  "name": "morph-live2d-cloudflare-backend",
+  "private": true,
+  "type": "module",
+  "dependencies": { "jose": "6.1.0" },
+  "devDependencies": { "@cloudflare/workers-types": "4.20260515.1", "typescript": "5.9.3", "wrangler": "4.92.0" }
+}

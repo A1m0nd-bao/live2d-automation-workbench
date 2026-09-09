@@ -1,6 +1,6 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import type { Session } from '@supabase/supabase-js';
+import type { MorphUser } from './morphBackend';
 import {
   Plus,
   X,
@@ -276,9 +276,9 @@ export default function App() {
     [progress, setProgress] = useState(''),
     [preview, setPreview] = useState(''),
     [preparedPreview, setPreparedPreview] = useState('');
-  const [productionSession, setProductionSession] = useState<Session | null>(null);
-  const handleProductionSession = useCallback((session: Session | null) => {
-    setProductionSession(session);
+  const [productionUser, setProductionUser] = useState<MorphUser | null>(null);
+  const handleProductionUser = useCallback((user: MorphUser | null) => {
+    setProductionUser(user);
   }, []);
   const lock = useRef(false);
   const historyLoaded = useRef(false);
@@ -455,7 +455,7 @@ export default function App() {
     }
   }, [tasks, hydrated]);
   useEffect(() => {
-    if (!hydrated || !productionSession) return;
+    if (!hydrated || !productionUser) return;
     const pending = tasks.filter((item) =>
       !item.cloudProjectId && !productionAttempted.current.has(item.id) && !productionSyncing.current.has(item.id),
     );
@@ -474,9 +474,9 @@ export default function App() {
         })
         .finally(() => productionSyncing.current.delete(item.id));
     }
-  }, [tasks, hydrated, productionSession]);
+  }, [tasks, hydrated, productionUser]);
   useEffect(() => {
-    if (!hydrated || !productionSession) return;
+    if (!hydrated || !productionUser) return;
     const candidates: Array<{ task: Task; key: string; suffix: string; kind: 'prepared_image' | 'psd' | 'cmo3' | 'moc3_bundle' | 'stretch' | 'report' | 'preview'; filename?: string }> = [];
     for (const item of tasks) {
       if (!item.cloudProjectId) continue;
@@ -502,7 +502,7 @@ export default function App() {
         .catch((error) => setToast(error instanceof Error ? `产物未同步：${error.message}` : '产物未同步到团队账本。'))
         .finally(() => productionArtifactsSyncing.current.delete(token));
     }
-  }, [tasks, hydrated, productionSession]);
+  }, [tasks, hydrated, productionUser]);
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(''), 6500);
@@ -882,7 +882,7 @@ export default function App() {
         <header className="topbar">
           <div className="crumbs">生产任务 / Live2D 流程</div>
           <div className="topbar-actions">
-            <ProductionAccess onSessionChange={handleProductionSession} />
+            <ProductionAccess onUserChange={handleProductionUser} />
             <button className="help" onClick={() => setGuide(true)}>
               <CircleHelp size={18} />
               流程指南
@@ -960,7 +960,7 @@ export default function App() {
               </div>
               <div className="automation-status">
                 <span className="live-dot" /> 自动追踪已开启
-                <small>{productionSession ? '已登录工作区；任务与产物将写入项目账本。' : '当前为公开展示或本地任务；登录生产工作区后启用团队账本。'}</small>
+                <small>{productionUser ? '已登录工作区；任务与产物将写入项目账本。' : '当前为公开展示或本地任务；登录生产工作区后启用团队账本。'}</small>
               </div>
             </div>
             {featuredTask?.mode === 'pro' ? (

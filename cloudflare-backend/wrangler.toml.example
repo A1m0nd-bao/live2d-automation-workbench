@@ -1,0 +1,24 @@
+name = "morph-live2d-api"
+main = "src/index.ts"
+compatibility_date = "2026-09-09"
+
+[[d1_databases]]
+binding = "MORPH_DB"
+database_name = "morph-live2d"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "MORPH_ASSETS"
+bucket_name = "morph-live2d-assets"
+
+[vars]
+# Comma-separated website origins; keep this list exact.
+MORPH_ALLOWED_ORIGINS = "https://a1m0nd-bao.github.io,https://morph-live2d-workbench.shehaoli.chatgpt.site"
+# The Zero Trust team domain and Access application audience are not secrets.
+MORPH_ACCESS_TEAM_DOMAIN = "https://your-team.cloudflareaccess.com"
+MORPH_ACCESS_AUD = "REPLACE_WITH_ACCESS_APPLICATION_AUD"
+# Initial admins; creator access is managed in the Access policy dashboard.
+MORPH_ADMIN_EMAILS = "admin@example.com"
+
+[triggers]
+crons = ["17 3 * * *"]
