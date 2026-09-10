@@ -8,6 +8,30 @@ license: apache-2.0
 
 # Morph See-Through Relay
 
+## Durable image preparation (2026-09-10)
+
+The same service now exposes authenticated `/prep/health`, `POST /prep/jobs`,
+`GET /prep/jobs`, `GET /prep/jobs/{id}` and `GET /prep/jobs/{id}/output`.
+Use one uvicorn worker per persistent data directory. A separate serial scheduler
+owns image calls without blocking See-Through's queue. Requests require a stable
+32-character hex `job_id`, `provider` (`image2` or `doubao`), `image` and `name`
+form fields. Uploads are capped at 20 MB. Missing access credentials fail closed.
+
+Set `AI_GATEWAY_API_KEY` for Image-2 and/or `VOLCENGINE_ARK_API_KEY` for Doubao.
+No key belongs in the browser. Local Mac launchers can set `MORPH_USE_KEYCHAIN=1`
+and use `scripts/配置生图服务.command`; stored Gateway keys are read on demand.
+Readiness only checks configuration; it does not verify budget or permissions.
+
+Sources, prompt snapshots and outputs are stored under `MORPH_DATA_ROOT/prep`.
+Task IDs are idempotent; conflicts return 409. Queued jobs resume after restart.
+Interrupted running jobs become `uncertain` rather than being silently billed
+again. Saved output bytes are recoverable even if the final DB update failed.
+Calls are bounded to 10 minutes; network failures/5xx are uncertain, 4xx explicit
+failures. Raw upstream error bodies are never published or logged.
+Candidates are saved even when frontend frame validation later rejects them.
+
+Run `python -m unittest discover -s worker -p test_prep_queue.py -v`.
+
 Deploy this small CPU-only service as a private ModelScope Studio. It does not
 run See-Through locally: the upstream See-Through Studio still handles GPU
 inference. The relay owns the Gradio SSE connection, persists tasks and input

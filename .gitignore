@@ -39,3 +39,6 @@ next-env.d.ts
 /\.variant-demo-frames/
 /work/
 *.tsbuildinfo
+__pycache__/
+worker/.venv/
+worker/.local-state/

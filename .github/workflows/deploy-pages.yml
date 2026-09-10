@@ -27,7 +27,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - run: node --test scripts/test-prep-policy.mjs tests/service-bridge.test.mjs tests/live2d-prep.test.mjs
+      - run: node --test scripts/test-prep-policy.mjs tests/service-bridge.test.mjs tests/live2d-prep.test.mjs tests/prep-queue.test.mjs
       - run: npm run build:pages
         env:
           # These are browser-safe values. Database and storage privileges are enforced with RLS.

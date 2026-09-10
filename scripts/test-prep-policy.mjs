@@ -39,7 +39,7 @@ test('generation failure stops the pipeline, never falls back to the original', 
   assert.equal(submitted, false);
 });
 
-test('direct relay affects splitting only; selected provider reaches private prep API', async () => {
+test('prep health uses durable relay; legacy synchronous generation is disabled', async () => {
   const original = { window: globalThis.window, localStorage: globalThis.localStorage, fetch: globalThis.fetch };
   const calls = [];
   try {
@@ -51,26 +51,26 @@ test('direct relay affects splitting only; selected provider reaches private pre
       return Response.json({ready:true, id:'a'.repeat(32), status:'queued'});
     };
     await bridge.serviceRequest('prepHealth');
-    assert.equal(calls.at(-1).url, '/api/live2d-prep');
+    assert.equal(calls.at(-1).url, 'http://127.0.0.1:7861/prep/health');
     for (const provider of ['doubao', 'image2']) {
-      await bridge.serviceRequest('prepare', {image:new Blob(['test']), name:'source.png', provider});
-      assert.equal(calls.at(-1).url, '/api/live2d-prep');
-      assert.equal(calls.at(-1).options.body.get('provider'), provider);
-      assert.equal(calls.at(-1).options.headers, undefined, 'relay credential must not reach prep API');
+      const count = calls.length;
+      await assert.rejects(bridge.serviceRequest('prepare', {image:new Blob(['test']), name:'source.png', provider}), /同步生图已停用/);
+      assert.equal(calls.length, count);
     }
     await bridge.serviceRequest('submit', {image:new Blob(['test']), name:'prepared.png'});
     assert.match(calls.at(-1).url, /^http:\/\/127\.0\.0\.1:7861\/jobs/);
-    // On Pages an unopened private bridge must stop, not send raw input to relay.
+    // Without configured relay, stop instead of using a login popup or bypassing generation.
     globalThis.window.location.origin = 'https://example.github.io';
+    globalThis.localStorage = { getItem: () => null };
     const count = calls.length;
-    await assert.rejects(bridge.serviceRequest('prepHealth'), /连接/);
+    await assert.rejects(bridge.serviceRequest('prepHealth'), /常驻 Relay/);
     assert.equal(calls.length, count);
   } finally { Object.assign(globalThis, original); }
 });
 
 test('standard and Pro flows share policy, and replacement clears prior acceptance', async () => {
   const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8');
-  const pipeline = app.slice(app.indexOf('async function startImagePipeline'), app.indexOf('async function refresh'));
+  const pipeline = app.slice(app.indexOf('async function startImagePipeline'), app.indexOf('async function refresh(t:'));
   assert.match(pipeline, /selectPreparation\(t.prepMode/);
   assert.doesNotMatch(pipeline, /hasDirectServiceConfig/);
   assert.match(pipeline, /async function startProBasePipeline[\s\S]*await startImagePipeline\(t\)/);

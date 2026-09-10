@@ -1,5 +1,3 @@
-import { isPrepCommand } from './prepPolicy';
-
 export const SERVICE_ORIGIN =
   'https://morph-live2d-workbench.shehaoli.chatgpt.site';
 const CHANNEL = 'morph-service-v1';
@@ -98,13 +96,14 @@ async function directServiceRequest<T>(
   command: Parameters<typeof serviceRequest>[0],
   payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' },
 ): Promise<T> {
-  if (command === 'prepare' || command === 'prepHealth')
-    throw new Error('直连 Relay 不执行生图预处理；请上传已完成 Persona Lock 的全身状态图。');
+  if (command === 'prepare')
+    throw new Error('同步生图已停用，请使用常驻生图队列。');
   let path = '/health';
   let init: RequestInit = {
     headers: { 'X-Morph-Device-Token': config.deviceToken },
   };
   if (command === 'history') path = '/jobs?limit=40';
+  if (command === 'prepHealth') path = '/prep/health';
   if (command === 'submit') {
     if (!payload.image) throw new Error('缺少参考图。');
     const form = new FormData();
@@ -118,7 +117,7 @@ async function directServiceRequest<T>(
   }
   const response = await fetch(`${config.relayUrl}${path}`, {
     ...init,
-    signal: AbortSignal.timeout(command === 'submit' ? 90_000 : 45_000),
+    signal: AbortSignal.timeout(command === 'submit' ? 90_000 : command === 'prepHealth' ? 15_000 : 45_000),
   });
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { detail?: string; error?: string; message?: string };
@@ -180,21 +179,17 @@ export async function serviceRequest<T>(
   payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' } = {},
 ): Promise<T> {
   const direct = getDirectServiceConfig();
-  // Relay owns decomposition only. Generation always uses the private prep
-  // service, even when decomposition is configured for direct/local transport.
-  if (direct && !isPrepCommand(command)) return directServiceRequest<T>(direct, command, payload);
+  if (command === 'prepare') throw new Error('同步生图已停用，请使用常驻生图队列。');
+  if (command === 'prepHealth' && !direct)
+    throw new Error('请接入本机桥接或配置常驻 Relay；生图不再依赖旧网站登录。');
+  if (direct) return directServiceRequest<T>(direct, command, payload);
   if (window.location.origin === SERVICE_ORIGIN) {
-    let path =
-      command === 'prepare' || command === 'prepHealth'
-        ? '/api/live2d-prep'
-        : '/api/see-through';
+    let path = '/api/see-through';
     let init: RequestInit = {};
-    if (command === 'submit' || command === 'prepare') {
+    if (command === 'submit') {
       if (!payload.image) throw new Error('缺少参考图');
       const form = new FormData();
       form.append('image', payload.image, payload.name);
-      if (command === 'prepare' && payload.provider)
-        form.append('provider', payload.provider);
       init = { method: 'POST', body: form };
     }
     if (command === 'status' || command === 'output') {
@@ -205,7 +200,7 @@ export async function serviceRequest<T>(
     if (command === 'history') path += '?history=1';
     const response = await fetch(path, {
       ...init,
-      signal: AbortSignal.timeout(command === 'prepare' ? 240_000 : 80_000),
+      signal: AbortSignal.timeout(80_000),
     });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as {
@@ -216,7 +211,7 @@ export async function serviceRequest<T>(
         body.error || body.message || `服务返回 ${response.status}`,
       );
     }
-    return command === 'output' || command === 'prepare'
+    return command === 'output'
       ? (response.arrayBuffer() as Promise<T>)
       : response.json();
   }
@@ -231,13 +226,13 @@ export async function serviceRequest<T>(
         pending.delete(id);
         reject(
           new Error(
-            command === 'submit' || command === 'prepare'
+            command === 'submit'
               ? '未收到提交确认，请勿重复提交；请检查连接窗口和后台任务。'
               : '连接超时，请在连接窗口完成登录后重试。',
           ),
         );
       },
-      command === 'prepare' ? 240_000 : 90_000,
+      90_000,
     );
     pending.set(id, { resolve: (data) => resolve(data as T), reject, timer });
     popup!.postMessage(

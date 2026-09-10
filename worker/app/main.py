@@ -12,6 +12,7 @@ import os
 import secrets
 import sqlite3
 import uuid
+import importlib.util
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -337,14 +338,32 @@ async def monitor(job_id: str) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    await PREP.start()
     with db() as connection:
         recover = connection.execute("SELECT id FROM jobs WHERE status IN ('queued', 'running')").fetchall()
     for row in recover:
         asyncio.create_task(monitor(row["id"]))
-    yield
+    try:
+        yield
+    finally:
+        await PREP.stop()
 
 
 app = FastAPI(title="Morph See-Through Relay", lifespan=lifespan)
+# Load by file path as both ModelScope and the desktop use custom entrypoints.
+_prep_spec = importlib.util.spec_from_file_location("morph_prep_queue", Path(__file__).with_name("prep_queue.py"))
+_prep_module = importlib.util.module_from_spec(_prep_spec)
+_prep_spec.loader.exec_module(_prep_module)
+
+
+def require_prep_token(relay, device):
+    if not RELAY_TOKEN and not DEVICE_TOKEN:
+        raise HTTPException(503, "生图队列必须先配置服务端或设备访问凭据")
+    require_relay_token(relay, device)
+
+
+PREP = _prep_module.PrepQueue(DATA_ROOT, require_prep_token)
+app.include_router(PREP.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,

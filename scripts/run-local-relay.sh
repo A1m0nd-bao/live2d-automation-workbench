@@ -15,6 +15,8 @@ fi
 export SEE_THROUGH_API_TOKEN="$(security find-generic-password -a "$USER" -s 'morph-live2d-modelscope-api-token' -w)"
 export MORPH_DEVICE_TOKEN="$(security find-generic-password -a "$USER" -s 'morph-live2d-device-token' -w)"
 export MORPH_DATA_ROOT="$WORKER_ROOT/.local-state"
+export MORPH_USE_KEYCHAIN=1
+export MORPH_LOCAL_BOOTSTRAP=1
 export MORPH_ALLOWED_ORIGINS="https://a1m0nd-bao.github.io,http://localhost:4173,http://127.0.0.1:4173"
 
 cd "$WORKER_ROOT"

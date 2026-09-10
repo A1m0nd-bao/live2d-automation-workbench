@@ -1,23 +1,26 @@
 # GitHub Pages production path
 
 - Public UI: https://a1m0nd-bao.github.io/live2d-automation-workbench/
-- Private service connection: existing Sites `/pages-bridge` remains as a
-  image-preparation path. For decomposition only, the preferred GitHub Pages route is **直连设置**:
-  configure a Relay HTTPS URL plus `MORPH_DEVICE_TOKEN` once per browser to
-  avoid the Sites login popup for decomposition. Generation still requires the private service login. The token is a revocable Relay access key, not
-  a ModelScope or Ark credential.
+- Connection: **接入本机桥接（免登录）**, or configure an HTTPS Relay URL and
+  `MORPH_DEVICE_TOKEN` in **直连设置**. Both image generation and decomposition
+  use the durable Relay. The old Sites login popup is no longer used for generation.
 - Image preparation: the task dialog offers **豆包 Seedream** and **Image-2**. Both use the same source-identity lock and Live2D-friendly prompt before See-Through submission. Provider choice is browser task metadata only; secrets remain in the private service.
-  - Doubao: configure `VOLCENGINE_ARK_API_KEY` as a Sites secret. `VOLCENGINE_ARK_MODEL` is an optional non-secret override.
-  - Image-2 (Vercel AI Gateway): configure `AI_GATEWAY_API_KEY` as a Sites secret. `IMAGE2_MODEL` is optional and defaults to `openai/gpt-image-2`. The private adapter calls Vercel AI Gateway's image-edit endpoint with the source image as a data URL, the shared persona-lock prompt, and the target canvas. It explicitly requests `background: transparent` and PNG output, then accepts PNG/JPEG bytes or `data[0].b64_json`. No Gateway key is included in the Pages bundle or task metadata.
+  - Doubao: configure `VOLCENGINE_ARK_API_KEY` in the Relay environment. `VOLCENGINE_ARK_MODEL` is optional.
+  - Image-2: configure `AI_GATEWAY_API_KEY` in the Relay environment. On this Mac run `scripts/配置生图服务.command` to store it in Keychain; `MORPH_USE_KEYCHAIN=1` makes the Relay read it without restarting. `IMAGE2_MODEL` defaults to `openai/gpt-image-2`.
+  - The Gateway adapter follows the official SDK image-model protocol (`/v4/ai/image-model`, specification version 4, image `files`, base64 `images` output), not the old assumed `/v1/images/edits` compatibility endpoint. See https://github.com/vercel/ai/blob/main/packages/gateway/src/gateway-image-model.ts and `gateway-provider.ts`. Provider format changes require revalidation. Health indicates configured credentials, not verified credits or model permissions.
   Never place either provider's key in a Vite variable, direct Relay setup, GitHub Pages artifact, or browser storage.
 - Inference: existing authenticated relay, server queue and saved task states.
 - PSD → CMO3: pinned browser-side StretchyStudio compatibility exporter; no ModelScope key needed for existing PSD.
 
 ## Use
 
-Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. PNG/JPG tasks default to generation by the selected provider (Doubao OR Image-2), regardless of direct Relay settings. Connect the private generation service using the new-task or retry login button. Missing login, provider configuration or generation failure stops the task before See-Through; no provider fallback or source-image fallback occurs. A user may explicitly check “已处理，跳过生图” for that task; this is recorded as `user-confirmed`, never as generated/AI-approved. Replacing the input resets to generation. Basic aspect-ratio/alpha-margin checks are not semantic Live2D QA. Existing legacy direct-pass jobs are preserved and labelled as unverified; unsubmitted legacy passes must be reprocessed.
+Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. PNG/JPG tasks default to the selected provider (Doubao OR Image-2). Connect the Relay, configure the chosen provider on the server, then start. Missing configuration fails early; no provider fallback or source-image fallback occurs. A user may explicitly check “已处理，跳过生图”; this is `user-confirmed`, never AI-approved. Replacing input resets generation. Cropped references are allowed: the prompt requests conservative completion of unseen body parts.
 
-Task metadata uses the existing localStorage key; actual inputs and outputs use IndexedDB. An older task with only filenames needs its file reimported. Changing origins/devices or clearing site data does not migrate files. Keep downloaded backups. Closing Pages stops browser generation, but not an already submitted server inference job.
+Generation source, prompt snapshot, model, timestamps, task state and result are persisted in the Relay's `MORPH_DATA_ROOT/prep` (SQLite + files). Browser localStorage/IndexedDB are local UI/cache, not the generation record authority. Authenticated history recovers the latest 100 generation records and outputs. Recovered history does NOT auto-submit another decomposition. Reimport the source to regenerate if the local input is absent.
+
+The browser saves a stable job ID before upload. Repeating submission with the same ID and source/provider returns the same job; conflicting inputs get 409. A paid call is never automatically retried. Queued jobs resume after process restart; running calls without a saved output become `uncertain`. Outputs already saved before a DB status interruption are recovered. Gateway/network timeouts (bounded to 10 minutes) are uncertain, not proof no charge occurred. New paid attempts require an explicit confirmation.
+
+Outputs are saved BEFORE browser frame QA. Rejected candidates are downloadable as `needs-review`, never automatically submitted to See-Through. These checks remain geometric heuristics, not semantic detection of feet. Closing the webpage does not stop submitted image generation; browser QA and automatic handoff to See-Through resume when the original task is opened again. This Mac must remain powered and awake with the Relay running; GitHub Pages itself does not run the queue. For unattended overnight operation use an always-on host and persistent disk.
 
 The popup permits only the configured Pages origin and window.opener. Replies require service origin, window reference, random connection nonce and request ID. It exposes fixed health/submit/status/output operations, not arbitrary URLs. Credentials remain in the private service environment. Direct mode sends only the dedicated device token to the Relay; the Relay CORS allow-list must contain `https://a1m0nd-bao.github.io`, and its upstream credentials remain server-only. Public visitors without the device token cannot use the queue, but can process their own PSD locally.
 
@@ -29,7 +32,9 @@ Local UI test on 2026-09-05: imported the accepted 1024×1024 ana.psd, generated
 
 ## Checks
 
-`node --test scripts/test-prep-policy.mjs tests/service-bridge.test.mjs tests/live2d-prep.test.mjs`
+`node --test scripts/test-prep-policy.mjs tests/service-bridge.test.mjs tests/live2d-prep.test.mjs tests/prep-queue.test.mjs`
+
+`python -m unittest discover -s worker -p test_prep_queue.py -v`
 
 `npx tsc --noEmit`
 

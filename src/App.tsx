@@ -22,14 +22,14 @@ import {
   GitBranch,
   WandSparkles,
 } from 'lucide-react';
-import { connectService, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
+import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
+import { prepRequest, submitPrep, recoverPrepState, type PrepJob } from './prepQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import {
   isJpeg,
   isPng,
   LIVE2D_PREP_PROVIDERS,
-  live2dPrepProviderLabel,
   type Live2dPrepProvider,
 } from './live2dPrep';
 import { LIVE2D_PRO_STATES, buildLive2DProManifest, selectedProStates } from './live2dPro';
@@ -53,7 +53,9 @@ type Task = {
   preparedFile?: string;
   prepProvider?: Live2dPrepProvider;
   prepMode?: PrepMode;
-  prepState?: 'queued' | 'succeeded' | 'user-confirmed' | 'failed';
+  prepState?: 'connecting' | 'queued' | 'running' | 'succeeded' | 'user-confirmed' | 'failed' | 'uncertain' | 'needs-review';
+  prepJobId?: string;
+  prepAutoSplit?: boolean;
   prepMessage?: string;
   prepAccepted?: boolean;
   qaPassed?: boolean;
@@ -114,6 +116,12 @@ const stage = (t: Task) =>
               ? '拆分失败'
               : t.remoteJobId
                 ? '后台拆分中'
+                : t.prepState === 'needs-review'
+                  ? '生成图已保存 · 待构图复核'
+                : t.prepState === 'uncertain'
+                  ? '生图结果待确认 · 未自动重试'
+                : ['connecting', 'queued', 'running'].includes(t.prepState || '')
+                  ? '服务端生图处理中'
                 : t.inputKind === 'image' && !t.preparedFile
                   ? t.prepState === 'failed'
                     ? '生图预处理失败'
@@ -288,6 +296,10 @@ export default function App() {
   const productionSyncing = useRef(new Set<string>());
   const productionAttempted = useRef(new Set<string>());
   const productionArtifactsSyncing = useRef(new Set<string>());
+  const prepRefreshing = useRef(new Set<string>());
+  const prepHistoryLoaded = useRef(false);
+  const currentTasks = useRef(tasks);
+  useEffect(() => { currentTasks.current = tasks; }, [tasks]);
   const task = tasks.find((t) => t.id === selected);
   const featuredTask = task ?? tasks[0];
   const runningCount = tasks.filter(
@@ -307,11 +319,11 @@ export default function App() {
     {
       title: '角色整理',
       note: featuredTask?.preparedFile
-        ? '原画风已保留'
+        ? (featuredTask.prepState === 'needs-review' ? '生成图可下载，构图待复核' : '构图基础检查完成')
         : '全身构图与风格锁定',
-      state: featuredTask?.preparedFile
+      state: featuredTask?.preparedFile && featuredTask.prepState !== 'needs-review'
         ? 'done'
-        : featuredTask?.prepState === 'queued'
+        : ['connecting', 'queued', 'running'].includes(featuredTask?.prepState || '')
           ? 'working'
           : 'queued',
       Icon: Sparkles,
@@ -386,11 +398,26 @@ export default function App() {
     );
     if (notify) setToast(`已同步 ${records.length} 条服务端任务记录。`);
   }
+  async function loadPrepHistory() {
+    const records = await prepRequest<PrepJob[]>('/jobs');
+    setTasks((current) => {
+      const existing = new Set(current.map((item) => item.prepJobId));
+      const recovered: Task[] = records.filter((job) => !existing.has(job.id)).map((job) => ({
+        id: `prep-${job.id}`, name: job.name, referenceName: '服务端生图记录', inputKind: 'image',
+        prepJobId: job.id, prepProvider: job.provider, prepAutoSplit: false,
+        // Re-download saved results through the same validation path.
+        prepState: job.status === 'succeeded' ? 'queued' : job.status,
+        prepMessage: job.message, createdAt: new Date(job.created_at * 1000).toLocaleString('zh-CN'),
+      }));
+      return [...current, ...recovered];
+    });
+  }
   useEffect(() => {
     try {
       const data = JSON.parse(localStorage.getItem(STORAGE) || '[]');
       if (Array.isArray(data))
-        setTasks(data.filter((t) => t && typeof t.id === 'string').map((t: Task) => {
+        setTasks(data.filter((t) => t && typeof t.id === 'string').map((item: Task) => {
+          const t = recoverPrepState(item);
           if (!t.prepMessage?.startsWith('直连模式：')) return t;
           // Preserve existing jobs/artifacts; never silently re-submit old work.
           return { ...t, prepAccepted: false,
@@ -445,9 +472,13 @@ export default function App() {
         : 'See-Through 正在等待服务端授权';
       const prepMessage = prep.status === 'fulfilled'
         ? (prep.value.ready ? '角色整理服务就绪' : prep.value.message || '角色整理服务不可用')
-        : '角色整理服务正在等待授权';
+        : (prep.reason instanceof Error ? prep.reason.message : '常驻生图服务未连接');
       setConnection(`${relayMessage}；${prepMessage}。`);
       if (relay.status === 'fulfilled') void loadServerHistory().catch(() => {});
+      if (prep.status === 'fulfilled' && !prepHistoryLoaded.current) {
+        prepHistoryLoaded.current = true;
+        void loadPrepHistory().catch(() => { prepHistoryLoaded.current = false; });
+      }
     };
     void synchronize();
     const timer = window.setInterval(() => void synchronize(), 30_000);
@@ -647,50 +678,75 @@ export default function App() {
     });
     setToast('多状态 PSD 已在本地合并；请下载并在 Cubism 前检查替换层。');
   }
-  async function prepare(t: Task) {
+  function rememberPrep(t: Task, patch: Partial<Task>) {
+    // Save the request ID before issuing HTTP, not only in a later React effect.
+    // If this fails, do not submit a paid request.
+    const saved = JSON.parse(localStorage.getItem(STORAGE) || '[]') as Task[];
+    const exists = saved.some((item) => item.id === t.id);
+    localStorage.setItem(STORAGE, JSON.stringify(exists
+      ? saved.map((item) => item.id === t.id ? { ...item, ...patch } : item)
+      : [...saved, { ...t, ...patch }]));
+    update(t.id, patch);
+  }
+  async function prepare(t: Task): Promise<File | undefined> {
     const provider = t.prepProvider ?? 'doubao';
-    const providerLabel = live2dPrepProviderLabel(provider);
-    update(t.id, { prepState: 'queued', prepAccepted: false, prepMessage: `正在连接${providerLabel}服务…` });
+    update(t.id, { prepState: 'connecting', prepAccepted: false, prepMessage: '正在检查常驻生图服务（最多 15 秒）…' });
     try {
       const source = await input(t);
       const health = await serviceRequest<PrepHealth>('prepHealth');
-      const providerHealth = health.providers?.[provider];
-      if (provider === 'image2' && !providerHealth?.ready)
-        throw new Error(
-          providerHealth?.message || 'Image-2 尚未部署到当前私有生图服务；不会回退到豆包，请先完成服务端配置。',
-        );
-      if (provider === 'doubao' && !(providerHealth?.ready ?? health.ready))
-        throw new Error(providerHealth?.message || health.message || '豆包生图服务当前不可用。');
-      setProgress(`${providerLabel} 正在按 Live2D 规范重绘角色…`);
-      update(t.id, {
-        prepState: 'queued',
-        prepMessage: `${providerLabel} 正在生成 Live2D 友好图…`,
-      });
-      const data = await serviceRequest<ArrayBuffer>('prepare', {
-        image: source,
-        name: source.name,
-        provider,
-      });
-      const png = await asPreparedPng(data);
-      await assertLive2dFriendlyFrame(png);
-      const filename = `${t.name}-live2d-friendly.png`;
-      await saveAsset(
-        `${t.id}:prepared`,
-        png,
-      );
-      update(t.id, {
-        preparedFile: filename,
-        prepState: 'succeeded',
-        prepAccepted: true,
-        prepMessage: `${providerLabel} 已返回处理图；构图基础检查通过（非 AI 语义验收），正在提交拆分。`,
-      });
-      return new File([png], filename, { type: 'image/png' });
+      if (!health.providers?.[provider]?.ready)
+        throw new Error(health.providers?.[provider]?.message || '所选生图服务未配置。');
+      const jobId = t.prepJobId || crypto.randomUUID().replaceAll('-', '');
+      rememberPrep(t, { prepJobId: jobId, prepAutoSplit: true, prepState: 'queued', prepMessage: '正在保存服务端任务；相同编号不会重复生图。' });
+      const job = await submitPrep(jobId, source, provider, t.name);
+      update(t.id, { prepState: job.status, prepMessage: job.message });
+      return undefined;
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : `${providerLabel} 生图预处理失败。`;
-      update(t.id, { prepState: 'failed', prepAccepted: false, prepMessage: message });
+      update(t.id, { prepState: 'failed', prepAccepted: false,
+        prepMessage: error instanceof Error ? error.message : '无法连接常驻生图队列。请查询任务状态，不要重复生成。' });
       throw error;
     }
+  }
+  async function refreshPrep(t: Task) {
+    if (!t.prepJobId || prepRefreshing.current.has(t.id)) return;
+    prepRefreshing.current.add(t.id);
+    try {
+      const job = await prepRequest<PrepJob>(`/jobs/${t.prepJobId}`);
+      if (job.status === 'succeeded' && t.preparedFile) return;
+      update(t.id, { prepState: job.status === 'succeeded' ? 'queued' : job.status,
+        prepMessage: job.status === 'succeeded' ? '服务端已出图，正在取回并检查构图…' : job.message });
+      if (job.status !== 'succeeded' || t.preparedFile) return;
+      const bytes = await prepRequest<ArrayBuffer>(`/jobs/${job.id}/output`);
+      const png = await asPreparedPng(bytes);
+      const filename = `${t.name}-generated.png`;
+      // Persist and expose the candidate BEFORE the heuristic can reject it.
+      await saveAsset(`${t.id}:prepared`, png);
+      update(t.id, { preparedFile: filename, prepState: 'needs-review', prepAccepted: false });
+      try {
+        await assertLive2dFriendlyFrame(png);
+      } catch (error) {
+        update(t.id, { prepState: 'needs-review', prepAccepted: false,
+          prepMessage: `生成图已保存，可预览和下载。构图检查需复核：${error instanceof Error ? error.message : '构图存疑'} 尚未提交拆层。` });
+        return;
+      }
+      update(t.id, { prepState: 'succeeded', prepAccepted: true,
+        prepMessage: '生成图已保存，构图基础检查通过（非 AI 语义验收）。' });
+      if (!t.remoteJobId && t.prepAutoSplit) {
+        try {
+          await submitToSeeThrough({ ...t, preparedFile: filename, prepState: 'succeeded' }, new File([png], filename, { type: 'image/png' }));
+        } catch (error) {
+          update(t.id, { prepMessage: `生图已完成并保存；拆层提交未确认：${error instanceof Error ? error.message : '连接失败'}。请先查询拆层历史。` });
+        }
+      }
+    } finally {
+      prepRefreshing.current.delete(t.id);
+    }
+  }
+  async function regenerate(t: Task) {
+    if (!window.confirm('这会新建一次生图请求，可能产生费用。之前的服务端记录会保留，确定继续？')) return;
+    const next = { ...t, prepJobId: undefined, preparedFile: undefined, prepAccepted: false, prepState: undefined };
+    rememberPrep(t, next);
+    await startImagePipeline(next);
   }
   async function submitToSeeThrough(t: Task, preparedImage?: File) {
     const f =
@@ -735,13 +791,17 @@ export default function App() {
         }
       },
     });
+    if (!preparedImage) {
+      setToast('生图任务已交给常驻服务；可关闭网页，回来后自动恢复状态。');
+      return;
+    }
     await submitToSeeThrough(t, preparedImage);
     setToast('已提交 See-Through；PSD 完成后会自动下载。');
   }
   async function startProBasePipeline(t: Task) {
     update(t.id, { proStage: 'base_processing' });
     await startImagePipeline(t);
-    setToast('Pro 基础状态已提交 See-Through；基础 PSD 完成后将进入多状态生成。');
+    setToast('Pro 基础状态处理已启动；可在任务详情查看服务端进度。');
   }
   async function refresh(t: Task) {
     if (!t.remoteJobId) return;
@@ -793,6 +853,28 @@ export default function App() {
     const events = await serviceDiagnostics(t.remoteJobId);
     setUpstreamDiagnostics({ name: t.name, jobId: t.remoteJobId, events });
   }
+  useEffect(() => {
+    if (!hydrated) return;
+    let cancelled = false;
+    let running = false;
+    const poll = async () => {
+      if (running || lock.current) return;
+      running = true;
+      try {
+        for (const item of currentTasks.current) {
+          if (cancelled) break;
+          if (!item.prepJobId || item.preparedFile || !['queued', 'running', 'succeeded'].includes(item.prepState || '')) continue;
+          try { await refreshPrep(item); }
+          catch (error) {
+            update(item.id, { prepMessage: error instanceof Error ? error.message : '状态暂未同步，稍后继续查询。' });
+          }
+        }
+      } finally { running = false; }
+    };
+    // Do not poll on every state update: the fixed interval also bounds retries.
+    const timer = window.setInterval(() => void poll(), 8000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [hydrated]);
   useEffect(() => {
     if (!task?.remoteJobId || task.psdFile || task.remoteState === 'failed')
       return;
@@ -849,6 +931,7 @@ export default function App() {
       inputKind: k,
       preparedFile: undefined,
       prepState: undefined,
+      prepJobId: undefined,
       prepMessage: undefined,
       prepAccepted: false,
       prepMode: 'generate',
@@ -1082,7 +1165,7 @@ export default function App() {
               我确认这张图已处理完毕，跳过生图直接拆层</span>
             <small>默认调用上方选中的一个生图服务。勾选只代表用户确认，不代表 AI 验收；直连设置不会跳过生图。</small>
           </label>
-          <button type="button" className="ghost-button" onClick={() => void operate(async () => connectService())}>连接生图服务（登录）</button>
+          <button type="button" className="ghost-button" onClick={() => void operate(async () => { await connectLocalRelay(); setToast('本机常驻服务已接入，无需登录弹窗。'); })}>接入本机桥接（免登录）</button>
           {productionMode === 'pro' && (
             <section className="pro-state-picker">
               <b>选择首批状态</b>
@@ -1294,16 +1377,25 @@ export default function App() {
               !task.remoteJobId &&
               task.prepState === 'failed' && (
                 <>
-                <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => connectService())}>连接生图服务（登录）</button>
+                <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => { await connectLocalRelay(); setToast('本机常驻服务已接入。'); })}>接入本机桥接（免登录）</button>
                 <button
                   className="primary-button"
                   disabled={busy}
                   onClick={() => void operate(() => startImagePipeline(task))}
                 >
-                  重试自动化处理
+                  {task.prepJobId ? '恢复提交（同一编号，不重复生图）' : '启动常驻生图任务'}
                 </button>
                 </>
               )}
+            {task.prepJobId && (
+              <section>
+                <p>生图任务：{task.prepJobId.slice(0, 12)} · {task.prepMessage}</p>
+                <button className="ghost-button" disabled={busy} onClick={() => void operate(() => refreshPrep(task))}>查询／恢复生图任务</button>
+                {!task.remoteJobId && ['failed', 'uncertain', 'needs-review'].includes(task.prepState || '') && (
+                  <button className="ghost-button" disabled={busy} onClick={() => void operate(() => regenerate(task))}>重新生成（新任务，可能计费）</button>
+                )}
+              </section>
+            )}
             {task.preparedFile && (
               <>
                 <button
@@ -1315,7 +1407,7 @@ export default function App() {
                     )
                   }
                 >
-                  下载拆分输入图
+                  {task.prepAccepted || task.prepState === 'user-confirmed' ? '下载拆分输入图' : '下载生成原图（未通过验收）'}
                 </button>
                 {preparedPreview && (
                   <figure>

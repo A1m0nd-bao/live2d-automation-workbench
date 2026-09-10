@@ -36,7 +36,9 @@ class RelayTests(unittest.TestCase):
             with patch.object(relay, 'DATA_ROOT', root), patch.object(relay, 'DB_PATH', root / 'jobs.db'), patch.object(relay, 'MODELSCOPE_TOKEN', 'test-secret'):
                 relay.init_db()
                 (root / 'test').mkdir()
-                (root / 'test/source').write_bytes(b'input')
+                # Exercise the SSE/download paths with a genuine PNG signature;
+                # plain text is correctly rejected before any upstream request.
+                (root / 'test/source').write_bytes(b'\x89PNG\r\n\x1a\n' + bytes(32))
                 with relay.db() as db:
                     db.execute("INSERT INTO jobs (id,name,status,message) VALUES ('test','test','queued','new')")
                 with patch.object(relay.httpx, 'AsyncClient', side_effect=lambda **kw: client_type(transport=httpx.MockTransport(handler), **kw)), patch.object(relay.asyncio, 'sleep', new=AsyncMock()):
