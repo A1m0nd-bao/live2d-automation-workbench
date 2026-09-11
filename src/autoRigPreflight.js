@@ -161,12 +161,34 @@ export function assertRigMesh(mesh, layer, w, h) {
   }
 }
 
-export function limbWeights(vertices, pivot, endpoint) {
+export function limbWeights(vertices, pivot, endpoint, transitionFraction = 1) {
   const dx = endpoint.x - pivot.x, dy = endpoint.y - pivot.y;
   const length2 = dx * dx + dy * dy;
   if (length2 < 4) throw Error('肢体关节点重合，无法生成权重');
   return vertices.map(v => {
-    const t = Math.max(0, Math.min(1, ((v.x - pivot.x) * dx + (v.y - pivot.y) * dy) / length2));
+    const t = Math.max(0, Math.min(1, ((v.x - pivot.x) * dx + (v.y - pivot.y) * dy) / (length2 * transitionFraction)));
     return t * t * (3 - 2 * t);
   });
+}
+
+// Use the same spatial weight field for a leg and its shoe. Past the short
+// joint transition the lower limb moves rigidly, preserving ankle overlap.
+export function bindLimbMesh(mesh, tag, skeleton, groups) {
+  const match = /^(handwear|legwear|footwear)-([lr])$/.exec(tag ?? '');
+  if (!match) return null;
+  const [, part, side] = match;
+  const arm = part === 'handwear', foot = part === 'footwear';
+  const role = (side === 'l' ? 'left' : 'right') + (arm ? 'Elbow' : 'Knee');
+  const joint = groups.find(group => group.boneRole === role);
+  if (!joint) return null;
+  const pivot = skeleton[side + (arm ? 'Elbow' : 'Knee')];
+  const end = skeleton[side + (arm ? 'Wrist' : 'Ankle')];
+  const weights = limbWeights(mesh.vertices, pivot, end, 0.3);
+  const min = Math.min(...weights), max = Math.max(...weights);
+  if (foot ? min < 0.95 : min > 0.15 || max < 0.95)
+    throw Error(`${tag} 关节权重范围异常 (${min.toFixed(2)}–${max.toFixed(2)})，需检查关节点`);
+  mesh.jointBoneId = joint.id;
+  mesh.boneWeights = weights;
+  mesh.jointPivot = { ...pivot };
+  return { role, min, max };
 }

@@ -11,7 +11,7 @@ import {
   buildArmatureNodes,
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
-import { cleanRigLayer, calibratePose, assertRigMesh, limbWeights } from './autoRigPreflight.js';
+import { cleanRigLayer, calibratePose, assertRigMesh, bindLimbMesh } from './autoRigPreflight.js';
 import { normalizePsdRigLayers } from './psdRigNormalization.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
@@ -383,29 +383,17 @@ export async function generateCubism(
           { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1 },
         );
         assertRigMesh(mesh, layer, width, height);
-        const tag = matchTag(layer.name);
-        const limb = tag === 'handwear-l' ? { side: 'l', joint: 'leftElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
-          : tag === 'handwear-r' ? { side: 'r', joint: 'rightElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
-          : tag === 'legwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
-          : tag === 'legwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
-          : tag === 'footwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
-          : tag === 'footwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
-          : null;
-        if (limb && isInitiallyVisible(layer)) {
-          const joint = groupDefs.find(group => group.boneRole === limb.joint);
-          if (joint) {
-            mesh.jointBoneId = joint.id;
-            mesh.boneWeights = limbWeights(mesh.vertices, skeleton[limb.side + limb.pivot], skeleton[limb.side + limb.endpoint]);
-            const minWeight = Math.min(...mesh.boneWeights);
-            const maxWeight = Math.max(...mesh.boneWeights);
-            // Shoes are wholly below the knee/ankle segment, so every vertex
-            // should follow that segment.  A leg/arm mesh instead needs a
-            // spread of weights across its joint to make an actual bend.
-            const isFootwear = tag === 'footwear-l' || tag === 'footwear-r';
-            if (isFootwear ? minWeight < 0.8 : minWeight > 0.15 || maxWeight < 0.75)
-              throw Error(`${layer.name} ${limb.label}权重没有同时覆盖关节两侧，已拦截导出`);
-          }
-        }
+        const variant = variantByPart.get(layer.name);
+        const slot = variant?.parts.find(part => part.name === layer.name)?.slot;
+        const tag = matchTag(slot ?? layer.name);
+        // Alternative artwork inherits the canonical limb's ancestors. Its
+        // own elbow requires pose-specific anchors; never skin a raised arm
+        // with the neutral arm's elbow coordinates.
+        const assignmentIndex = slot ? layers.findIndex(part => part.name === slot) : i;
+        if (slot && assignmentIndex < 0) throw Error(`${layer.name} 缺少对应基础图层 ${slot}，已拦截动作绑定`);
+        if (slot && (tag === 'handwear-l' || tag === 'handwear-r'))
+          warnings.push(`${layer.name} 已继承基础手臂父级，但未配置该姿势的独立肘点；此替换姿势暂不追加屈肘。`);
+        if (isInitiallyVisible(layer)) bindLimbMesh(mesh, tag, skeleton, groupDefs);
         project.autoRigPreflight.meshes.push({ name:layer.name, tag, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height}, jointBoneId:mesh.jointBoneId ?? null, weightRange: mesh.boneWeights ? { min:Math.min(...mesh.boneWeights), max:Math.max(...mesh.boneWeights) } : null });
         const source = URL.createObjectURL(await png(canvas));
         urls.push(source);
@@ -414,8 +402,9 @@ export async function generateCubism(
           id: ids[i],
           type: 'part',
           name: layer.name,
+          semanticTag: tag,
           textureId: ids[i],
-          parent: assignments.get(i)?.parentGroupId ?? null,
+          parent: assignments.get(assignmentIndex)?.parentGroupId ?? null,
           draw_order: assignments.get(i)?.drawOrder ?? layers.length - 1 - i,
           visible: true,
           opacity: isInitiallyVisible(layer) ? layer.opacity : 0,

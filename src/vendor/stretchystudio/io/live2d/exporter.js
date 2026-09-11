@@ -266,6 +266,10 @@ export async function exportLive2DProject(project, images, opts = {}) {
         jointPivotX = jointBone.transform.pivotX ?? 0;
         jointPivotY = jointBone.transform.pivotY ?? 0;
       }
+      if (mesh.jointPivot) {
+        jointPivotX = mesh.jointPivot.x;
+        jointPivotY = mesh.jointPivot.y;
+      }
     }
 
     // Walk up the ancestor chain to find the nearest warpDeformer ancestor (if any).
@@ -298,7 +302,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
 
     meshes.push({
       name: meshName,
-      tag: matchTag(meshName),
+      tag: part.semanticTag ?? matchTag(meshName),
       partId: part.id,
       parentGroupId: part.parent ?? null,
       warpDeformerParentId,
