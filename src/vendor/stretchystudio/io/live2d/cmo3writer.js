@@ -43,6 +43,7 @@ import {
 import { emitNeckWarp, emitFaceRotation } from './cmo3/bodyRig.js';
 import { emitFaceParallax } from './cmo3/faceParallax.js';
 import { emitPhysicsSettings } from './cmo3/physics.js';
+import { auditRigObjects } from './cmo3/rigAudit.js';
 
 // ---------- Main generator ----------
 
@@ -116,6 +117,8 @@ export async function generateCmo3(input) {
     // Optional bounded elbow/knee flex controls derived from DWPose.  Each is
     // emitted only if a matching split limb mesh exists.
     limbBends = [],
+    rigAnchors = null,
+    strictRigPreflight = false,
   } = input;
 
   // ── Phase 0 diagnostic log (only populated when generateRig is on) ──
@@ -2195,7 +2198,7 @@ export async function generateCmo3(input) {
   const FACE_PARALLAX_TAGS = new Set([
     'face', 'nose',
     'eyebrow', 'eyebrow-l', 'eyebrow-r',
-    'front hair', 'back hair',
+    'front hair', 'back hair', 'headwear',
     'eyewhite-l', 'irides-l', 'eyelash-l',
     'eyewhite-r', 'irides-r', 'eyelash-r',
     'mouth',
@@ -2657,7 +2660,7 @@ export async function generateCmo3(input) {
     faceMeshBbox = { minX: fMinX, minY: fMinY, maxX: fMaxX, maxY: fMaxY };
     break;
   }
-  const facePivotCx = faceMeshBbox
+  let facePivotCx = faceMeshBbox
     ? (faceMeshBbox.minX + faceMeshBbox.maxX) / 2
     : (faceUnionBbox ? (faceUnionBbox.minX + faceUnionBbox.maxX) / 2 : null);
   const facePivotCy_chin = faceMeshBbox
@@ -2699,6 +2702,16 @@ export async function generateCmo3(input) {
         : 'chin_plus_face_height_offset_hood_case';
     }
   }
+
+  if (rigAnchors?.head) {
+    const { x: hx, y: hy } = rigAnchors.head;
+    if (!Number.isFinite(hx) || !Number.isFinite(hy) || hx < 0 || hx > canvasW || hy < 0 || hy > canvasH)
+      throw Error('Head pivot is outside the canvas; authoring export blocked');
+    facePivotCx = hx; facePivotCy = hy;
+    facePivotCySource = 'validated_psd_face_neck_anchor';
+  }
+  if (strictRigPreflight && faceMeshBbox && (faceMeshBbox.maxY - faceMeshBbox.minY > canvasH * 0.6 || faceMeshBbox.maxX - faceMeshBbox.minX > canvasW * 0.75))
+    throw Error('Face mesh extent is not anatomical; remove alpha outliers before export');
 
   if (rigDebugLog && (faceMeshBbox || faceUnionBbox)) {
     rigDebugLog.facePivot = {
@@ -2932,6 +2945,9 @@ export async function generateCmo3(input) {
       if (!warpSpec) continue;
       if (meshWarpDeformerGuids.has(m.partId)) continue;
       if (pm.hasBakedKeyforms) continue; // arms/legs/hands: bone-baked pose only → no rigWarp; physics drives the bone rotation deformers directly
+      // A no-op per-part warp parented to Body X bypasses the limb's bone.
+      // Keep unbaked limb meshes directly under their rotation group instead.
+      if (/^(handwear|legwear|footwear)(-[lr])?$/.test(m.tag) && groupDeformerGuids.has(m.parentGroupId)) continue;
 
       const { col: warpCol, row: warpRow } = warpSpec;
       const warpGridPts = (warpCol + 1) * (warpRow + 1);
@@ -4709,6 +4725,19 @@ export async function generateCmo3(input) {
   // 7. SERIALIZE + PACK INTO CAFF
   // ==================================================================
 
+  if (rigDebugLog) {
+    rigDebugLog.bindingAudit = auditRigObjects(x._shared, paramDefs);
+    if (strictRigPreflight) {
+      const audit = rigDebugLog.bindingAudit;
+      for (const [tag, bone] of [['handwear-l','leftArm'],['handwear-r','rightArm']]) {
+        const m = audit.meshes.find(mesh => mesh.name === tag);
+        if (m && !m.chain.includes(bone)) audit.errors.push(`${tag} is not controlled by ${bone}`);
+      }
+      const halo = audit.meshes.find(mesh => mesh.name === 'headwear');
+      if (halo && !halo.chain.includes('Face Rotation')) audit.errors.push('Headwear is not controlled by head rotation');
+      if (audit.errors.length) throw Error('Rig preflight failed: '+audit.errors.join('; '));
+    }
+  }
   const xmlStr = x.serialize(root, VERSION_PIS, IMPORT_PIS);
   const xmlBytes = new TextEncoder().encode(xmlStr);
 

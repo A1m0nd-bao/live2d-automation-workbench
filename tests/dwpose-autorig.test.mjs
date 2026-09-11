@@ -22,7 +22,7 @@ test('auto-rig loads DWPose in-browser and keeps a cached fallback-safe session'
 test('Cubism generation uses AI keypoints for limbs while preserving semantic PSD parenting', () => {
   assert.match(engine, /getDWPoseSession\(onProgress\)/);
   assert.match(engine, /runDWPose\(/);
-  assert.match(engine, /poseAssistedSkeleton\(/);
+  assert.match(engine, /calibratePose\(/);
   assert.match(engine, /'legwear'/);
   assert.match(engine, /已回退为图层边界骨架/);
 });

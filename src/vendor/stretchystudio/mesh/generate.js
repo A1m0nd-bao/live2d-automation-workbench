@@ -95,7 +95,12 @@ export function generateMesh(data, width, height, opts = {}) {
   }
 
   // 4. Interior grid — sampled from original alpha so all regions are filled
-  let interiorPts = sampleInterior(data, width, height, alphaThreshold, Math.max(6, gridSpacing));
+  let state = (opts.seed ?? 1) >>> 0;
+  const random = opts.seed === undefined ? Math.random : () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+  let interiorPts = sampleInterior(data, width, height, alphaThreshold, Math.max(6, gridSpacing), random);
   if (edgePadding > 0 && edgePts.length > 0) {
     interiorPts = filterByEdgePadding(interiorPts, edgePts, edgePadding);
   }

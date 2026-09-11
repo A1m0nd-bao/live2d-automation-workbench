@@ -191,11 +191,11 @@ export function estimateSkeletonFromBounds(layers, psdW, psdH) {
   const handL = getBbox('handwear-l') ?? getBbox('handwear');
   const handR = getBbox('handwear-r') ?? getBbox('handwear');
   if (kp.lShoulder && handL) {
-    kp.lWrist = { x: handL.cx, y: handL.y + handL.h * 0.1 };
+    kp.lWrist = { x: handL.cx, y: handL.y + handL.h * 0.9 };
     kp.lElbow = { x: (kp.lShoulder.x + kp.lWrist.x) / 2, y: (kp.lShoulder.y + kp.lWrist.y) / 2 };
   }
   if (kp.rShoulder && handR) {
-    kp.rWrist = { x: handR.cx, y: handR.y + handR.h * 0.1 };
+    kp.rWrist = { x: handR.cx, y: handR.y + handR.h * 0.9 };
     kp.rElbow = { x: (kp.rShoulder.x + kp.rWrist.x) / 2, y: (kp.rShoulder.y + kp.rWrist.y) / 2 };
   }
 
@@ -327,6 +327,7 @@ export async function runDWPose(layers, psdW, psdH, onnxSession, onStatus) {
     const lc = document.createElement('canvas');
     lc.width = layer.width; lc.height = layer.height;
     lc.getContext('2d').putImageData(layer.imageData, 0, 0);
+    tctx.globalAlpha = layer.opacity ?? 1;
     tctx.drawImage(lc, layer.x, layer.y);
   }
 

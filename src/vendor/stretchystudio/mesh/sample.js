@@ -12,14 +12,14 @@
  * @param {number}            [gridSpacing=30]
  * @returns {Array<[number,number]>}
  */
-export function sampleInterior(data, width, height, alphaThreshold = 5, gridSpacing = 30) {
+export function sampleInterior(data, width, height, alphaThreshold = 5, gridSpacing = 30, random = Math.random) {
   const points = [];
   const jitter = gridSpacing * 0.4;
 
   for (let y = gridSpacing; y < height - gridSpacing / 2; y += gridSpacing) {
     for (let x = gridSpacing; x < width - gridSpacing / 2; x += gridSpacing) {
-      const jx = x + (Math.random() - 0.5) * jitter * 2;
-      const jy = y + (Math.random() - 0.5) * jitter * 2;
+      const jx = x + (random() - 0.5) * jitter * 2;
+      const jy = y + (random() - 0.5) * jitter * 2;
 
       const cx = Math.max(0, Math.min(width - 1, Math.round(jx)));
       const cy = Math.max(0, Math.min(height - 1, Math.round(jy)));
