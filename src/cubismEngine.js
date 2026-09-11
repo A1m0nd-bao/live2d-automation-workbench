@@ -11,13 +11,14 @@ import {
   buildArmatureNodes,
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
+import { cleanRigLayer, calibratePose, assertRigMesh, limbWeights } from './autoRigPreflight.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
   loadProject,
 } from './vendor/stretchystudio/io/projectFile.js';
 
-export const ENGINE_VERSION = 'stretchy-24a83a2-morph-compat-v1';
+export const ENGINE_VERSION = 'stretchy-24a83a2-morph-rig-preflight-v2';
 const transform = () => ({
   x: 0,
   y: 0,
@@ -56,27 +57,6 @@ const replacementMatches = (base, replacement) =>
 // PSD layer names are still the source of truth for parenting. DWPose refines
 // the anatomical pivots from the rendered character, while the bounds-based
 // skeleton remains a safe fallback for points the model cannot return.
-function poseAssistedSkeleton(boundsSkeleton, poseSkeleton, width, height) {
-  const result = { ...boundsSkeleton };
-  for (const [name, point] of Object.entries(poseSkeleton ?? {})) {
-    if (
-      !point ||
-      !Number.isFinite(point.x) ||
-      !Number.isFinite(point.y) ||
-      point.x < 0 ||
-      point.y < 0 ||
-      point.x > width ||
-      point.y > height
-    )
-      continue;
-    result[name] = point;
-  }
-  // DWPose has no head-base landmark; retaining the semantic face anchor keeps
-  // face and hair parenting stable for anime PSDs.
-  result.headBase = boundsSkeleton.headBase;
-  return result;
-}
-
 // These are deliberately modest, one-directional production controls.  They
 // are not pose synthesis: a three-state mesh keyform only flexes the limb
 // below the detected elbow/knee, leaving the neutral illustration intact.
@@ -159,6 +139,7 @@ export async function generateCubism(
   file,
   name,
   onProgress = (_message) => {},
+  { variantIds } = {},
 ) {
   if (file.size > 100 * 1024 * 1024)
     throw new Error('当前支持最大 100 MB 的工程文件。');
@@ -186,12 +167,41 @@ export async function generateCubism(
       const buffer = await file.arrayBuffer();
       validatePsdHeader(buffer);
       const parsed = importPsd(buffer);
-      const variantManifest = extractVariantManifest(buffer);
+      const sourceVariantManifest = extractVariantManifest(buffer);
+      // A Pro PSD can contain a library of action/expression alternates.  A
+      // production run must only materialise the states selected for this
+      // delivery, otherwise unrequested alternates silently leak into the
+      // CMO3 and its runtime package.
+      const selectedVariantIds = Array.isArray(variantIds) && variantIds.length
+        ? new Set(variantIds)
+        : null;
+      const variantManifest = selectedVariantIds
+        ? {
+          ...sourceVariantManifest,
+          variants: sourceVariantManifest.variants.filter((variant) =>
+            selectedVariantIds.has(variant.id),
+          ),
+        }
+        : sourceVariantManifest;
+      const activeVariantPartNames = new Set(
+        variantManifest.variants.flatMap((variant) =>
+          variant.parts.map((part) => part.name),
+        ),
+      );
       const { width, height } = parsed;
       if (!parsed.layers.length || parsed.layers.length > 120)
         throw new Error('PSD 需要包含 1–120 个有效图层。');
       // Keep hidden PSD layers: they are alternate action/expression parts.
-      const layers = [...parsed.layers];
+      onProgress('清理工作副本的透明噪点并计算有效图层边界…');
+      const cleaned = parsed.layers
+        .filter((layer) => {
+          const sourceVariant = sourceVariantManifest.variants.find((variant) =>
+            variant.parts.some((part) => part.name === layer.name),
+          );
+          return !sourceVariant || activeVariantPartNames.has(layer.name);
+        })
+        .map(layer => cleanRigLayer(layer));
+      const layers = cleaned.map(entry => entry.layer);
       const candidates = [
         'handwear',
         'legwear',
@@ -244,13 +254,17 @@ export async function generateCubism(
         throw new Error(
           '图层名称无法识别。请使用 See-Through 命名的分层 PSD，或导入 .stretch 工程。',
         );
-      const boundsSkeleton = estimateSkeletonFromBounds(layers, width, height);
-      let skeleton = boundsSkeleton;
+      const neutralLayers = layers.filter(isInitiallyVisible);
+      const boundsSkeleton = estimateSkeletonFromBounds(neutralLayers, width, height);
+      let calibration = calibratePose(boundsSkeleton, {}, neutralLayers, width, height);
+      let skeleton = calibration.skeleton;
+      let poseDiagnostics = { method: 'bounds', boundsSkeleton, skeleton, decisions: calibration.decisions };
       try {
         const session = await getDWPoseSession(onProgress);
         // Alternate expression/action layers must not be visible to the pose
         // model; its anchors should describe the neutral production pose only.
-        const poseLayers = layers.filter(isInitiallyVisible);
+        // The same bottom-to-top painter order as the reference and draw_order.
+        const poseLayers = [...neutralLayers].reverse();
         const poseSkeleton = await runDWPose(
           poseLayers,
           width,
@@ -258,13 +272,16 @@ export async function generateCubism(
           session,
           onProgress,
         );
-        skeleton = poseAssistedSkeleton(
+        calibration = calibratePose(
           boundsSkeleton,
           poseSkeleton,
+          neutralLayers,
           width,
           height,
         );
-        warnings.push('已使用 DWPose AI 姿态识别优化四肢、躯干与关节枢轴。');
+        skeleton = calibration.skeleton;
+        poseDiagnostics = { method: 'dwpose', boundsSkeleton, detectedSkeleton: poseSkeleton, skeleton, decisions: calibration.decisions };
+        warnings.push('已使用 DWPose 并按有效图层位置校验左右肢体；头部枢轴采用有效脸/颈区域。');
       } catch (error) {
         // Model delivery and WASM support vary by browser/network. Exporting a
         // usable CMO3 is more important than making the pipeline wait forever.
@@ -281,6 +298,9 @@ export async function generateCubism(
       project = {
         version: 1,
         canvas: { width, height },
+        autoRigDiagnostics: poseDiagnostics,
+        autoRigPreflight: { version: 2, layers: cleaned.map(entry => entry.audit), meshes: [] },
+        autoRigAnchors: { head: skeleton.headBase },
         textures: [],
         parameters: [],
         // The generated CMO3 receives four optional, bounded controls:
@@ -350,9 +370,19 @@ export async function generateCubism(
           canvas.getContext('2d').getImageData(0, 0, width, height).data,
           width,
           height,
+          { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1 },
         );
-        if (!mesh.triangles.length)
-          throw new Error(`${layer.name} 无法生成有效网格。`);
+        assertRigMesh(mesh, layer, width, height);
+        const armSide = matchTag(layer.name) === 'handwear-l' ? 'l' : matchTag(layer.name) === 'handwear-r' ? 'r' : null;
+        if (armSide && isInitiallyVisible(layer)) {
+          const joint = groupDefs.find(group => group.boneRole === (armSide === 'l' ? 'leftElbow' : 'rightElbow'));
+          if (joint) {
+            mesh.jointBoneId = joint.id;
+            mesh.boneWeights = limbWeights(mesh.vertices, skeleton[armSide+'Elbow'], skeleton[armSide+'Wrist']);
+            if (!mesh.boneWeights.some(weight => weight > 0.25)) throw Error(`${layer.name} 肘部权重没有覆盖前臂，已拦截导出`);
+          }
+        }
+        project.autoRigPreflight.meshes.push({ name:layer.name, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height} });
         const source = URL.createObjectURL(await png(canvas));
         urls.push(source);
         project.textures.push({ id: ids[i], source });
@@ -425,11 +455,20 @@ export async function generateCubism(
       new TextDecoder().decode(await cmo.slice(0, 4).arrayBuffer()) !== 'CAFF'
     )
       throw new Error('导出文件不是有效的 Cubism 工程容器。');
+    const rigLogFile = Object.values(bundle.files).find(entry => entry.name.endsWith('.rig.log.json'));
+    const rigLog = rigLogFile ? JSON.parse(await rigLogFile.async('string')) : null;
+    const ineffective = rigLog?.bindingAudit?.parameters.filter(p => p.status !== 'structural-variation' && p.id !== 'ParamOpacity') ?? [];
+    if (ineffective.length) warnings.push(`以下参数未通过有效目标检查，不计作可用动作：${ineffective.map(p=>p.id).join('、')}`);
+    if (project.autoRigPreflight) warnings.push('此 CMO3 的绑定尚未由浏览器运行时编译器编入 moc3；运行包仅作静态预览，正式运行需 Cubism 原生导出。');
     const stretch = await saveProject(project);
     const report = {
       engine: ENGINE_VERSION,
       source: file.name,
       meshCount: project.nodes.filter((node) => node.type === 'part').length,
+      autoRigDiagnostics: project.autoRigDiagnostics ?? null,
+      autoRigPreflight: project.autoRigPreflight ?? null,
+      bindingAudit: rigLog?.bindingAudit ?? null,
+      runtimeBindingStatus: project.autoRigPreflight ? 'not-compiled-use-cubism-native-export' : 'unverified',
       warnings,
       validation: '已生成，待 Cubism 动作验收；不代表动作或运行时编译通过。',
     };

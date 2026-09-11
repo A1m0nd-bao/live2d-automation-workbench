@@ -37,6 +37,7 @@ import { mergeLive2dProPsd } from './live2dProMerge';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
 import { ProductionAccess } from './ProductionAccess';
 import { createProjectFromLocalTask, uploadProjectArtifact } from './productionLedger';
+import { NativeRuntimeViewer } from './NativeRuntimeViewer';
 import './production.css';
 
 type Task = {
@@ -61,15 +62,19 @@ type Task = {
   qaPassed?: boolean;
   cmoFile?: string;
   runtimeFile?: string;
+  /** A native package exported by Cubism Editor, saved only in this browser. */
+  nativeRuntimeFile?: string;
   hasGenerated?: boolean;
   cmoAccepted?: boolean;
   warnings?: string[];
   mode?: 'standard' | 'pro';
   proStateIds?: string[];
   proStateAssets?: Record<string, { filename: string; uploadedAt: string }>;
+  /** States found inside a professionally authored multi-state PSD. */
+  proEmbeddedStateIds?: string[];
   proMergedFile?: string;
   proMergeReportFile?: string;
-  proStage?: 'persona_lock' | 'base_processing' | 'base_psd_ready' | 'state_generation' | 'state_decomposition' | 'merge_ready';
+  proStage?: 'persona_lock' | 'base_processing' | 'base_psd_ready' | 'embedded_states_ready' | 'state_generation' | 'state_decomposition' | 'merge_ready';
   cloudProjectId?: string;
   cloudSyncState?: 'syncing' | 'synced' | 'failed';
   cloudArtifactKeys?: string[];
@@ -98,6 +103,8 @@ const STORAGE = 'morph.production.tasks';
 const stage = (t: Task) =>
   t.mode === 'pro' && t.proStage === 'base_psd_ready'
     ? 'Pro：基础 PSD 已就绪 · 待状态图'
+    : t.mode === 'pro' && t.proStage === 'embedded_states_ready'
+      ? 'Pro：已识别内嵌差分 · 可生成 CMO3'
     : t.mode === 'pro' && t.proStage === 'state_generation'
       ? 'Pro：等待状态图生成'
       : t.mode === 'pro' && t.proStage === 'persona_lock'
@@ -891,7 +898,9 @@ export default function App() {
       ? new File([merged], t.proMergedFile!, { type: 'image/vnd.adobe.photoshop' })
       : t.psdFile ? await psdInput(t) : await input(t);
     const { generateCubism } = await import('./cubismEngine.js');
-    const result = await generateCubism(f, t.name, setProgress);
+    const result = await generateCubism(f, t.name, setProgress, {
+      variantIds: t.mode === 'pro' ? t.proStateIds : undefined,
+    });
     try {
       await saveAsset(`${t.id}:cmo`, result.cmo);
       await saveAsset(`${t.id}:bundle`, result.bundle);
@@ -942,6 +951,8 @@ export default function App() {
       qaPassed: false,
       hasGenerated: false,
       cmoFile: undefined,
+      runtimeFile: undefined,
+      nativeRuntimeFile: undefined,
       cmoAccepted: false,
       warnings: [],
     };
@@ -1220,6 +1231,24 @@ export default function App() {
                     JSON.stringify(manifest, null, 2),
                   ], { type: 'application/json' }));
                 }
+                // Some artist-authored PSDs already include their approved
+                // action/expression differences in hidden action_* and
+                // expression_* groups. They are a complete Pro source, not
+                // a base PSD waiting for a second See-Through pass.
+                const embeddedStateIds = productionMode === 'pro' && k === 'psd'
+                  ? (() => {
+                    const bufferPromise = file.arrayBuffer();
+                    return bufferPromise.then((buffer) => {
+                      const manifest = extractVariantManifest(buffer) as unknown as VariantManifest;
+                      const available = new Set(manifest.variants.map((variant) => variant.id));
+                      return proStateIds.filter((stateId) => available.has(stateId));
+                    });
+                  })()
+                  : Promise.resolve([] as string[]);
+                const embedded = await embeddedStateIds;
+                const hasAllSelectedEmbeddedStates = productionMode === 'pro'
+                  && selectedStates.length > 0
+                  && embedded.length === selectedStates.length;
                 const next: Task = {
                   id,
                   name: name.trim(),
@@ -1232,8 +1261,14 @@ export default function App() {
                   createdAt: new Date().toLocaleString('zh-CN'),
                   mode: productionMode,
                   proStateIds: productionMode === 'pro' ? proStateIds : undefined,
+                  proEmbeddedStateIds: hasAllSelectedEmbeddedStates ? embedded : undefined,
                   proStage: productionMode === 'pro'
-                    ? (k === 'image' ? 'persona_lock' : 'base_psd_ready')
+                    ? (k === 'image'
+                      ? 'persona_lock'
+                      : hasAllSelectedEmbeddedStates ? 'embedded_states_ready' : 'base_psd_ready')
+                    : undefined,
+                  remoteMessage: hasAllSelectedEmbeddedStates
+                    ? `已从 PSD 识别 ${embedded.length} 个内嵌状态；无需重复拆分，确认基础姿势后即可生成 CMO3。`
                     : undefined,
                 };
                 setTasks((all) => [next, ...all]);
@@ -1315,7 +1350,13 @@ export default function App() {
                 {task.proStage === 'base_psd_ready' && (
                   <small>基础 PSD 已完成。导入每个状态经 See-Through 拆分后的 PSD，随后可在此浏览器本地合层。</small>
                 )}
-                {task.psdFile && (
+                {task.proStage === 'embedded_states_ready' && (
+                  <small>
+                    已在当前 PSD 内识别到：{selectedProStates(task.proEmbeddedStateIds ?? []).map((state) => state.label).join('、')}。
+                    将以未带状态前缀的图层作为中性基准，直接写入所选差分；不需要额外上传状态 PSD。
+                  </small>
+                )}
+                {task.psdFile && task.proStage !== 'embedded_states_ready' && (
                   <section className="pro-state-imports">
                     <div>
                       <b>状态 PSD 收集</b>
@@ -1581,6 +1622,17 @@ export default function App() {
               </figure>
             )}
             {task.psdFile && <PsdVariantPreview task={task} />}
+            {task.psdFile && (
+              <NativeRuntimeViewer
+                savedPackageName={task.nativeRuntimeFile}
+                loadSavedPackage={() => readAsset(`${task.id}:native-runtime`)}
+                savePackage={async (file) => {
+                  await saveAsset(`${task.id}:native-runtime`, file);
+                  update(task.id, { nativeRuntimeFile: file.name, cmoAccepted: false });
+                  setToast('原生 Cubism 运行时包已仅在此浏览器保存，可随时回到此任务预览。');
+                }}
+              />
+            )}
           </div>
         </Modal>
       )}
@@ -1659,15 +1711,17 @@ function formatUpstreamDiagnostics(events: string) {
 type ProFlowState = 'queued' | 'working' | 'done';
 function proFlowState(task: Task, step: 'source' | 'persona' | 'basePsd' | 'states' | 'statePsd' | 'merge' | 'delivery'): ProFlowState {
   const stage = task.proStage;
+  const embedded = stage === 'embedded_states_ready';
   const expectedStates = task.proStateIds?.length || 0;
   const collectedStates = Object.keys(task.proStateAssets || {}).filter((id) => task.proStateIds?.includes(id)).length;
   if (step === 'source') return task.inputFile ? 'done' : 'queued';
+  if (embedded && ['persona', 'basePsd', 'states', 'statePsd', 'merge'].includes(step)) return 'done';
   if (step === 'persona') return task.preparedFile ? 'done' : stage === 'persona_lock' || stage === 'base_processing' ? 'working' : 'queued';
   if (step === 'basePsd') return task.psdFile ? 'done' : task.remoteJobId ? 'working' : 'queued';
   if (step === 'states') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : task.psdFile ? 'working' : 'queued';
   if (step === 'statePsd') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : collectedStates ? 'working' : task.psdFile ? 'working' : 'queued';
   if (step === 'merge') return stage === 'merge_ready' ? 'done' : stage === 'state_decomposition' ? 'working' : 'queued';
-  return task.hasGenerated ? 'done' : stage === 'merge_ready' ? 'working' : 'queued';
+  return task.hasGenerated ? 'done' : stage === 'merge_ready' || embedded ? 'working' : 'queued';
 }
 
 function ProFlowNode({
