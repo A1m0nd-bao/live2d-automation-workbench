@@ -15,6 +15,10 @@
 
 /** Threshold below which a pixel is treated as transparent. */
 const ALPHA_THRESHOLD = 10;
+const createImageData = (width, height) =>
+  typeof ImageData === 'function'
+    ? new ImageData(width, height)
+    : { width, height, data: new Uint8ClampedArray(width * height * 4) };
 
 /* ── Union-Find ────────────────────────────────────────────────────────────── */
 
@@ -135,7 +139,7 @@ export function splitLayerLR(layer, psdW, psdH) {
     const cW = maxX - minX + 1;
     const cH = maxY - minY + 1;
 
-    const out = new ImageData(cW, cH);
+    const out = createImageData(cW, cH);
     for (let y = minY; y <= maxY; y++) {
       for (let x = minX; x <= maxX; x++) {
         const srcIdx = y * W + x;

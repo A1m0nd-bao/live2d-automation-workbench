@@ -492,13 +492,19 @@ function boneForTag(tag, groups) {
  * @param {Array}    layers    Flat layer array from importPsd (indexed)
  * @param {string[]} partIds   Pre-generated IDs, 1:1 with layers
  * @param {Function} uidFn     ID generator
+ * @param {{lowerBodyRigReady?:boolean}} options  Normalization gate result
  * @returns {{
  *   groupDefs: Array<{id,name,parentId,boneRole,pivotX,pivotY}>,
  *   assignments: Map<number, {parentGroupId, drawOrder}>
  * }}
  */
-export function buildArmatureNodes(skeleton, groups, layers, partIds, uidFn) {
+export function buildArmatureNodes(skeleton, groups, layers, partIds, uidFn, options = {}) {
   const kp = skeleton;
+  // A left/right thigh without a matching left/right shoe will look acceptable
+  // at rest but causes exactly the detached-foot failure seen in Cubism.  Keep
+  // the art visible, but do not create independent leg/knee controls unless
+  // the PSD normalization gate has a complete lower-body pair.
+  const lowerBodyRigReady = options.lowerBodyRigReady !== false;
 
   // Ensure headBase is set from face layer bounding box (DWPose doesn't provide this)
   if (!kp.headBase) {
@@ -530,10 +536,10 @@ export function buildArmatureNodes(skeleton, groups, layers, partIds, uidFn) {
     bothArms:  groups.arms === 'merged',
     leftElbow: groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-l')),
     rightElbow:groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-r')),
-    leftLeg:   groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-l')),
-    rightLeg:  groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-r')),
-    leftKnee:  groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-l')),
-    rightKnee: groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-r')),
+    leftLeg:   lowerBodyRigReady && (groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-l'))),
+    rightLeg:  lowerBodyRigReady && (groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-r'))),
+    leftKnee:  lowerBodyRigReady && (groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-l'))),
+    rightKnee: lowerBodyRigReady && (groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-r'))),
     bothLegs:  groups.legs === 'merged',
   };
 

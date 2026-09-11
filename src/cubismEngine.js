@@ -12,13 +12,14 @@ import {
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
 import { cleanRigLayer, calibratePose, assertRigMesh, limbWeights } from './autoRigPreflight.js';
+import { normalizePsdRigLayers } from './psdRigNormalization.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
   loadProject,
 } from './vendor/stretchystudio/io/projectFile.js';
 
-export const ENGINE_VERSION = 'stretchy-24a83a2-morph-rig-preflight-v2';
+export const ENGINE_VERSION = 'stretchy-24a83a2-morph-rig-normalization-v3';
 const transform = () => ({
   x: 0,
   y: 0,
@@ -201,11 +202,9 @@ export async function generateCubism(
           return !sourceVariant || activeVariantPartNames.has(layer.name);
         })
         .map(layer => cleanRigLayer(layer));
-      const layers = cleaned.map(entry => entry.layer);
+      let layers = cleaned.map(entry => entry.layer);
       const candidates = [
         'handwear',
-        'legwear',
-        'footwear',
         'irides',
         'eyebrow',
         'eyewhite',
@@ -236,6 +235,12 @@ export async function generateCubism(
             })),
           );
       }
+      // This is the final PSD → CMO3 safety gate.  It never mutates the
+      // uploaded PSD: the working layer stack gains a canonical neck order
+      // and, only when safe, semantic left/right lower-limb layers.
+      const normalization = normalizePsdRigLayers(layers);
+      layers = normalization.layers;
+      warnings.push(...normalization.audit.warnings);
       const variantByPart = new Map();
       for (const variant of variantManifest.variants)
         for (const part of variant.parts) variantByPart.set(part.name, variant);
@@ -294,19 +299,24 @@ export async function generateCubism(
         layers,
         ids,
         () => crypto.randomUUID(),
+        { lowerBodyRigReady: normalization.lowerBodyRigReady },
       );
       project = {
         version: 1,
         canvas: { width, height },
         autoRigDiagnostics: poseDiagnostics,
-        autoRigPreflight: { version: 2, layers: cleaned.map(entry => entry.audit), meshes: [] },
+        autoRigPreflight: { version: 3, layers: cleaned.map(entry => entry.audit), normalization: normalization.audit, meshes: [] },
         autoRigAnchors: { head: skeleton.headBase },
         textures: [],
         parameters: [],
         // The generated CMO3 receives four optional, bounded controls:
         // 0 (neutral), 0.5 (subtle), 1 (small flex).  They are only emitted
         // when the PSD has separately named left/right limb layers.
-        autoLimbBends: buildAutoLimbBends(skeleton, width, height),
+        // Never emit a fallback leg-bend parameter when the matching shoes
+        // were not proven to follow that leg.  A parameter with only thigh
+        // targets recreates the detached-shoe failure even without leg bones.
+        autoLimbBends: buildAutoLimbBends(skeleton, width, height)
+          .filter((definition) => definition.kind !== 'leg' || normalization.lowerBodyRigReady),
         // Discrete production states are exported as Cubism parameters rather
         // than interpolated mesh poses.  Start with the safest useful case:
         // base arms ↔ action_02 wave arms.  Both endpoint states contain a
@@ -373,16 +383,30 @@ export async function generateCubism(
           { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1 },
         );
         assertRigMesh(mesh, layer, width, height);
-        const armSide = matchTag(layer.name) === 'handwear-l' ? 'l' : matchTag(layer.name) === 'handwear-r' ? 'r' : null;
-        if (armSide && isInitiallyVisible(layer)) {
-          const joint = groupDefs.find(group => group.boneRole === (armSide === 'l' ? 'leftElbow' : 'rightElbow'));
+        const tag = matchTag(layer.name);
+        const limb = tag === 'handwear-l' ? { side: 'l', joint: 'leftElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
+          : tag === 'handwear-r' ? { side: 'r', joint: 'rightElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
+          : tag === 'legwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
+          : tag === 'legwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
+          : tag === 'footwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
+          : tag === 'footwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
+          : null;
+        if (limb && isInitiallyVisible(layer)) {
+          const joint = groupDefs.find(group => group.boneRole === limb.joint);
           if (joint) {
             mesh.jointBoneId = joint.id;
-            mesh.boneWeights = limbWeights(mesh.vertices, skeleton[armSide+'Elbow'], skeleton[armSide+'Wrist']);
-            if (!mesh.boneWeights.some(weight => weight > 0.25)) throw Error(`${layer.name} 肘部权重没有覆盖前臂，已拦截导出`);
+            mesh.boneWeights = limbWeights(mesh.vertices, skeleton[limb.side + limb.pivot], skeleton[limb.side + limb.endpoint]);
+            const minWeight = Math.min(...mesh.boneWeights);
+            const maxWeight = Math.max(...mesh.boneWeights);
+            // Shoes are wholly below the knee/ankle segment, so every vertex
+            // should follow that segment.  A leg/arm mesh instead needs a
+            // spread of weights across its joint to make an actual bend.
+            const isFootwear = tag === 'footwear-l' || tag === 'footwear-r';
+            if (isFootwear ? minWeight < 0.8 : minWeight > 0.15 || maxWeight < 0.75)
+              throw Error(`${layer.name} ${limb.label}权重没有同时覆盖关节两侧，已拦截导出`);
           }
         }
-        project.autoRigPreflight.meshes.push({ name:layer.name, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height} });
+        project.autoRigPreflight.meshes.push({ name:layer.name, tag, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height}, jointBoneId:mesh.jointBoneId ?? null, weightRange: mesh.boneWeights ? { min:Math.min(...mesh.boneWeights), max:Math.max(...mesh.boneWeights) } : null });
         const source = URL.createObjectURL(await png(canvas));
         urls.push(source);
         project.textures.push({ id: ids[i], source });

@@ -62,6 +62,7 @@ type Task = {
   qaPassed?: boolean;
   cmoFile?: string;
   runtimeFile?: string;
+  rigReportFile?: string;
   /** A native package exported by Cubism Editor, saved only in this browser. */
   nativeRuntimeFile?: string;
   hasGenerated?: boolean;
@@ -536,6 +537,7 @@ export default function App() {
       if (item.hasGenerated) candidates.push({ task: item, key: 'bundle', suffix: 'bundle', kind: 'moc3_bundle', filename: `${item.name}-bundle.zip` });
       if (item.hasGenerated) candidates.push({ task: item, key: 'stretch', suffix: 'stretch', kind: 'stretch', filename: `${item.name}.stretch` });
       if (item.hasGenerated) candidates.push({ task: item, key: 'preview', suffix: 'preview', kind: 'preview', filename: `${item.name}-preview.png` });
+      if (item.rigReportFile) candidates.push({ task: item, key: 'rig-report', suffix: 'rig-report', kind: 'report', filename: item.rigReportFile });
       if (item.proMergeReportFile) candidates.push({ task: item, key: 'pro-merge-report', suffix: 'pro-merge-report', kind: 'report', filename: item.proMergeReportFile });
     }
     for (const candidate of candidates) {
@@ -906,6 +908,7 @@ export default function App() {
       await saveAsset(`${t.id}:bundle`, result.bundle);
       await saveAsset(`${t.id}:runtime`, result.runtimeBundle);
       await saveAsset(`${t.id}:stretch`, result.stretch);
+      await saveAsset(`${t.id}:rig-report`, new Blob([JSON.stringify(result.report, null, 2)], { type: 'application/json' }));
       if (result.preview)
         await saveAsset(`${t.id}:preview`, result.preview as Blob);
     } catch {
@@ -917,6 +920,7 @@ export default function App() {
     update(t.id, {
       cmoFile: `${result.name}.cmo3`,
       runtimeFile: result.runtimeFile,
+      rigReportFile: `${result.name}-rig-report.json`,
       hasGenerated: true,
       cmoAccepted: false,
       warnings: result.report.warnings,
@@ -952,6 +956,7 @@ export default function App() {
       hasGenerated: false,
       cmoFile: undefined,
       runtimeFile: undefined,
+      rigReportFile: undefined,
       nativeRuntimeFile: undefined,
       cmoAccepted: false,
       warnings: [],
@@ -1577,6 +1582,17 @@ export default function App() {
                 >
                   下载工程包（含报告与 .stretch）
                 </button>
+                {task.rigReportFile && (
+                  <button
+                    className="ghost-button"
+                    disabled={busy}
+                    onClick={() =>
+                      void operate(() => download(task, 'rig-report', task.rigReportFile!))
+                    }
+                  >
+                    下载绑定规范报告
+                  </button>
+                )}
                 {task.runtimeFile && (
                   <button
                     className="ghost-button"
@@ -1609,6 +1625,7 @@ export default function App() {
             {task.warnings?.map((w, i) => (
               <small key={i}>{w}</small>
             ))}
+            {task.rigReportFile && <RigNormalizationPreview task={task} />}
             {preview && (
               <figure>
                 {/* Local Blob preview has no public URL for server image optimization. */}
@@ -1931,6 +1948,62 @@ function PsdVariantPreview({ task }: VariantPreviewProps) {
           <canvas ref={canvas} className="variant-canvas" aria-label="PSD 动作替换预览" />
         </>
       )}
+    </section>
+  );
+}
+
+type RigNormalizationReport = {
+  autoRigPreflight?: {
+    normalization?: {
+      lowerBodyRigReady?: boolean;
+      neckVisibility?: { visibleFraction?: number; foregroundHairOverlap?: number } | null;
+      actions?: Array<{ kind?: string; layer?: string; mode?: string; message?: string }>;
+      warnings?: string[];
+    };
+  };
+};
+
+function RigNormalizationPreview({ task }: { task: Task }) {
+  const [report, setReport] = useState<RigNormalizationReport | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void readAsset(`${task.id}:rig-report`)
+      .then(async (blob) => {
+        if (!blob) return null;
+        return JSON.parse(await blob.text()) as RigNormalizationReport;
+      })
+      .then((value) => { if (alive) setReport(value); })
+      .catch(() => { if (alive) setReport(null); });
+    return () => { alive = false; };
+  }, [task.id]);
+  const normalization = report?.autoRigPreflight?.normalization;
+  if (!normalization) return null;
+  const visible = normalization.neckVisibility?.visibleFraction;
+  return (
+    <section className="variant-preview rig-normalization-preview">
+      <div className="variant-preview-heading">
+        <div>
+          <p className="eyebrow">PSD → CMO3 NORMALIZATION</p>
+          <h3>工作图层规范检查</h3>
+        </div>
+        <small>{normalization.lowerBodyRigReady ? '下肢与鞋：可绑定' : '下肢与鞋：已拦截独立绑定'}</small>
+      </div>
+      <p>
+        颈部可见像素：{typeof visible === 'number' ? `${Math.round(visible * 100)}%` : '未检测'}
+        {typeof visible === 'number' && visible < 0.12 ? ' · 需要回到拆分端补图' : ' · 通过层级可见性检查'}
+      </p>
+      {normalization.actions?.length ? (
+        <ul className="rig-normalization-list">
+          {normalization.actions.map((action, index) => (
+            <li key={`${action.kind}-${action.layer}-${index}`}>
+              {action.message || action.kind}
+              {action.mode ? `（${action.mode}）` : ''}
+            </li>
+          ))}
+        </ul>
+      ) : <p>未对工作副本做图层改写。</p>}
+      {normalization.warnings?.map((warning, index) => <small key={index}>{warning}</small>)}
+      <small>此处修正的是浏览器内的工作副本；上传的原始 PSD 不会被覆盖。</small>
     </section>
   );
 }

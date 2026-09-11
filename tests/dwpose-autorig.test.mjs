@@ -10,6 +10,10 @@ const engine = readFileSync(
   new URL('../src/cubismEngine.js', import.meta.url),
   'utf8',
 );
+const normalization = readFileSync(
+  new URL('../src/psdRigNormalization.js', import.meta.url),
+  'utf8',
+);
 
 test('auto-rig loads DWPose in-browser and keeps a cached fallback-safe session', () => {
   assert.match(organizer, /onnxruntime-web@1\.29\.0\/dist\/ort\.min\.mjs/);
@@ -23,6 +27,7 @@ test('Cubism generation uses AI keypoints for limbs while preserving semantic PS
   assert.match(engine, /getDWPoseSession\(onProgress\)/);
   assert.match(engine, /runDWPose\(/);
   assert.match(engine, /calibratePose\(/);
-  assert.match(engine, /'legwear'/);
+  assert.match(engine, /normalizePsdRigLayers/);
+  assert.match(normalization, /'legwear'/);
   assert.match(engine, /已回退为图层边界骨架/);
 });
