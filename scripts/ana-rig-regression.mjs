@@ -53,6 +53,7 @@ const result=await generateCmo3({canvasW:W,canvasH:H,meshes,
   actionSwitches:[{id:'ParamActionWave',name:'Action: Wave'}],rigAnchors:{head:skeleton.headBase},
   generateRig:true,generatePhysics:true,strictRigPreflight:true,modelName:'ana-rig-fixed'});
 const audit=result.rigDebugLog.bindingAudit;
+assert.ok(!audit.parameters.some(p=>p.id==='ParamOpacity'),'no dummy Opacity parameter');
 for(const side of ['l','r']) {
   const role=side==='l'?'left':'right';
   const arm=audit.meshes.find(m=>m.name==='handwear-'+side);

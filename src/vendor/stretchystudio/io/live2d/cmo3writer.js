@@ -38,6 +38,7 @@ import {
   makeUniformGrid,
   emitKfBinding,
   emitSingleParamKfGrid,
+  emitRestKfGrid,
   emitStructuralWarp,
 } from './cmo3/deformerEmit.js';
 import { emitNeckWarp, emitFaceRotation } from './cmo3/bodyRig.js';
@@ -207,14 +208,8 @@ export async function generateCmo3(input) {
   });
   const [, pidModelGuid] = x.shared('CModelGuid', { uuid: uuid(), note: 'model' });
 
-  // Build parameter GUIDs — always include ParamOpacity, plus all project parameters
+  // Static forms use zero-dimensional grids, not a no-op Opacity slider.
   const paramDefs = [];
-  // ParamOpacity is always required (keyform bindings reference it)
-  const [, pidParamOpacity] = x.shared('CParameterGuid', { uuid: uuid(), note: 'ParamOpacity' });
-  paramDefs.push({
-    pid: pidParamOpacity, id: 'ParamOpacity', name: 'Opacity',
-    min: 0, max: 1, defaultVal: 1, decimalPlaces: 1,
-  });
   for (const p of parameters) {
     const paramId = p.id ?? `Param${paramDefs.length}`;
     const [, pid] = x.shared('CParameterGuid', { uuid: uuid(), note: paramId });
@@ -850,7 +845,7 @@ export async function generateCmo3(input) {
 
     // Keyform system — baked bone-weight keyforms for meshes with boneWeights,
     // eyelash-l uses per-vertex closure keyforms (Session 17),
-    // otherwise single keyform bound to ParamOpacity (existing behavior)
+    // otherwise a static keyform with no parameter binding
     const hasBakedKeyforms = !!(m.boneWeights && m.jointBoneId && boneParamGuids.has(m.jointBoneId));
     // Session 17: per-eye closure via per-vertex CArtMeshForm keyforms.
     // Eyelash/eyewhite/irides (both sides) all collapse to their side's eyelash band.
@@ -1083,27 +1078,7 @@ export async function generateCmo3(input) {
       x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
       x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = limbBend.id;
     } else {
-      // Standard single keyform bound to ParamOpacity
-      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
-      const kog = x.sub(kfog, 'KeyformOnGrid');
-      const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
-      const kopList = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
-      const kop = x.sub(kopList, 'KeyOnParameter');
-      x.subRef(kop, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
-      x.sub(kop, 'i', { 'xs.n': 'keyIndex' }).text = '0';
-      x.subRef(kog, 'CFormGuid', pidFormMesh, { 'xs.n': 'keyformGuid' });
-      const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
-      x.subRef(kb, 'KeyformBindingSource', pidKfb);
-
-      x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
-      x.subRef(kfBinding, 'CParameterGuid', pidParamOpacity, { 'xs.n': 'parameterGuid' });
-      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '1' });
-      x.sub(keys, 'f').text = '1.0';
-      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
-      x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
-      x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = 'ParamOpacity';
+      emitRestKfGrid(x, kfGridMesh, pidFormMesh);
     }
 
     perMesh.push({
@@ -3027,7 +3002,7 @@ export async function generateCmo3(input) {
         const ctx = findEyeCtx(m.tag, bCx, bCy);
         if (ctx) meshCtx = { curvePoints: ctx.curvePoints };
       }
-      // ── Per-part warp binding: standard param or no-op ParamOpacity (Session 16) ──
+      // ── Per-part warp binding: standard parameter or static rest form ──
       const tagBinding = TAG_PARAM_BINDINGS.get(m.tag);
       const hasBinding = !!(tagBinding && tagBinding.bindings.every(b => b.pid));
       let pidRigWarpKfg, rigWarpFormGuids, rigWarpKeyValues;
@@ -3103,24 +3078,13 @@ export async function generateCmo3(input) {
           emitKfBinding(x, kfb.kfb, pidKfg, kfb.pid, kfb.keys.map(k => k + '.0'), kfb.desc);
         }
       } else {
-        // No standard binding — single rest keyform, no-op ParamOpacity
+        // No standard binding — static rest keyform without a dummy parameter.
         const [, pidRigWarpForm] = x.shared('CFormGuid', { uuid: uuid(), note: `RigWarpForm_${sanitizedName}` });
         rigWarpFormGuids = [pidRigWarpForm];
         rigWarpKeyValues = null;
-        const [rigWarpKfb, pidRigWarpKfb] = x.shared('KeyformBindingSource');
         const [rigWarpKfg, pidKfg] = x.shared('KeyformGridSource');
         pidRigWarpKfg = pidKfg;
-        const kfogList = x.sub(rigWarpKfg, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
-        const kog = x.sub(kfogList, 'KeyformOnGrid');
-        const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
-        const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
-        const kon = x.sub(kop, 'KeyOnParameter');
-        x.subRef(kon, 'KeyformBindingSource', pidRigWarpKfb, { 'xs.n': 'binding' });
-        x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = '0';
-        x.subRef(kog, 'CFormGuid', pidRigWarpForm, { 'xs.n': 'keyformGuid' });
-        const kfbList = x.sub(rigWarpKfg, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
-        x.subRef(kfbList, 'KeyformBindingSource', pidRigWarpKfb);
-        emitKfBinding(x, rigWarpKfb, pidRigWarpKfg, pidParamOpacity, ['1.0'], 'ParamOpacity');
+        emitRestKfGrid(x, rigWarpKfg, pidRigWarpForm);
       }
 
       // Parent part
@@ -4466,7 +4430,7 @@ export async function generateCmo3(input) {
   x.sub(canvas, 'i', { 'xs.n': 'pixelHeight' }).text = String(canvasH);
   x.sub(canvas, 'CColor', { 'xs.n': 'background' });
 
-  // Parameters — emit all from paramDefs (ParamOpacity + project parameters)
+  // Parameters — emit project and generated rig controls.
   const paramSet = x.sub(model, 'CParameterSourceSet', { 'xs.n': 'parameterSourceSet' });
   const paramSources = x.sub(paramSet, 'carray_list', {
     'xs.n': '_sources', count: String(paramDefs.length),

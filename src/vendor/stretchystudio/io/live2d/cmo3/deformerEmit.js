@@ -10,6 +10,16 @@
 
 import { uuid } from '../xmlbuilder.js';
 
+/** A static form has no parameter axis; it must not occupy a user slider. */
+export function emitRestKfGrid(x, grid, formPid) {
+  const cells = x.sub(grid, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
+  const cell = x.sub(cells, 'KeyformOnGrid');
+  const access = x.sub(cell, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
+  x.sub(access, 'array_list', { 'xs.n': '_keyOnParameterList', count: '0' });
+  x.subRef(cell, 'CFormGuid', formPid, { 'xs.n': 'keyformGuid' });
+  x.sub(grid, 'array_list', { 'xs.n': 'keyformBindings', count: '0' });
+}
+
 /** Generate a uniform grid of 2D positions in [minVal, maxVal] × [minVal, maxVal]. */
 export function makeUniformGrid(col, row, minVal, maxVal) {
   const gW = col + 1, gH = row + 1;
