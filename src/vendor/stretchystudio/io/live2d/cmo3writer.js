@@ -38,12 +38,14 @@ import {
   makeUniformGrid,
   emitKfBinding,
   emitSingleParamKfGrid,
+  emitRestKfGrid,
   emitStructuralWarp,
 } from './cmo3/deformerEmit.js';
 import { emitNeckWarp, emitFaceRotation } from './cmo3/bodyRig.js';
 import { emitFaceParallax } from './cmo3/faceParallax.js';
 import { emitPhysicsSettings } from './cmo3/physics.js';
 import { auditRigObjects } from './cmo3/rigAudit.js';
+import { emitLimbGrid } from './cmo3/limbKeyforms.js';
 
 // ---------- Main generator ----------
 
@@ -206,14 +208,8 @@ export async function generateCmo3(input) {
   });
   const [, pidModelGuid] = x.shared('CModelGuid', { uuid: uuid(), note: 'model' });
 
-  // Build parameter GUIDs — always include ParamOpacity, plus all project parameters
+  // Static forms use zero-dimensional grids, not a no-op Opacity slider.
   const paramDefs = [];
-  // ParamOpacity is always required (keyform bindings reference it)
-  const [, pidParamOpacity] = x.shared('CParameterGuid', { uuid: uuid(), note: 'ParamOpacity' });
-  paramDefs.push({
-    pid: pidParamOpacity, id: 'ParamOpacity', name: 'Opacity',
-    min: 0, max: 1, defaultVal: 1, decimalPlaces: 1,
-  });
   for (const p of parameters) {
     const paramId = p.id ?? `Param${paramDefs.length}`;
     const [, pid] = x.shared('CParameterGuid', { uuid: uuid(), note: paramId });
@@ -317,20 +313,20 @@ export async function generateCmo3(input) {
   // Pre-create rotation parameters for bone nodes (needed by baked keyform meshes).
   // These are groups referenced as jointBoneId by meshes with boneWeights.
   // Created here (before per-mesh loop) so KeyformBindingSource can reference them.
-  const BAKED_ANGLES = [-90, -45, 0, 45, 90];
-  const BAKED_ANGLE_MIN = BAKED_ANGLES[0];
-  const BAKED_ANGLE_MAX = BAKED_ANGLES[BAKED_ANGLES.length - 1];
   const boneParamGuids = new Map(); // jointBoneId → { pidParam, paramId }
   for (const m of meshes) {
     if (m.jointBoneId && m.boneWeights && !boneParamGuids.has(m.jointBoneId)) {
       const boneGroup = groups.find(g => g.id === m.jointBoneId);
       const boneName = (boneGroup?.name || m.jointBoneId).replace(/[^a-zA-Z0-9_]/g, '_');
       const paramId = `ParamRotation_${boneName}`;
+      const limit = boneGroup?.boneRole?.endsWith('Knee') ? 5
+        : boneGroup?.boneRole?.endsWith('Elbow') ? 7 : 90;
+      const angles = [-limit, -limit / 2, 0, limit / 2, limit];
       const [, pidParam] = x.shared('CParameterGuid', { uuid: uuid(), note: paramId });
-      boneParamGuids.set(m.jointBoneId, { pidParam, paramId });
+      boneParamGuids.set(m.jointBoneId, { pidParam, paramId, angles });
       paramDefs.push({
         pid: pidParam, id: paramId, name: `Rotation ${boneGroup?.name || m.jointBoneId}`,
-        min: BAKED_ANGLE_MIN, max: BAKED_ANGLE_MAX, defaultVal: 0, decimalPlaces: 1,
+        min: -limit, max: limit, defaultVal: 0, decimalPlaces: 1,
       });
     }
   }
@@ -849,7 +845,7 @@ export async function generateCmo3(input) {
 
     // Keyform system — baked bone-weight keyforms for meshes with boneWeights,
     // eyelash-l uses per-vertex closure keyforms (Session 17),
-    // otherwise single keyform bound to ParamOpacity (existing behavior)
+    // otherwise a static keyform with no parameter binding
     const hasBakedKeyforms = !!(m.boneWeights && m.jointBoneId && boneParamGuids.has(m.jointBoneId));
     // Session 17: per-eye closure via per-vertex CArtMeshForm keyforms.
     // Eyelash/eyewhite/irides (both sides) all collapse to their side's eyelash band.
@@ -893,7 +889,7 @@ export async function generateCmo3(input) {
     let actionFormGuids = null; // one form per state for multi-action swaps
     let limbBendFormGuids = null; // [rest, subtle, small flex]
 
-    if (hasActionSwitch) {
+    if (hasActionSwitch && !hasBakedKeyforms) {
       if (Array.isArray(actionSwitch.stateOpacities)) {
         const stateCount = actionSwitch.stateOpacities.length;
         actionFormGuids = [pidFormMesh];
@@ -965,45 +961,12 @@ export async function generateCmo3(input) {
       x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = actionSwitch.id;
       }
     } else if (hasBakedKeyforms) {
-      // Multiple keyforms to reduce linear interpolation shrinkage
-      bakedFormGuids = [];
-      const boneParam = boneParamGuids.get(m.jointBoneId);
-
-      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: String(BAKED_ANGLES.length) });
-
-      for (let i = 0; i < BAKED_ANGLES.length; i++) {
-        let pidForm;
-        if (BAKED_ANGLES[i] === 0) {
-          pidForm = pidFormMesh;
-        } else {
-          const [, _pid] = x.shared('CFormGuid', { uuid: uuid(), note: `${meshName}_baked_${BAKED_ANGLES[i]}` });
-          pidForm = _pid;
-        }
-        bakedFormGuids.push(pidForm);
-
-        const kog = x.sub(kfog, 'KeyformOnGrid');
-        const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
-        const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
-        const kon = x.sub(kop, 'KeyOnParameter');
-        x.subRef(kon, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
-        x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = String(i);
-        x.subRef(kog, 'CFormGuid', pidForm, { 'xs.n': 'keyformGuid' });
-      }
-
-      const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
-      x.subRef(kb, 'KeyformBindingSource', pidKfb);
-
-      x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
-      x.subRef(kfBinding, 'CParameterGuid', boneParam.pidParam, { 'xs.n': 'parameterGuid' });
-      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: String(BAKED_ANGLES.length) });
-      for (const ang of BAKED_ANGLES) {
-        x.sub(keys, 'f').text = ang.toFixed(1);
-      }
-      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
-      x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
-      x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = boneParam.paramId;
+      bakedFormGuids = emitLimbGrid(x, {
+        grid: kfGridMesh, gridPid: pidKfgMesh, binding: kfBinding, bindingPid: pidKfb,
+        bone: boneParamGuids.get(m.jointBoneId), angles: boneParamGuids.get(m.jointBoneId).angles,
+        action: hasActionSwitch ? actionSwitch : null, actionPid: actionParamPid,
+        restForm: pidFormMesh, name: meshName,
+      });
     } else if (hasEyelidClosure) {
       // 2 keyforms: closed (k=0), open (k=1, rest). Bound to ParamEye{L,R}Open by side.
       // The mask-artmesh fix for the Cubism warning lives at the WARP level
@@ -1115,27 +1078,7 @@ export async function generateCmo3(input) {
       x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
       x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = limbBend.id;
     } else {
-      // Standard single keyform bound to ParamOpacity
-      const kfog = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
-      const kog = x.sub(kfog, 'KeyformOnGrid');
-      const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
-      const kopList = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
-      const kop = x.sub(kopList, 'KeyOnParameter');
-      x.subRef(kop, 'KeyformBindingSource', pidKfb, { 'xs.n': 'binding' });
-      x.sub(kop, 'i', { 'xs.n': 'keyIndex' }).text = '0';
-      x.subRef(kog, 'CFormGuid', pidFormMesh, { 'xs.n': 'keyformGuid' });
-      const kb = x.sub(kfGridMesh, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
-      x.subRef(kb, 'KeyformBindingSource', pidKfb);
-
-      x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
-      x.subRef(kfBinding, 'CParameterGuid', pidParamOpacity, { 'xs.n': 'parameterGuid' });
-      const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: '1' });
-      x.sub(keys, 'f').text = '1.0';
-      x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
-      x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
-      x.sub(kfBinding, 'f', { 'xs.n': 'extendedInterpolationScale' }).text = '1.0';
-      x.sub(kfBinding, 's', { 'xs.n': 'description' }).text = 'ParamOpacity';
+      emitRestKfGrid(x, kfGridMesh, pidFormMesh);
     }
 
     perMesh.push({
@@ -1424,7 +1367,7 @@ export async function generateCmo3(input) {
   // Add them to deformerParamMap for animation export (can3writer needs them).
   for (const [boneId, bp] of boneParamGuids) {
     deformerParamMap.set(boneId, {
-      paramId: bp.paramId, min: BAKED_ANGLE_MIN, max: BAKED_ANGLE_MAX,
+      paramId: bp.paramId, min: bp.angles[0], max: bp.angles.at(-1),
     });
   }
 
@@ -3059,7 +3002,7 @@ export async function generateCmo3(input) {
         const ctx = findEyeCtx(m.tag, bCx, bCy);
         if (ctx) meshCtx = { curvePoints: ctx.curvePoints };
       }
-      // ── Per-part warp binding: standard param or no-op ParamOpacity (Session 16) ──
+      // ── Per-part warp binding: standard parameter or static rest form ──
       const tagBinding = TAG_PARAM_BINDINGS.get(m.tag);
       const hasBinding = !!(tagBinding && tagBinding.bindings.every(b => b.pid));
       let pidRigWarpKfg, rigWarpFormGuids, rigWarpKeyValues;
@@ -3135,24 +3078,13 @@ export async function generateCmo3(input) {
           emitKfBinding(x, kfb.kfb, pidKfg, kfb.pid, kfb.keys.map(k => k + '.0'), kfb.desc);
         }
       } else {
-        // No standard binding — single rest keyform, no-op ParamOpacity
+        // No standard binding — static rest keyform without a dummy parameter.
         const [, pidRigWarpForm] = x.shared('CFormGuid', { uuid: uuid(), note: `RigWarpForm_${sanitizedName}` });
         rigWarpFormGuids = [pidRigWarpForm];
         rigWarpKeyValues = null;
-        const [rigWarpKfb, pidRigWarpKfb] = x.shared('KeyformBindingSource');
         const [rigWarpKfg, pidKfg] = x.shared('KeyformGridSource');
         pidRigWarpKfg = pidKfg;
-        const kfogList = x.sub(rigWarpKfg, 'array_list', { 'xs.n': 'keyformsOnGrid', count: '1' });
-        const kog = x.sub(kfogList, 'KeyformOnGrid');
-        const ak = x.sub(kog, 'KeyformGridAccessKey', { 'xs.n': 'accessKey' });
-        const kop = x.sub(ak, 'array_list', { 'xs.n': '_keyOnParameterList', count: '1' });
-        const kon = x.sub(kop, 'KeyOnParameter');
-        x.subRef(kon, 'KeyformBindingSource', pidRigWarpKfb, { 'xs.n': 'binding' });
-        x.sub(kon, 'i', { 'xs.n': 'keyIndex' }).text = '0';
-        x.subRef(kog, 'CFormGuid', pidRigWarpForm, { 'xs.n': 'keyformGuid' });
-        const kfbList = x.sub(rigWarpKfg, 'array_list', { 'xs.n': 'keyformBindings', count: '1' });
-        x.subRef(kfbList, 'KeyformBindingSource', pidRigWarpKfb);
-        emitKfBinding(x, rigWarpKfb, pidRigWarpKfg, pidParamOpacity, ['1.0'], 'ParamOpacity');
+        emitRestKfGrid(x, rigWarpKfg, pidRigWarpForm);
       }
 
       // Parent part
@@ -4028,12 +3960,12 @@ export async function generateCmo3(input) {
         return positions;
       };
 
-      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: String(BAKED_ANGLES.length) });
-      for (let i = 0; i < BAKED_ANGLES.length; i++) {
-        const ang = BAKED_ANGLES[i];
-        const pidForm = pm.bakedFormGuids[i];
+      const kfList = x.sub(meshSrc, 'carray_list', { 'xs.n': 'keyforms', count: String(pm.bakedFormGuids.length) });
+      for (const form of pm.bakedFormGuids) {
+        const ang = form.angle;
+        const pidForm = form.pid;
         const positions = (ang === 0) ? verts : computeBakedPositions(ang);
-        emitArtMeshForm(kfList, pidForm, positions);
+        emitArtMeshForm(kfList, pidForm, positions, form.opacity);
       }
     } else if (pm.hasEyelidClosure) {
       // 2 keyforms: closed (k=0, parabola-collapsed) and open (k=1, rest).
@@ -4498,7 +4430,7 @@ export async function generateCmo3(input) {
   x.sub(canvas, 'i', { 'xs.n': 'pixelHeight' }).text = String(canvasH);
   x.sub(canvas, 'CColor', { 'xs.n': 'background' });
 
-  // Parameters — emit all from paramDefs (ParamOpacity + project parameters)
+  // Parameters — emit project and generated rig controls.
   const paramSet = x.sub(model, 'CParameterSourceSet', { 'xs.n': 'parameterSourceSet' });
   const paramSources = x.sub(paramSet, 'carray_list', {
     'xs.n': '_sources', count: String(paramDefs.length),
@@ -4729,6 +4661,20 @@ export async function generateCmo3(input) {
     rigDebugLog.bindingAudit = auditRigObjects(x._shared, paramDefs);
     if (strictRigPreflight) {
       const audit = rigDebugLog.bindingAudit;
+      for (const source of meshes.filter(m => m.jointBoneId && m.boneWeights)) {
+        const mesh = audit.meshes.find(m => m.name === source.name);
+        const param = boneParamGuids.get(source.jointBoneId)?.paramId;
+        if (!mesh?.parameterVariation[param]?.geometry)
+          audit.errors.push(`${source.name}: ${param} has no independent geometry variation`);
+        if (source.actionSwitch && !mesh?.parameterVariation[source.actionSwitch.id]?.opacity)
+          audit.errors.push(`${source.name}: action switch lost independent opacity variation`);
+      }
+      for (const side of ['l','r']) {
+        const shoe = audit.meshes.find(m => m.name === `footwear-${side}`);
+        const leg = audit.meshes.find(m => m.name === `legwear-${side}`);
+        if (shoe && leg && JSON.stringify(shoe.chain) !== JSON.stringify(leg.chain))
+          audit.errors.push(`footwear-${side} does not share the leg deformer chain`);
+      }
       for (const [tag, bone] of [['handwear-l','leftArm'],['handwear-r','rightArm']]) {
         const m = audit.meshes.find(mesh => mesh.name === tag);
         if (m && !m.chain.includes(bone)) audit.errors.push(`${tag} is not controlled by ${bone}`);
