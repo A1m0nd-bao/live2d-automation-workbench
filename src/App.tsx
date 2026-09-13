@@ -38,6 +38,7 @@ import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/ps
 import { ProductionAccess } from './ProductionAccess';
 import { createProjectFromLocalTask, uploadProjectArtifact } from './productionLedger';
 import { NativeRuntimeViewer } from './NativeRuntimeViewer';
+import { compileNative } from './nativeExport';
 import './production.css';
 
 type Task = {
@@ -906,7 +907,6 @@ export default function App() {
     try {
       await saveAsset(`${t.id}:cmo`, result.cmo);
       await saveAsset(`${t.id}:bundle`, result.bundle);
-      await saveAsset(`${t.id}:runtime`, result.runtimeBundle);
       await saveAsset(`${t.id}:stretch`, result.stretch);
       await saveAsset(`${t.id}:rig-report`, new Blob([JSON.stringify(result.report, null, 2)], { type: 'application/json' }));
       if (result.preview)
@@ -919,13 +919,24 @@ export default function App() {
     }
     update(t.id, {
       cmoFile: `${result.name}.cmo3`,
-      runtimeFile: result.runtimeFile,
+      runtimeFile: undefined,
+      nativeRuntimeFile: undefined,
       rigReportFile: `${result.name}-rig-report.json`,
       hasGenerated: true,
       cmoAccepted: false,
       warnings: result.report.warnings,
     });
-    setToast('规范化运行时 MOC3 工程包已生成；CMO3 仍为实验性文件。');
+    try {
+      const runtime = await compileNative(result.cmo, setProgress);
+      await saveAsset(`${t.id}:runtime`, runtime);
+      await saveAsset(`${t.id}:native-runtime`, runtime);
+      update(t.id, {runtimeFile: `${result.name}-native-runtime.zip`, nativeRuntimeFile: `${result.name}-native-runtime.zip`});
+      setToast('原生 MOC3 已编译并接入网页预览；Core 检查通过，视觉效果请确认。');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '原生导出失败';
+      update(t.id, {warnings: [...result.report.warnings, message]});
+      throw new Error(`CMO3 已保存，MOC3 未完成：${message}`);
+    }
   }
   async function download(t: Task, suffix: string, filename: string) {
     const blob = await readAsset(`${t.id}:${suffix}`);
@@ -1641,6 +1652,7 @@ export default function App() {
             {task.psdFile && <PsdVariantPreview task={task} />}
             {task.psdFile && (
               <NativeRuntimeViewer
+                key={`${task.id}:${task.nativeRuntimeFile || ''}`}
                 savedPackageName={task.nativeRuntimeFile}
                 loadSavedPackage={() => readAsset(`${task.id}:native-runtime`)}
                 savePackage={async (file) => {
