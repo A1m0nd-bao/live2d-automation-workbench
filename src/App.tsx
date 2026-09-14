@@ -1,5 +1,5 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { MorphUser } from './morphBackend';
 import {
   Plus,
@@ -262,7 +262,13 @@ async function padForSeeThrough(source: File) {
   }
 }
 
+const RuntimePreviewPage = lazy(() => import('./RuntimePreviewPage'));
 export default function App() {
+  const [isPreview, setIsPreview] = useState(false);
+  useEffect(() => { setIsPreview(new URLSearchParams(location.search).get('page') === 'preview'); }, []);
+  return isPreview ? <Suspense fallback={<p>正在加载预览器…</p>}><RuntimePreviewPage /></Suspense> : <WorkbenchApp />;
+}
+function WorkbenchApp() {
   const [tasks, setTasks] = useState<Task[]>([]),
     [hydrated, setHydrated] = useState(false);
   const [selected, setSelected] = useState(''),
@@ -982,6 +988,7 @@ export default function App() {
           新建生产任务
         </button>
         <nav className="main-nav">
+          <a className="nav-item" href="?page=preview"><Box size={18} />角色交互预览</a>
           <button className="nav-item active" onClick={() => setSelected('')}>
             <FolderOpen size={18} />
             生产任务
