@@ -25,13 +25,17 @@ from fastapi.responses import FileResponse
 MAX_INPUT = 20 * 1024 * 1024
 MAX_OUTPUT = 64 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
-PROMPT = (Path(__file__).with_name("prep_prompt.txt")).read_text()
+PROMPTS = {
+    provider: Path(__file__).with_name(f"prep_prompt_{provider}.txt").read_text()
+    for provider in ("doubao", "image2")
+}
 
 
 class PrepQueue:
-    def __init__(self, root: Path, authorize):
+    def __init__(self, root: Path, authorize, execution_slots=None):
         self.root = root / "prep"
         self.authorize = authorize
+        self.execution_slots = execution_slots or asyncio.Semaphore(1)
         self.task = None
         self.router = APIRouter(prefix="/prep")
         self.routes()
@@ -114,7 +118,7 @@ class PrepQueue:
             os.fsync(handle.fileno())
         temporary.replace(destination)
 
-    def create(self, job_id, name, provider, data):
+    def create(self, job_id, name, provider, data, *, prompt=None):
         if not ID_PATTERN.fullmatch(job_id):
             raise HTTPException(400, "任务编号无效")
         key, model = self.config(provider)
@@ -122,7 +126,7 @@ class PrepQueue:
             self.mime(data)
         except ValueError:
             raise HTTPException(415, "请上传有效 PNG/JPEG")
-        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data).hexdigest()
+        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data + (b"\0" + prompt.encode() if prompt is not None else b"")).hexdigest()
         # Check idempotency BEFORE credentials: an existing job remains recoverable
         # even when the provider key has since expired or been removed.
         with self.db() as con:
@@ -138,7 +142,7 @@ class PrepQueue:
             if count >= 20:
                 raise HTTPException(429, "队列已满，请等待已有任务完成")
             self.persist(job_id, "source", data)
-            self.persist(job_id, "prompt.txt", PROMPT.encode())
+            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else PROMPTS[provider]).encode())
             now = time.time()
             con.execute("""INSERT INTO prep_jobs
                 (id,name,provider,model,fingerprint,status,message,created_at,updated_at)
@@ -174,7 +178,8 @@ class PrepQueue:
             with self.db() as con:
                 row = con.execute("SELECT id FROM prep_jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
             if row:
-                await self.run(row["id"])
+                async with self.execution_slots:
+                    await self.run(row["id"])
             else:
                 await asyncio.sleep(1)
 
