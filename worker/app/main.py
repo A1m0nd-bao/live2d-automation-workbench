@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import sqlite3
+import sys
 import uuid
 import importlib.util
 from contextlib import asynccontextmanager
@@ -47,9 +48,39 @@ ALLOWED_ORIGINS = [
 INFERENCE_RESOLUTION = int(os.environ.get("SEE_THROUGH_RESOLUTION", "1024"))
 SPLIT_LIMBS = os.environ.get("SEE_THROUGH_SPLIT_LIMBS", "true").lower() in {"1", "true", "yes"}
 MAX_ATTEMPTS = 3
-MAX_CONCURRENT_JOBS = max(1, int(os.environ.get("MORPH_MAX_CONCURRENT_JOBS", "1")))
+MAX_CONCURRENT_JOBS = 1  # See-Through cannot tolerate parallel inference.
 PROCESSING_SLOTS = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
 ACTIVE: set[str] = set()
+
+
+async def prepare_foreground(job_id: str) -> Path:
+    """Bounded subprocess, outside inference retries; never silently bypass failure."""
+    directory = DATA_ROOT / job_id
+    source = directory / "source"
+    if not (directory / "foreground-request.json").exists():
+        return source  # Legacy jobs keep their exact historical input.
+    target = directory / "cutout"
+    report_path = target / "report.json"
+    if report_path.exists() and (target / "submission.png").exists():
+        return target / "submission.png"
+    update_job(job_id, status="running", message="正在本地分离角色与背景…", error=None)
+    record_event(job_id, "foreground_start", model="isnet-anime")
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, str(Path(__file__).with_name("foreground.py")), str(source), str(target),
+        env={**os.environ, "OMP_NUM_THREADS": "2"},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    if process.returncode or not report_path.exists():
+        raise RuntimeError("本地抠图失败；未提交拆层。" + stderr.decode(errors="replace")[-600:])
+    record_event(job_id, "foreground_complete", report=json.loads(report_path.read_text()))
+    return target / "submission.png"
 
 
 class JobStatus(BaseModel):
@@ -236,6 +267,13 @@ async def monitor(job_id: str) -> None:
         if not source.exists():
             update_job(job_id, status="failed", message="原始参考图不存在", error="source image missing")
             return
+        try:
+            source = await prepare_foreground(job_id)
+        except Exception as error:
+            detail = str(error) or "本地抠图超时（300 秒）"
+            record_event(job_id, "foreground_failure", error=detail)
+            update_job(job_id, status="failed", message="抠图未通过，已停止拆层", error=detail)
+            return
         for attempt in range(1, MAX_ATTEMPTS + 1):
             stage = "upload"
             update_job(job_id, status="queued", message="正在连接 See-Through 队列…", attempts=attempt, error=None)
@@ -339,6 +377,7 @@ async def monitor(job_id: str) -> None:
 async def lifespan(_: FastAPI):
     init_db()
     await PREP.start()
+    await PRO.start()
     with db() as connection:
         recover = connection.execute("SELECT id FROM jobs WHERE status IN ('queued', 'running')").fetchall()
     for row in recover:
@@ -346,6 +385,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        await PRO.stop()
         await PREP.stop()
 
 
@@ -362,8 +402,35 @@ def require_prep_token(relay, device):
     require_relay_token(relay, device)
 
 
-PREP = _prep_module.PrepQueue(DATA_ROOT, require_prep_token)
+PREP = _prep_module.PrepQueue(DATA_ROOT, require_prep_token, PROCESSING_SLOTS)
 app.include_router(PREP.router)
+
+def pro_split_create(job_id, source, name):
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if connection.execute('SELECT id FROM jobs WHERE id=?', (job_id,)).fetchone():
+            return
+        directory = DATA_ROOT / job_id
+        directory.mkdir(exist_ok=True)
+        (directory / 'source').write_bytes(source.read_bytes())
+        (directory / 'foreground-request.json').write_text(json.dumps({'model': 'isnet-anime', 'background': '#d0d0d0', 'version': 1}))
+        connection.execute("INSERT INTO jobs (id,name,status,message) VALUES (?,?,'queued','Pro 状态等待拆分')", (job_id, name))
+    asyncio.create_task(monitor(job_id))
+
+def pro_split_get(job_id):
+    return get_job(job_id).model_dump()
+
+def pro_split_path(job_id):
+    job = get_job(job_id)
+    if job.status != 'succeeded' or not job.output_psd:
+        raise HTTPException(409, 'PSD 尚未就绪')
+    return job.output_psd
+
+_pro_spec = importlib.util.spec_from_file_location('morph_pro_queue', Path(__file__).with_name('pro_queue.py'))
+_pro_module = importlib.util.module_from_spec(_pro_spec)
+_pro_spec.loader.exec_module(_pro_module)
+PRO = _pro_module.ProQueue(DATA_ROOT, PREP, require_prep_token, pro_split_create, pro_split_get, pro_split_path)
+app.include_router(PRO.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -394,7 +461,7 @@ async def local_bootstrap(origin: str | None = Header(default=None)) -> dict[str
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)
-async def create_job(image: UploadFile = File(...), name: str = "character", x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
+async def create_job(image: UploadFile = File(...), name: str = "character", foreground: bool = False, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
     require_relay_token(x_relay_token, x_morph_device_token)
     if image.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(status_code=415, detail="Only PNG and JPEG input is supported")
@@ -403,6 +470,8 @@ async def create_job(image: UploadFile = File(...), name: str = "character", x_r
     job_dir.mkdir(parents=True, exist_ok=False)
     source = job_dir / "source"
     source.write_bytes(await image.read())
+    if foreground:
+        (job_dir / "foreground-request.json").write_text(json.dumps({"model": "isnet-anime", "background": "#d0d0d0", "version": 1}))
     with db() as connection:
         connection.execute("INSERT INTO jobs (id, name, status, message) VALUES (?, ?, 'queued', '已建立服务端任务')", (job_id, name[:120]))
     asyncio.create_task(monitor(job_id))
@@ -434,6 +503,9 @@ async def download_source(job_id: str, x_relay_token: str | None = Header(defaul
     require_relay_token(x_relay_token, x_morph_device_token)
     job = get_job(job_id)
     path = DATA_ROOT / job_id / "source"
+    prepared = DATA_ROOT / job_id / "cutout/submission.png"
+    if prepared.exists() and prepared.with_name("report.json").exists():
+        path = prepared
     if not path.exists():
         raise HTTPException(status_code=404, detail="Submitted source image is not available")
     content_type, suffix = source_image_type(path)
@@ -442,6 +514,16 @@ async def download_source(job_id: str, x_relay_token: str | None = Header(defaul
         media_type=content_type,
         filename=f"{job.name}-live2d-input{suffix}",
     )
+
+
+@app.get("/jobs/{job_id}/foreground")
+async def download_foreground(job_id: str, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> FileResponse:
+    require_relay_token(x_relay_token, x_morph_device_token)
+    get_job(job_id)
+    path = DATA_ROOT / job_id / "cutout/foreground.png"
+    if not path.exists():
+        raise HTTPException(404, "Foreground image is not ready")
+    return FileResponse(path, media_type="image/png", filename="foreground.png")
 
 
 @app.get("/jobs/{job_id}/output")

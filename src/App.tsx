@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
 import { prepRequest, submitPrep, recoverPrepState, type PrepJob } from './prepQueue';
+import { proRequest, type ProRun } from './proQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
 import { saveAsset, readAsset, downloadBlob } from './assets';
 import {
@@ -70,6 +71,10 @@ type Task = {
   warnings?: string[];
   mode?: 'standard' | 'pro';
   proStateIds?: string[];
+  proRunId?: string;
+  proRun?: ProRun;
+  proQueueError?: string;
+  proMergeError?: string;
   proStateAssets?: Record<string, { filename: string; uploadedAt: string }>;
   /** States found inside a professionally authored multi-state PSD. */
   proEmbeddedStateIds?: string[];
@@ -283,9 +288,6 @@ export default function App() {
   const [prepMode, setPrepMode] = useState<PrepMode>('generate');
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
-    'action_03_hand_on_hip_arms_only',
-    'action_04_arms_crossed_crossed_arms',
-    'action_05_thinking_arms_only',
   ]);
   const [toast, setToast] = useState(''),
     [connection, setConnection] = useState(
@@ -305,6 +307,7 @@ export default function App() {
   const productionAttempted = useRef(new Set<string>());
   const productionArtifactsSyncing = useRef(new Set<string>());
   const prepRefreshing = useRef(new Set<string>());
+  const proRefreshing = useRef(new Set<string>());
   const prepHistoryLoaded = useRef(false);
   const currentTasks = useRef(tasks);
   useEffect(() => { currentTasks.current = tasks; }, [tasks]);
@@ -671,7 +674,7 @@ export default function App() {
       const source = await proStatePsd(t, state.id);
       return { state, ...source };
     }));
-    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs);
+    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs, { preserveOrder: !!t.proRunId });
     const filename = `${t.name}-live2d-pro-merged.psd`;
     const reportName = `${t.name}-live2d-pro-merge-report.json`;
     await saveAsset(`${t.id}:pro-merged-psd`, result.psd);
@@ -682,6 +685,7 @@ export default function App() {
       proMergedFile: filename,
       proMergeReportFile: reportName,
       proStage: 'merge_ready',
+      proMergeError: undefined,
       qaPassed: false,
       remoteMessage: `已合并 ${states.length} 个状态；替换层默认隐藏，等待 PSD 预览验收。`,
     });
@@ -696,6 +700,50 @@ export default function App() {
       ? saved.map((item) => item.id === t.id ? { ...item, ...patch } : item)
       : [...saved, { ...t, ...patch }]));
     update(t.id, patch);
+  }
+  async function syncPro(t: Task) {
+    if (proRefreshing.current.has(t.id) || t.proMergedFile) return;
+    proRefreshing.current.add(t.id);
+    try {
+      let run: ProRun;
+      const runId = t.proRunId || crypto.randomUUID().replaceAll('-', '');
+      if (!t.proRun) {
+        if (!t.remoteJobId || !t.psdFile) throw new Error('自动队列需要已完成的基础拆分任务。');
+        const reference = await readAsset(`${t.id}:prepared`);
+        if (!reference) throw new Error('缺少中立主图，请恢复基础主图；不会使用其他状态作为参考。');
+        rememberPrep(t, { proRunId: runId });
+        const form = new FormData();
+        form.append('job_id', runId); form.append('base_id', t.remoteJobId);
+        form.append('states', JSON.stringify(t.proStateIds ?? []));
+        form.append('provider', t.prepProvider ?? 'doubao');
+        form.append('image', reference, 'neutral.png');
+        run = await proRequest<ProRun>('/jobs', form);
+      } else {
+        run = await proRequest<ProRun>(`/jobs/${runId}`);
+      }
+      const assets = { ...t.proStateAssets };
+      for (const state of run.states) {
+        if (state.status !== 'succeeded' || assets[state.id]) continue;
+        const data = await proRequest<ArrayBuffer>(`/jobs/${runId}/states/${state.id}/output`);
+        if (new TextDecoder().decode(data.slice(0, 4)) !== '8BPS') throw new Error('状态返回文件不是 PSD');
+        await saveAsset(`${t.id}:pro-state:${state.id}:psd`, new Blob([data]));
+        assets[state.id] = { filename: `${state.id}.psd`, uploadedAt: new Date().toLocaleString('zh-CN') };
+      }
+      const next = { ...t, proRunId: runId, proRun: run, proStateAssets: assets };
+      update(t.id, { proRunId: runId, proRun: run, proStateAssets: assets,
+        proStage: 'state_decomposition', proQueueError: undefined, remoteMessage: run.message });
+      if (run.status === 'ready' && !t.proMergeError) {
+        try { await mergeProStates(next); }
+        catch (e) { update(t.id, { proMergeError: e instanceof Error ? e.message : '合层失败，原始 PSD 已保留' }); }
+      }
+    } catch (e) {
+      update(t.id, { proQueueError: e instanceof Error ? e.message : 'Pro 状态暂未同步' });
+    } finally { proRefreshing.current.delete(t.id); }
+  }
+  async function retryProState(t: Task, stateId: string) {
+    if (!t.proRunId || !window.confirm('仅重试该状态。若上次结果未知，重新生图可能再次计费，是否继续？')) return;
+    const run = await proRequest<ProRun>(`/jobs/${t.proRunId}/states/${stateId}/retry`, new FormData());
+    update(t.id, { proRun: run, proMergeError: undefined, proQueueError: undefined });
   }
   async function prepare(t: Task): Promise<File | undefined> {
     const provider = t.prepProvider ?? 'doubao';
@@ -842,7 +890,8 @@ export default function App() {
           proStage: 'base_psd_ready',
           remoteMessage: '基础 PSD 已就绪。下一步将按 Persona Lock 生成并拆分所选状态图。',
         });
-        setToast('Pro 基础 PSD 已保存；状态图生成与差分合并入口已准备。');
+        await syncPro({ ...t, psdFile: filename });
+        setToast('Pro 基础 PSD 已保存，正在连接多状态队列。');
         return;
       }
       setProgress('PSD 已下载，正在自动生成运行时包…');
@@ -872,6 +921,9 @@ export default function App() {
       try {
         for (const item of currentTasks.current) {
           if (cancelled) break;
+          if (item.mode === 'pro' && item.proRunId && !item.proMergedFile) {
+            await syncPro(item);
+          }
           if (!item.prepJobId || item.preparedFile || !['queued', 'running', 'succeeded'].includes(item.prepState || '')) continue;
           try { await refreshPrep(item); }
           catch (error) {
@@ -1187,7 +1239,8 @@ export default function App() {
               <b>选择首批状态</b>
               <small>基础 PSD 完成后，这些状态会按同一 Persona Lock 逐一生成、拆层与合并。</small>
               <div>
-                {LIVE2D_PRO_STATES.map((state) => {
+                <small>仅特殊手势走生图与拆分，逐个串行完成。表情沿用已有模型参数；没有绑定的表情不会自动补齐。</small>
+                {LIVE2D_PRO_STATES.filter(state => state.kind === 'action').map((state) => {
                   const checked = proStateIds.includes(state.id);
                   return (
                     <label key={state.id}>
@@ -1353,7 +1406,26 @@ export default function App() {
                   下载 Pro 状态清单与提示词约束
                 </button>
                 {task.proStage === 'base_psd_ready' && (
-                  <small>基础 PSD 已完成。导入每个状态经 See-Through 拆分后的 PSD，随后可在此浏览器本地合层。</small>
+                  <small>基础 PSD 已完成。服务端逐个生成并拆分状态；收齐后工作台自动合层。关闭网页不会中断队列，合层会在重新打开后继续。</small>
+                )}
+                {task.psdFile && task.remoteJobId && !task.proMergedFile && task.proStage !== 'embedded_states_ready' && (
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <button className="ghost-button" disabled={busy} onClick={() => void operate(() => syncPro(task))}>
+                      {task.proRunId ? '恢复／同步多状态队列' : '启动所选状态自动队列'}
+                    </button>
+                    <small>{task.proRun?.message}</small>
+                    {task.proQueueError && <p role="alert">{task.proQueueError}</p>}
+                    {task.proMergeError && <p role="alert">合层待处理：{task.proMergeError}。状态 PSD 已保留，不会自动重生。</p>}
+                    {task.proRun?.states.map(state => (
+                      <div key={state.id} style={{ display: 'grid', gap: 6 }}>
+                        <b>{LIVE2D_PRO_STATES.find(s => s.id === state.id)?.label ?? state.id}</b>
+                        <small>第 {state.attempt} 次 · {state.message}</small>
+                        {task.proRun?.status === 'needs_attention' && ['failed', 'uncertain'].includes(state.status) && (
+                          <button className="ghost-button" disabled={busy} onClick={() => void operate(() => retryProState(task, state.id))}>仅重试此状态（可能计费）</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
                 {task.proStage === 'embedded_states_ready' && (
                   <small>
@@ -1364,8 +1436,8 @@ export default function App() {
                 {task.psdFile && task.proStage !== 'embedded_states_ready' && (
                   <section className="pro-state-imports">
                     <div>
-                      <b>状态 PSD 收集</b>
-                      <small>每个文件应对应同一 Persona Lock 下的一个状态，并与基础 PSD 画布一致。</small>
+                      <b>状态 PSD 收集／手动替换</b>
+                      <small>自动队列会填入结果；也可手动导入修正版。画布必须与基础 PSD 一致。</small>
                     </div>
                     {selectedProStates(task.proStateIds ?? []).map((state) => {
                       const asset = task.proStateAssets?.[state.id];

@@ -13,6 +13,7 @@ type PsdLayer = {
   right?: number;
   bottom?: number;
   hidden?: boolean;
+  opened?: boolean;
   opacity?: number;
   blendMode?: string;
   imageData?: { data: Uint8ClampedArray | Uint8Array; width: number; height: number };
@@ -161,9 +162,14 @@ function removeExistingVariant(document: PsdDocument, id: string) {
  * writes hidden variant groups only; base layers remain untouched. The caller
  * must review the report before passing the file to Cubism.
  */
-export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[]) {
+export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[], options: { preserveOrder?: boolean } = {}) {
   const document = readPsd(base, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
-  const cleanup = cleanupProOrder(document.children);
+  const inspectOrder = (layers: PsdLayer[] | undefined) => {
+    const report = cleanupProOrder(options.preserveOrder ? structuredClone(layers ?? []) : layers);
+    return options.preserveOrder ? { ...report, status: 'needs_review', changed: [], warnings: [...report.warnings,
+      '自动队列保留源图层顺序，未套用模板排序；仍需视觉遮挡验收。'] } : report;
+  };
+  const cleanup = inspectOrder(document.children);
   const baseRaster = proBaseLeaves(document.children);
   const baseLayers = baseRaster.map(probe);
   const report: ProMergeReport = {
@@ -177,7 +183,7 @@ export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[]) {
     const source = readPsd(input.data, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
     if (source.width !== document.width || source.height !== document.height)
       throw new Error(`${input.state.label} PSD 画布为 ${source.width}×${source.height}，与基础 PSD ${document.width}×${document.height} 不一致。`);
-    const stateCleanup = cleanupProOrder(source.children);
+    const stateCleanup = inspectOrder(source.children);
     const stateLayers = proBaseLeaves(source.children);
     const plan = planLive2DProDiff(input.state, baseLayers, stateLayers.map(probe));
     if (!plan.ready)

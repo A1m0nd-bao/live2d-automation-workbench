@@ -1,0 +1,6 @@
+# Additional dependencies for Pro state foreground separation.
+# Versions used by the local relay during verification.
+rembg==2.0.76
+onnxruntime==1.29.0
+Pillow==12.3.0
+numpy==2.5.3

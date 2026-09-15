@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const ts=require('typescript'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
 function load(file){
  const exports={};const code=ts.transpileModule(fs.readFileSync(file,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
- vm.runInNewContext(code,{exports,Blob,Uint8ClampedArray,require:n=>n.startsWith('.')?load(path.resolve(path.dirname(file),n+'.ts')):require(n)});return exports;
+ vm.runInNewContext(code,{exports,Blob,structuredClone,Uint8ClampedArray,require:n=>n.startsWith('.')?load(path.resolve(path.dirname(file),n+'.ts')):require(n)});return exports;
 }
 const {cleanupProOrder,identicalProSlot,proBaseLeaves}=load(path.resolve('src/proPsdCleanup.ts'));
 const layer=(name,value=255)=>({name,left:0,top:0,right:1,bottom:1,imageData:{width:1,height:1,data:new Uint8ClampedArray([value,0,0,255])}});
@@ -15,10 +15,9 @@ test('both modes retain repairable inputs and never regenerate',()=>{
  }
  assert.equal(applyPsdQuality({width:10,height:10,children:[]}).status,'unusable');
 });
-const goldenPsd=process.env.MORPH_GOLDEN_PSD;
-test('standard PSD unchanged; deliberately swapped mouth/face repaired without pixel loss', {skip:!goldenPsd||!fs.existsSync(goldenPsd)},()=>{
+test('standard PSD unchanged; deliberately swapped mouth/face repaired without pixel loss', {skip:!fs.existsSync('/Users/baotianrong/Downloads/seethrough_output (3).psd')},()=>{
  const {readPsd,initializeCanvas}=require('ag-psd');initializeCanvas(()=>{throw Error('canvas')},(w,h)=>({width:w,height:h,data:new Uint8ClampedArray(w*h*4)}));
- const doc=readPsd(fs.readFileSync(goldenPsd),{useImageData:true,skipCompositeImageData:true});
+ const doc=readPsd(fs.readFileSync('/Users/baotianrong/Downloads/seethrough_output (3).psd'),{useImageData:true,skipCompositeImageData:true});
  assert.equal(applyPsdQuality(doc).changed.length,0);
  const before=doc.children.map(l=>[l.name,Buffer.from(l.imageData.data).toString('base64')]);
  const a=doc.children.findIndex(l=>l.name==='face'),b=doc.children.findIndex(l=>l.name==='mouth');
@@ -58,4 +57,9 @@ test('Pro PSD round trip preserves input, reuses exact slots, keeps changed slot
  assert.equal(parsed.children.at(-1).children.length,1);
  assert.equal(parsed.children.at(-1).children[0].name,'action_test__handwear-r');
  assert.equal(Buffer.from(base).toString('hex'),before);
+ const safe=mergeLive2dProPsd(base,[],{preserveOrder:true});
+ const safeDoc=psd.readPsd(await safe.psd.arrayBuffer(),{useImageData:true,skipCompositeImageData:true});
+ assert.equal(safeDoc.children.map(l=>l.name).join(','),'neck,back hair,handwear-l,handwear-r');
+ assert.equal(safe.report.cleanup.changed.length,0);
+ assert.equal(safe.report.cleanup.status,'needs_review');
 });
