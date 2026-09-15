@@ -76,6 +76,8 @@ export function buildLive2DProManifest(sourceName: string, stateIds: string[]): 
       'Persona Lock：固定身份、服装、画风、镜头与光源。',
       '生成中立全身主图与每个选中状态图；每张图保持相同画布和比例。',
       '每张图分别提交 See-Through，保存对应 PSD。',
+      '嘴部定位：沿用基础 PSD 独立 mouth 图层的原画布坐标；缺失、重复或 mouth_nose 合层进入人工确认，不自动删除鼻子或脸部。',
+      '嘴部增强：在确认位置放置独立嘴线、口腔、舌头和遮盖层；保留原 PSD，检查张嘴空间、肤色接缝和原嘴残留。当前替换及原生绑定尚待实现，不得自动标记完成。',
       '按 slotTargets 做语义差分，写入 action_*__slot 或 expression_*__slot。',
       '对每个状态做合成、遮挡、缺件和锚点一致性检查。',
       '将通过质检的主 PSD 交给 Cubism 多状态导出。',
@@ -85,6 +87,8 @@ export function buildLive2DProManifest(sourceName: string, stateIds: string[]): 
       '动作仅替换声明的目标槽位，未声明部件必须可复用基础层。',
       '每个状态与基础图画布一致，角色锚点与脚底基线一致。',
       '替换层命名为 <state id>__<slot>，并在 PSD 中默认隐藏。',
+      '说话嘴部与表情状态只有一个最终控制入口，避免表情旧嘴叠加；闭口、双轴组合及头部跟随通过后，仍须原生导出验收。',
+      '网页附加嘴部预览不等于已写入 CMO3/MOC3，原生包须重导出并逐项复核。',
     ],
   };
 }

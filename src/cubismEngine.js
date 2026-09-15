@@ -152,6 +152,7 @@ export async function generateCubism(
   // model identifier.
   const safeName = stableAsciiName(name);
   let project;
+  let psdQuality = null;
   let preview;
   try {
     onProgress('读取文件…');
@@ -168,6 +169,9 @@ export async function generateCubism(
       const buffer = await file.arrayBuffer();
       validatePsdHeader(buffer);
       const parsed = importPsd(buffer);
+      psdQuality = parsed.quality;
+      warnings.push(...psdQuality.issues, ...psdQuality.warnings);
+      if (psdQuality.changed.length) onProgress(`PSD 已自动修复 ${psdQuality.changed.length} 项排序关系，保留原始素材。`);
       const sourceVariantManifest = extractVariantManifest(buffer);
       // A Pro PSD can contain a library of action/expression alternates.  A
       // production run must only materialise the states selected for this
@@ -488,6 +492,7 @@ export async function generateCubism(
     const report = {
       engine: ENGINE_VERSION,
       source: file.name,
+      psdQuality,
       meshCount: project.nodes.filter((node) => node.type === 'part').length,
       autoRigDiagnostics: project.autoRigDiagnostics ?? null,
       autoRigPreflight: project.autoRigPreflight ?? null,

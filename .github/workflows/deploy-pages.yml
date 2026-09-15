@@ -30,6 +30,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: node --test scripts/test-prep-policy.mjs tests/*.test.mjs
+      - run: node --test tests/pro-psd-cleanup.test.cjs
       - run: npm run build:pages
         env:
           # These are browser-safe values. Database and storage privileges are enforced with RLS.
