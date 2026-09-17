@@ -10,5 +10,9 @@ meshes, then use the standard Cubism rig generator. Existing .stretch inputs are
 cloned before native warp nodes are omitted, retaining the original file.
 This adapter is not a lossless conversion of hand-authored native warp lattices.
 
-DWPose dynamic loading is disabled in this build: skeleton estimation is local.
+DWPose is loaded on demand in the browser and is used as a guarded joint
+proposal: semantic PSD layer bounds remain the authority and the workflow
+falls back to local estimation when the model is unavailable. The Wave Lab can
+also accept a user-selected local ONNX file, which is read only for the current
+browser session and is never uploaded.
 No runtime .moc3 export is exposed or claimed as validated.
