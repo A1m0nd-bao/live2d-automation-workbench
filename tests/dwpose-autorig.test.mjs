@@ -14,6 +14,10 @@ const normalization = readFileSync(
   new URL('../src/psdRigNormalization.js', import.meta.url),
   'utf8',
 );
+const waveAssistance = readFileSync(
+  new URL('../src/wave/dwposeWave.js', import.meta.url),
+  'utf8',
+);
 
 test('auto-rig loads DWPose in-browser and keeps a cached fallback-safe session', () => {
   assert.match(organizer, /onnxruntime-web@1\.29\.0\/dist\/ort\.min\.mjs/);
@@ -30,4 +34,13 @@ test('Cubism generation uses AI keypoints for limbs while preserving semantic PS
   assert.match(engine, /normalizePsdRigLayers/);
   assert.match(normalization, /'legwear'/);
   assert.match(engine, /已回退为图层边界骨架/);
+});
+
+test('wave calibration runs DWPose for both endpoints and retains a PSD-guarded fallback', () => {
+  assert.match(waveAssistance, /runDWPose\(wavePoseLayers\(input, 'neutral'\)/);
+  assert.match(waveAssistance, /runDWPose\(wavePoseLayers\(input, 'raised'\)/);
+  assert.match(waveAssistance, /loadDWPoseSession\(await localModelFile\.arrayBuffer\(\)\)/);
+  assert.match(waveAssistance, /MAX_SAFE_SCORE/);
+  assert.match(waveAssistance, /alpha-fallback/);
+  assert.match(waveAssistance, /rawConfidence/);
 });
