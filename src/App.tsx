@@ -1,5 +1,5 @@
 /* oxlint-disable react/react-compiler -- Browser-only storage hydration intentionally runs after SSR; effects synchronize IndexedDB and localStorage. */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { MorphUser } from './morphBackend';
 import {
   Plus,
@@ -39,6 +39,8 @@ import { ProductionAccess } from './ProductionAccess';
 import { createProjectFromLocalTask, uploadProjectArtifact } from './productionLedger';
 import { NativeRuntimeViewer } from './NativeRuntimeViewer';
 import './production.css';
+
+const WaveWorkbench = lazy(() => import('./WaveWorkbench.jsx'));
 
 type Task = {
   id: string;
@@ -263,6 +265,12 @@ async function padForSeeThrough(source: File) {
 }
 
 export default function App() {
+  const [waveOpen, setWaveOpen] = useState(false);
+  useEffect(() => {
+    const sync = () => setWaveOpen(window.location.hash === '#wave');
+    sync(); window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
   const [tasks, setTasks] = useState<Task[]>([]),
     [hydrated, setHydrated] = useState(false);
   const [selected, setSelected] = useState(''),
@@ -970,6 +978,9 @@ export default function App() {
         inputKind: k,
       });
   }
+  if (waveOpen) return <Suspense fallback={<p style={{ padding: 32 }}>加载挥手工作台…</p>}>
+    <WaveWorkbench onBack={() => { window.location.hash = ''; setWaveOpen(false); }} />
+  </Suspense>;
   return (
     <main className="app-shell">
       <aside className="side-rail">
@@ -982,6 +993,9 @@ export default function App() {
           新建生产任务
         </button>
         <nav className="main-nav">
+          <button className="nav-item" onClick={() => { window.location.hash = 'wave'; setWaveOpen(true); }}>
+            <WandSparkles size={18} />挥手动作实验室
+          </button>
           <button className="nav-item active" onClick={() => setSelected('')}>
             <FolderOpen size={18} />
             生产任务

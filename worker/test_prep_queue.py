@@ -136,6 +136,47 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('402', result['message'])
         self.assertNotIn('test-key-not-real', str(result))
 
+    async def test_400_identifies_parameter_without_leaking_or_retrying(self):
+        self.create()
+        calls = []
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(400, json={'error': {
+                'param': 'size', 'message': 'secret-key private-image-data',
+            }})
+        client = httpx.AsyncClient
+        with patch.object(prep.httpx, 'AsyncClient', side_effect=lambda **kw: client(transport=httpx.MockTransport(handler), **kw)):
+            await self.queue.run(JOB)
+            await self.queue.run(JOB)
+        record = self.queue.get(JOB)
+        self.assertEqual(record['status'], 'failed')
+        self.assertIn('输出尺寸', record['message'])
+        self.assertNotIn('secret-key', str(record))
+        self.assertNotIn('private-image-data', str(record))
+        self.assertEqual(len(calls), 1)
+
+    def test_rejection_detail_handles_nested_policy_and_untrusted_fields(self):
+        response = httpx.Response(400, json={'error': {'cause': {
+            'code': 'content_policy_violation', 'message': 'private content',
+        }}})
+        self.assertEqual(prep.rejection_detail(response), '上游内容安全检查拒绝了本次请求')
+        for payload in (None, [], {'error': {'param': ['size']}},
+                        {'error': {'param': 'secret-key', 'code': []}}):
+            self.assertEqual(prep.rejection_detail(httpx.Response(400, json=payload)), '')
+        self.assertEqual(prep.rejection_detail(httpx.Response(400, text='private body')), '')
+
+    def test_gateway_safety_rejection_with_object_param(self):
+        for payload in (
+            {'error': {'type': 'AI_APICallError', 'message':
+                'Your request was rejected by the safety system. private-request-id safety_violations=[sexual].',
+                'param': {'statusCode': 400}}},
+            {'error': {'param': {'message':
+                'Your request was rejected by the safety system. safety_violations=[sexual].'}}},
+        ):
+            detail = prep.rejection_detail(httpx.Response(400, json=payload))
+            self.assertEqual(detail, '上游内容安全检查拒绝了本次请求（性内容标记）')
+            self.assertNotIn('private-request-id', detail)
+
 
 if __name__ == '__main__':
     unittest.main()

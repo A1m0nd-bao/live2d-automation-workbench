@@ -896,6 +896,10 @@ export async function generateCmo3(input) {
     if (hasActionSwitch) {
       if (Array.isArray(actionSwitch.stateOpacities)) {
         const stateCount = actionSwitch.stateOpacities.length;
+        if (stateCount < 2 || (actionSwitch.keys && (actionSwitch.keys.length !== stateCount ||
+          actionSwitch.keys.some((v, i, a) => !Number.isFinite(v) || (i > 0 && v <= a[i - 1])))) ||
+          (actionSwitch.stateVertices && actionSwitch.stateVertices.length !== stateCount))
+          throw Error('Invalid sampled action keyforms');
         actionFormGuids = [pidFormMesh];
         for (let state = 1; state < stateCount; state += 1) {
           const [, pidForm] = x.shared('CFormGuid', {
@@ -920,7 +924,7 @@ export async function generateCmo3(input) {
         x.subRef(kfBinding, 'KeyformGridSource', pidKfgMesh, { 'xs.n': '_gridSource' });
         x.subRef(kfBinding, 'CParameterGuid', actionParamPid, { 'xs.n': 'parameterGuid' });
         const keys = x.sub(kfBinding, 'array_list', { 'xs.n': 'keys', count: String(stateCount) });
-        for (let state = 0; state < stateCount; state += 1) x.sub(keys, 'f').text = String(state);
+        for (let state = 0; state < stateCount; state += 1) x.sub(keys, 'f').text = String(actionSwitch.keys?.[state] ?? state);
         x.sub(kfBinding, 'InterpolationType', { 'xs.n': 'interpolationType', v: 'LINEAR' });
         x.sub(kfBinding, 'ExtendedInterpolationType', { 'xs.n': 'extendedInterpolationType', v: 'LINEAR' });
         x.sub(kfBinding, 'i', { 'xs.n': 'insertPointCount' }).text = '1';
@@ -1144,6 +1148,7 @@ export async function generateCmo3(input) {
       neckCornerFormGuids, actionFormGuids, limbBendFormGuids,
       actionState: actionSwitch?.state ?? null,
       actionStateOpacities: actionSwitch?.stateOpacities ?? null,
+      actionStateVertices: actionSwitch?.stateVertices ?? null,
       pidMiGuid, pidTexGuid, pidExtMesh, pidExtTex, pidEmesh,
       pidImg, pidLayer,
       pidFset, pidTex2d, pidTie, pidTimi,
@@ -3980,7 +3985,13 @@ export async function generateCmo3(input) {
         'xs.n': 'keyforms', count: String(pm.actionFormGuids.length),
       });
       for (let state = 0; state < pm.actionFormGuids.length; state += 1) {
-        emitArtMeshForm(kfList, pm.actionFormGuids[state], verts, opacities[state] ?? 0);
+        const canvasState = pm.actionStateVertices?.[state];
+        if (canvasState && (canvasState.length !== canvasVerts.length || canvasState.some(v => !Number.isFinite(v))))
+          throw Error('Invalid wave keyform vertices');
+        const stateVerts = canvasState ? canvasState.map((v, i) => rwBox
+          ? (v - (i % 2 === 0 ? rwBox.gridMinX : rwBox.gridMinY)) / (i % 2 === 0 ? rwBox.gridW : rwBox.gridH)
+          : dfOrigin ? v - (i % 2 === 0 ? dfOrigin.x : dfOrigin.y) : v) : verts;
+        emitArtMeshForm(kfList, pm.actionFormGuids[state], stateVerts, opacities[state] ?? 0);
       }
     } else if (pm.hasBakedKeyforms) {
       // Keyforms to prevent interpolation shrinkage

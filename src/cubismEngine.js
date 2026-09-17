@@ -1,3 +1,4 @@
+import { resolveWaveProfile, WAVE_VARIANT, WAVE_MESH_OPTIONS, trimWaveMesh } from './waveRig.js';
 import JSZip from 'jszip';
 import thirdPartyLicense from './vendor/stretchystudio/LICENSE?raw';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
@@ -140,7 +141,7 @@ export async function generateCubism(
   file,
   name,
   onProgress = (_message) => {},
-  { variantIds } = {},
+  { variantIds, waveProfile } = {},
 ) {
   if (file.size > 100 * 1024 * 1024)
     throw new Error('当前支持最大 100 MB 的工程文件。');
@@ -190,6 +191,9 @@ export async function generateCubism(
         ),
       );
       const { width, height } = parsed;
+      const waveRig = variantManifest.variants.some(v => v.id === 'action_02_wave_arms_only')
+        ? resolveWaveProfile(parsed.layers, width, height, waveProfile) : null;
+      if (waveRig) warnings.push('已加入抬手过渡和连续挥手关键形态；动作需通过 CMO3 原生导出后运行。');
       if (!parsed.layers.length || parsed.layers.length > 120)
         throw new Error('PSD 需要包含 1–120 个有效图层。');
       // Keep hidden PSD layers: they are alternate action/expression parts.
@@ -202,6 +206,7 @@ export async function generateCubism(
           return !sourceVariant || activeVariantPartNames.has(layer.name);
         })
         .map(layer => cleanRigLayer(layer));
+      warnings.push(...cleaned.map(entry => entry.audit.warning).filter(Boolean));
       let layers = cleaned.map(entry => entry.layer);
       const candidates = [
         'handwear',
@@ -305,6 +310,7 @@ export async function generateCubism(
         version: 1,
         canvas: { width, height },
         autoRigDiagnostics: poseDiagnostics,
+        waveRig,
         autoRigPreflight: { version: 3, layers: cleaned.map(entry => entry.audit), normalization: normalization.audit, meshes: [] },
         autoRigAnchors: { head: skeleton.headBase },
         textures: [],
@@ -326,6 +332,7 @@ export async function generateCubism(
           .map((variant) => ({
             id: 'ParamActionWave',
             name: 'Action: Wave',
+            min: 0, max: waveRig ? 3 : 1,
             variantId: variant.id,
             baseSlots: variant.parts.map((part) => part.slot),
           })),
@@ -376,12 +383,15 @@ export async function generateCubism(
         tile.height = layer.height;
         tile.getContext('2d').putImageData(layer.imageData, 0, 0);
         canvas.getContext('2d').drawImage(tile, layer.x, layer.y);
+        const waveSlot = layer.name.startsWith(`${WAVE_VARIANT}__`) ? layer.name.slice(WAVE_VARIANT.length + 2) : layer.name;
+        const isWaveMesh = !!waveRig?.slots[waveSlot];
         const mesh = generateMesh(
           canvas.getContext('2d').getImageData(0, 0, width, height).data,
           width,
           height,
-          { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1 },
+          { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1, ...(isWaveMesh ? WAVE_MESH_OPTIONS : {}) },
         );
+        if (isWaveMesh) trimWaveMesh(mesh, canvas.getContext('2d').getImageData(0, 0, width, height).data, width);
         assertRigMesh(mesh, layer, width, height);
         const tag = matchTag(layer.name);
         const limb = tag === 'handwear-l' ? { side: 'l', joint: 'leftElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }

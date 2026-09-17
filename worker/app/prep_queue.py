@@ -28,6 +28,45 @@ ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 PROMPT = (Path(__file__).with_name("prep_prompt.txt")).read_text()
 
 
+def rejection_detail(response):
+    """Publish only fixed labels, never provider messages or arbitrary fields."""
+    try:
+        payload = response.json()
+    except (ValueError, UnicodeError):
+        return ""
+    labels = {
+        "size": "输出尺寸", "image": "输入图片", "images": "输入图片",
+        "files": "输入图片", "model": "模型", "prompt": "提示词",
+        "output_format": "输出格式", "outputFormat": "输出格式",
+        "background": "背景设置", "input_fidelity": "输入保真度",
+        "n": "生成数量", "quality": "画质设置",
+    }
+    # Gateway may wrap the provider error under error/cause. Do not traverse
+    # arbitrary input fields, copy messages, or retain raw response bodies.
+    pending = [(payload, 0)]
+    while pending:
+        error, depth = pending.pop(0)
+        if not isinstance(error, dict):
+            continue
+        code = error.get("code")
+        if isinstance(code, str) and code in {"content_policy_violation", "moderation_blocked", "safety_violations"}:
+            return "上游内容安全检查拒绝了本次请求"
+        # Gateway can wrap OpenAI's rejection as AI_APICallError with no code
+        # and an object-valued param. Recognize its message without publishing it.
+        message = error.get("message")
+        if isinstance(message, str) and "request was rejected by the safety system" in message.lower():
+            if "safety_violations=[sexual]" in message.lower():
+                return "上游内容安全检查拒绝了本次请求（性内容标记）"
+            return "上游内容安全检查拒绝了本次请求"
+        param = error.get("param")
+        if isinstance(param, str) and param in labels:
+            return f"上游指出需检查：{labels[param]}"
+        if depth < 3:
+            for field in ("error", "cause", "param"):
+                pending.append((error.get(field), depth + 1))
+    return ""
+
+
 class PrepQueue:
     def __init__(self, root: Path, authorize):
         self.root = root / "prep"
@@ -206,8 +245,10 @@ class PrepQueue:
             # embedded input images, signed URLs or internal diagnostics.
             status = "uncertain" if response.status_code >= 500 else "failed"
             labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "额度或余额不足", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
+            detail = rejection_detail(response) if response.status_code == 400 else ""
             self.update(job["id"], status=status, finished_at=time.time(),
-                message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）；未自动重试。")
+                message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）"
+                        f"{'；' + detail if detail else ''}；未自动重试。")
             return None
         if len(response.content) > MAX_OUTPUT * 1.4:
             raise ValueError("生图返回体超过保存上限")

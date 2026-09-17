@@ -1,3 +1,4 @@
+import { buildWaveAction, buildWaveMotions } from '../../../../waveRig.js';
 /**
  * Main Live2D export orchestrator.
  *
@@ -314,11 +315,11 @@ export async function exportLive2DProject(project, images, opts = {}) {
       pngData,
       texWidth: canvasW,
       texHeight: canvasH,
-      actionSwitch: actionSwitch && actionState ? {
+      actionSwitch: buildWaveAction(vertices, project.waveRig, meshName) ?? (actionSwitch && actionState ? {
         id: actionSwitch.id,
         name: actionSwitch.name,
         state: actionState,
-      } : null,
+      } : null),
       limbBend,
     });
   }
@@ -362,11 +363,16 @@ export async function exportLive2DProject(project, images, opts = {}) {
   const hasRigDebug = !!rigDebugLog;
 
   // Bundle into ZIP if we have animations OR a rig debug log (Phase 0 diagnostic).
-  if (hasAnimations || hasRigDebug) {
+  if (hasAnimations || hasRigDebug || project.waveRig) {
     const cmo3FileName = `${modelName}.cmo3`;
     const { default: JSZip } = await import('jszip');
     const zip = new JSZip();
     zip.file(cmo3FileName, cmo3);
+    if (project.waveRig) {
+      zip.file('wave-rig-profile.json', JSON.stringify(project.waveRig, null, 2));
+      for (const [name, motion] of Object.entries(buildWaveMotions()))
+        zip.file(`motion/${name}.motion3.json`, JSON.stringify(motion, null, 2));
+    }
 
     if (hasAnimations) {
       onProgress('Generating .can3 animation...');
