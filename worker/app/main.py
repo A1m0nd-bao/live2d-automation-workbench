@@ -344,9 +344,11 @@ async def lifespan(_: FastAPI):
     for row in recover:
         asyncio.create_task(monitor(row["id"]))
     try:
+        await NATIVE_EXPORT.start()
         yield
     finally:
         await PREP.stop()
+        await NATIVE_EXPORT.stop()
 
 
 app = FastAPI(title="Morph See-Through Relay", lifespan=lifespan)
@@ -364,6 +366,11 @@ def require_prep_token(relay, device):
 
 PREP = _prep_module.PrepQueue(DATA_ROOT, require_prep_token)
 app.include_router(PREP.router)
+_native_spec = importlib.util.spec_from_file_location("morph_native_export", Path(__file__).with_name("native_export.py"))
+_native_module = importlib.util.module_from_spec(_native_spec)
+_native_spec.loader.exec_module(_native_module)
+NATIVE_EXPORT = _native_module.NativeExport(DATA_ROOT, require_prep_token)
+app.include_router(NATIVE_EXPORT.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
