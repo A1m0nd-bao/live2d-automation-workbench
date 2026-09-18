@@ -403,7 +403,14 @@ export async function runDWPose(layers, psdW, psdH, onnxSession, onStatus) {
  */
 function applyDWPoseKeypoints(kps, psdW, psdH) {
   function clamp(p) {
-    return { x: Math.max(0, Math.min(psdW, p.x)), y: Math.max(0, Math.min(psdH, p.y)) };
+    // Keep the raw SimCC peak for callers which need to decide whether an
+    // automatically proposed joint should be reviewed.  Existing rig code
+    // only reads x/y, so preserving this diagnostic is backwards compatible.
+    return {
+      x: Math.max(0, Math.min(psdW, p.x)),
+      y: Math.max(0, Math.min(psdH, p.y)),
+      confidence: Number.isFinite(p.conf) ? p.conf : null,
+    };
   }
   const sk = {
     nose:       clamp(kps[0]),

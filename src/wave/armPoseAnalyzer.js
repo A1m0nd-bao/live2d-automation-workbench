@@ -164,7 +164,7 @@ export function buildArmWeightField(layer, joints) {
 }
 
 export function validateWaveProfile(profile, input) {
-  if(profile.version!==1||profile.sourceId!==input.sourceId||profile.width!==input.width||profile.height!==input.height)
+  if(![1,2].includes(profile.version)||profile.sourceId!==input.sourceId||profile.width!==input.width||profile.height!==input.height)
     throw Error('配置不属于这份 PSD，不能直接套用其他人物的关节点。');
   if(!Number.isFinite(profile.amplitude)||profile.amplitude<1||profile.amplitude>15)throw Error('挥动幅度必须在 1–15 度之间。');
   for(const slot of ARM_SLOTS){const s=profile.slots?.[slot];if(!s)throw Error(`配置缺少 ${slot}`);

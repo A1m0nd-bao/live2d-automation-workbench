@@ -5,15 +5,16 @@ import { buildWaveAction, buildWaveMotions, WAVE_MESH_OPTIONS, trimWaveMesh, WAV
 import { generateWithAmplitudeSearch } from './waveValidator.js';
 import { renderWave } from './waveRenderer.js';
 import { measureArmShape } from './armShape.js';
+import { autoCalibrateWaveWithDWPose } from './dwposeWave.js';
 
 const tick=()=>new Promise(r=>setTimeout(r,0));
 const makeCanvas=(w,h)=>{const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;return canvas;};
 const blobOf=canvas=>new Promise((resolve,reject)=>canvas.toBlob(blob=>blob?resolve(blob):reject(Error('图片编码失败')),'image/png'));
 
-export async function loadWaveFile(file) {
+export async function loadWaveFile(file, progress = () => {}, localPoseModel = null) {
   if(!/\.psd$/i.test(file.name)||file.size>100*1024*1024)throw Error('请选择不超过 100 MB 的 PSD 文件。');
   const input=readWavePsd(await file.arrayBuffer());
-  const profile=analyzeWaveInput(input);
+  const profile=await autoCalibrateWaveWithDWPose(input, progress, localPoseModel);
   return {input,profile,filename:file.name};
 }
 

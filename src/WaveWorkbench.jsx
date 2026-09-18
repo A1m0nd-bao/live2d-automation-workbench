@@ -67,15 +67,19 @@ function WavePreview({result,onSnapshot}) {
 
 export default function WaveWorkbench({onBack}) {
   const [document,setDocument]=useState(null),[profile,setProfile]=useState(null),[images,setImages]=useState({}),[slot,setSlot]=useState('handwear-r');
+  const [poseModelFile,setPoseModelFile]=useState(null);
   const [busy,setBusy]=useState(false),[progress,setProgress]=useState(''),[error,setError]=useState(''),[result,setResult]=useState(null),[notice,setNotice]=useState('');
   const meshes=useRef(null),operation=useRef(0);
   useEffect(()=>()=>{operation.current++;},[]);
   const update=fn=>{setProfile(p=>{const next=structuredClone(p);fn(next);next.reviewed=false;return next;});setResult(null);setNotice('配置已修改，请重新生成动作。');};
   async function upload(file){if(!file)return;const id=++operation.current;setBusy(true);setError('');setResult(null);setDocument(null);setProfile(null);meshes.current=null;setProgress('1 / 读取图层并估计关节…');
-    try{const loaded=await loadWaveFile(file);if(operation.current!==id)return;
+    try{const loaded=await loadWaveFile(file,setProgress,poseModelFile);if(operation.current!==id)return;
       const picture={};for(const pair of Object.values(loaded.input.pairs))for(const l of Object.values(pair))picture[l.name]=layerImage(l);
       setDocument(loaded);setImages(picture);setProfile(loaded.profile);setSlot(Object.keys(loaded.profile.slots).find(s=>loaded.profile.slots[s].active));
-      setNotice('自动标定已完成，请检查肩、肘、腕。绿色线为图层轮廓估计出的手臂路径。');
+      const assist=loaded.profile.assistance;
+      setNotice(assist?.status==='accepted'
+        ? 'DWPose 已完成两套姿态的肩、肘、腕标定，并通过 PSD 图层校验；仍请检查圆点。'
+        : `已完成图层标定。${assist?.status==='unavailable' ? `DWPose 本次不可用：${assist.error}` : '部分 DWPose 关节不可信，已安全回退为图层标定。'} 请检查肩、肘、腕。`);
     }catch(e){if(operation.current===id)setError(e.message);}finally{if(operation.current===id){setBusy(false);setProgress('');}}}
   async function generate(){setBusy(true);setError('');setResult(null);const id=operation.current;
     try{validateWaveProfile(profile,document.input);if(!meshes.current)meshes.current=await buildWaveMeshes(document.input,setProgress);
@@ -86,13 +90,13 @@ export default function WaveWorkbench({onBack}) {
   return <main className="wave-workbench">
     <header className="wave-header"><div><button className="wave-back" onClick={onBack}>← 返回生产工作台</button><p>LOCAL / WAVE LAB · 第一版</p><h1>为这个角色定制挥手</h1><span>读取同名图层，估计关节，校正后生成动作。PSD 保留原样。</span></div><span className="wave-local">本地处理 · 无需上传图片</span></header>
     <ol className="wave-steps">{['读取素材','标定关节','建立绑定','生成动作','渲染验收'].map((name,i)=><li key={name} className={(document&&i<2)||(result&&i<4)?'done':''}><b>{i+1}</b>{name}</li>)}</ol>
-    <section className="wave-upload"><div><h2>1 / 导入分层 PSD</h2><p>需要 handwear-l、handwear-r，以及 action_02_wave_arms_only 下对应的两张替换手臂。</p></div><label className="wave-file">选择 PSD<input aria-label="选择 PSD" type="file" accept=".psd" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>{document&&<strong>{document.filename} · {document.input.width} × {document.input.height}</strong>}</section>
+    <section className="wave-upload"><div><h2>1 / 导入分层 PSD</h2><p>需要 handwear-l、handwear-r，以及 action_02_wave_arms_only 下对应的两张替换手臂。</p><small>可选：先选择本地 DWPose ONNX，可避开公开模型下载失败；模型只在当前浏览器会话中读取，不会上传。</small></div><label className="wave-file secondary">{poseModelFile?`已选模型 · ${poseModelFile.name}`:'选择本地 DWPose 模型'}<input aria-label="选择本地 DWPose 模型" type="file" accept=".onnx,application/octet-stream" disabled={busy} onChange={e=>setPoseModelFile(e.target.files?.[0]??null)}/></label><label className="wave-file">选择 PSD<input aria-label="选择 PSD" type="file" accept=".psd" disabled={busy} onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/></label>{document&&<strong>{document.filename} · {document.input.width} × {document.input.height}</strong>}</section>
     {error&&<div role="alert" className="wave-error">{error}</div>}
     {busy&&<p role="status" className="wave-status">{progress||'处理中…'}</p>}
     {!busy&&notice&&document&&<p role="status" className="wave-status">{notice}</p>}
     {document&&profile&&<>
       <section className="wave-calibration"><div className="wave-section-title"><h2>2 / 校正关节点</h2><select aria-label="选择手臂" value={slot} disabled={busy} onChange={e=>setSlot(e.target.value)}><option value="handwear-r">handwear-r</option><option value="handwear-l">handwear-l</option></select></div>
-        <p>直臂的肘部按比例估计，需要人工检查。手掌范围用于辅助分析，第一版保持手指原有形态。</p>
+        <p>{profile.assistance?.status==='accepted' ? '已用 DWPose 标定两端姿势，并以 PSD 手臂范围校验。' : '直臂的肘部按比例估计，或 AI 标定未通过校验，需要人工检查。'} 手掌范围用于辅助分析，第一版保持手指原有形态。</p>
         <fieldset disabled={busy}><div className="wave-joints">{Object.keys(poses).map(pose=><JointEditor key={`${slot}-${pose}`} input={document.input} images={images} profile={profile} slot={slot} pose={pose} onChange={update}/>)}</div>
           <div className="wave-options"><label><input type="checkbox" checked={profile.slots[slot].active} onChange={e=>update(p=>{p.slots[slot].active=e.target.checked;})}/> 让这侧手臂挥动</label>
             <label>挥动幅度 <input aria-label="挥动幅度" type="number" min="1" max="15" value={profile.amplitude} onChange={e=>update(p=>{p.amplitude=Number(e.target.value);})}/> °</label>
