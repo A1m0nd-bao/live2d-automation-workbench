@@ -22,7 +22,25 @@ No key belongs in the browser. Local Mac launchers can set `MORPH_USE_KEYCHAIN=1
 and use `scripts/配置生图服务.command`; stored Gateway keys are read on demand.
 Readiness only checks configuration; it does not verify budget or permissions.
 
-Sources, prompt snapshots and outputs are stored under `MORPH_DATA_ROOT/prep`.
+Sources, prompt snapshots, each candidate and quality reports are stored under
+`MORPH_DATA_ROOT/prep`. New jobs use `image_quality.neutral_prompt()`; Pro states
+share its explicit style and framing locks. Legacy provider templates remain
+unchanged for historical reference. Ship `image_quality.py` alongside
+`prep_queue.py` and `pro_queue.py`. Restart only when no calls are running.
+Existing jobs keep their saved prompt and never silently change providers.
+Both generators require the Gateway key for reference-based visual review.
+The default reviewer is `openai/gpt-5.5` (`MORPH_IMAGE_REVIEW_MODEL` overrides it).
+Review uses `MORPH_IMAGE_REVIEW_PROXY` or the existing OS HTTPS proxy when set.
+Only all eight checks passing under the current review version permits automatic
+splitting. Rejection gets one corrective generation from the original reference;
+two failed candidates stop at `needs-review`. Review outages also stop there,
+without another generation. `POST /prep/jobs/{id}/review` reviews existing bytes
+without regenerating. Old review versions require re-review before splitting.
+Visual checks can still make mistakes; model delivery retains human acceptance.
+When only background/margins fail and all semantic checks pass, the queue first
+uses the existing anime foreground tool plus canvas padding, then reviews again.
+Install `requirements-foreground.txt` for this cleanup and ship `foreground.py`.
+Original pixels/candidates and cleanup masks remain saved for inspection.
 Task IDs are idempotent; conflicts return 409. Queued jobs resume after restart.
 Interrupted running jobs become `uncertain` rather than being silently billed
 again. Saved output bytes are recoverable even if the final DB update failed.
@@ -73,3 +91,36 @@ events are available from `/jobs/{id}/diagnostics` using the relay token.
 Run `python test_relay.py` to verify null failure events, trusted download routing,
 and invalid file rejection. For a real bounded test with raw events and PSD parsing,
 install `psd-tools` and run `python diagnose.py /path/to/image.png /path/to/output`.
+
+## Experimental foreground preflight (opt-in, 2026-09-10)
+
+Install `pip install -r requirements-foreground.txt` in a Python 3.11–3.13
+environment. Warm up `python app/foreground.py INPUT.png NEW_OUTPUT_DIRECTORY`
+before accepting jobs: first use downloads the checksum-verified `isnet-anime`
+ONNX weights (~176 MB) from the rembg release. Model selection is explicit;
+the rembg default model is not used. See the upstream rembg and
+SkyTNT/anime-segmentation model licensing separately from this worker.
+
+`POST /jobs?foreground=true` enables local segmentation only for that job.
+Omitting it preserves existing behavior; the Pages UI is not switched globally.
+The stage is snapshotted in `foreground-request.json`, runs in a bounded CPU
+subprocess (300 seconds) within the queue semaphore, and must finish before
+any See-Through request. Failure stops the job, without submitting the original.
+Completed cutouts are reused during recovery, not regenerated on upstream retry.
+
+`source` preserves the original upload. `cutout/` contains transparent
+`foreground.png`, `mask.png`, `on-dark.png`, `submission.png`, and a source-hash
+report. This white-dress trial composites onto uniform gray (#d0d0d0) for
+submission to avoid upstream alpha-decoder ambiguity. Geometry, resolution and
+opaque foreground RGB pixels are not changed. Numerical mask checks do NOT
+prove complete fingers/accessories: inspect the dark preview and final PSD.
+
+Authenticated `GET /jobs/{id}/foreground` returns the transparent PNG;
+`GET /jobs/{id}/source` returns the processed submission when ready.
+Diagnostics include foreground start/completion/failure. The controlled local
+experiment can be resumed with `python scripts/test-foreground-relay.py` from
+the repository; its persisted job ID avoids duplicate submissions.
+
+The canonical Image-2 prompt remains frozen. If matting is not sufficient,
+the proposed generation-background policy is white for normal clothing, gray
+for white clothing; that conditional fallback has not been enabled globally.

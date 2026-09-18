@@ -5,6 +5,7 @@
  * are walked but not emitted as parts (M3 will add hierarchy).
  */
 import { readPsd } from 'ag-psd';
+import { applyPsdQuality } from '../../../psdQuality.ts';
 
 /**
  * @typedef {Object} PsdLayer
@@ -27,6 +28,7 @@ import { readPsd } from 'ag-psd';
  */
 export function importPsd(buffer) {
   const psd = readPsd(buffer, { skipLayerImageData: false, useImageData: true });
+  const quality = applyPsdQuality(psd, psd.children?.some(l => /^(action|expression)_/.test(l.name || '')) ? 'pro' : 'ordinary');
 
   const layers = [];
 
@@ -77,7 +79,7 @@ export function importPsd(buffer) {
   // Reverse so bottom PSD layer → lowest draw_order (drawn first)
   layers.reverse();
 
-  return { width: psd.width, height: psd.height, layers };
+  return { width: psd.width, height: psd.height, layers, quality };
 }
 
 /**

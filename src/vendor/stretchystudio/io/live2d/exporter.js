@@ -173,6 +173,7 @@ export async function exportLive2D(project, images, opts = {}) {
  * @param {object} opts
  * @param {string} [opts.modelName='model']
  * @param {boolean} [opts.generateRig=false] - Generate standard Live2D rig (warp deformers, standard params)
+ * @param {'legacy'|'volume-v2'} [opts.headVolume='legacy'] - Candidate head volume; requires per-character acceptance.
  * @param {boolean} [opts.generatePhysics] - Emit CPhysicsSettingsSourceSet (hair + clothing pendulums). Defaults to `generateRig`.
  * @param {string[]} [opts.physicsDisabledCategories] - Category names to SUPPRESS (e.g. ['hair'] for buzz-cut characters).
  * @param {function} [opts.onProgress]
@@ -182,6 +183,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
   const {
     modelName = 'model',
     generateRig = false,
+    headVolume = 'legacy',
     generatePhysics = generateRig,
     physicsDisabledCategories = null,
     onProgress = () => {},
@@ -353,6 +355,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     animations: project.animations ?? [],
     modelName,
     generateRig,
+    headVolume,
     generatePhysics,
     physicsDisabledCategories,
     physicsRules: project.physicsRules ?? [],

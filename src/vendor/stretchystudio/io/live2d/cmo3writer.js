@@ -42,6 +42,8 @@ import {
   emitStructuralWarp,
 } from './cmo3/deformerEmit.js';
 import { emitNeckWarp, emitFaceRotation } from './cmo3/bodyRig.js';
+import { createHeadVolume } from './cmo3/headVolume.js';
+import { refineHeadMesh } from './cmo3/headMeshRefine.js';
 import { emitFaceParallax } from './cmo3/faceParallax.js';
 import { emitPhysicsSettings } from './cmo3/physics.js';
 import { auditRigObjects } from './cmo3/rigAudit.js';
@@ -87,6 +89,7 @@ import { emitLimbGrid } from './cmo3/limbKeyforms.js';
  * @property {ParamInfo[]} [parameters=[]] - Parameters
  * @property {string} [modelName='StretchyStudio Export']
  * @property {boolean} [generateRig=false] - Add standard Live2D parameter IDs
+ * @property {'legacy'|'volume-v2'} [headVolume='legacy'] - Opt-in volume candidate; validate compiled output per character
  */
 
 /**
@@ -97,7 +100,7 @@ import { emitLimbGrid } from './cmo3/limbKeyforms.js';
  */
 export async function generateCmo3(input) {
   const {
-    canvasW, canvasH, meshes,
+    canvasW, canvasH, meshes: sourceMeshes,
     groups = [], parameters = [],
     // Discrete art swaps, e.g. canonical arms ↔ wave arms. Each is emitted
     // as a normal 0/1 Cubism parameter with nearest-neighbour keyforms.
@@ -106,6 +109,8 @@ export async function generateCmo3(input) {
     animations = [],
     modelName = 'StretchyStudio Export',
     generateRig = false,
+    // Opt in until the compiled mesh passes topology and visual acceptance.
+    headVolume = 'legacy',
     // Physics: emits CPhysicsSettingsSourceSet (hair/skirt pendulums). Off by
     // default when generateRig is off — physics references rig-only params.
     generatePhysics = generateRig,
@@ -123,6 +128,22 @@ export async function generateCmo3(input) {
     strictRigPreflight = false,
   } = input;
 
+  if(!['legacy','volume-v2'].includes(headVolume))throw new Error(`Unsupported headVolume: ${headVolume}`);
+  const headMeshRefinement=[];
+  const faceVertices=sourceMeshes.filter(m=>m.tag==='face').flatMap(m=>Array.from(m.vertices));
+  let refinementVolume=null;
+  if(generateRig && headVolume!=='legacy' && faceVertices.length){
+    const xs=faceVertices.filter((_,i)=>i%2===0),ys=faceVertices.filter((_,i)=>i%2===1);
+    const faceMeshBbox={minX:Math.min(...xs),maxX:Math.max(...xs),minY:Math.min(...ys),maxY:Math.max(...ys)};
+    refinementVolume=createHeadVolume({faceMeshBbox,faceUnionBbox:faceMeshBbox,meshes:sourceMeshes});
+  }
+  const meshes=sourceMeshes.map(mesh=>{
+    if(!generateRig || headVolume==='legacy')return mesh;
+    const surface=mesh.tag==='back hair'?'back':['front hair','headwear'].includes(mesh.tag)?'front':'face';
+    const result=refinementVolume?refineHeadMesh(mesh,(x,y,ax,ay)=>refinementVolume.project(x,y,ax,ay,surface)):{mesh,mapping:null};
+    if(result.mapping)headMeshRefinement.push({name:mesh.name,originalVertices:mesh.vertices.length/2,vertices:result.mesh.vertices.length/2,mapping:result.mapping});
+    return result.mesh;
+  });
   // ── Phase 0 diagnostic log (only populated when generateRig is on) ──
   // Emitted as `{modelName}.rig.log.json` alongside the .cmo3 in the export zip.
   // Pure capture — no behavior changes. See docs/live2d-export/AUTO_RIG_PLAN.md.
@@ -139,6 +160,7 @@ export async function generateCmo3(input) {
     neckUnion: null,
     neckWarp: null,
     faceParallax: null,
+    headMeshRefinement,
     eyeClosureContexts: [],
     params: {},
     warnings: [],
@@ -260,10 +282,14 @@ export async function generateCmo3(input) {
       definition = {
         pid, id: action.id, name: action.name ?? action.id,
         min: action.min ?? 0, max: action.max ?? 1,
-        defaultVal: action.defaultVal ?? 0, decimalPlaces: 0,
+        // Fractional cross-fade keys (.35/.65) require fractional precision.
+        // A native v3 export with precision 0 kept the keys but Core never
+        // switched Wave. Precision 2 restores opacity interpolation.
+        defaultVal: action.defaultVal ?? 0, decimalPlaces: 2,
       };
       paramDefs.push(definition);
     }
+    definition.decimalPlaces = Math.max(2, definition.decimalPlaces ?? 2);
     actionParamPids.set(action.id, definition.pid);
   }
 
@@ -3169,7 +3195,7 @@ export async function generateCmo3(input) {
 
       // Store for re-parenting in section 3d. Face-parallax tags route to the single
       // FaceParallax warp; other tags route to Body X.
-      rigWarpTargetNodesToReparent.push({ node: rigWarpTargetNode, isFaceTag, isNeckTag });
+      rigWarpTargetNodesToReparent.push({ node: rigWarpTargetNode, isFaceTag, isNeckTag, tag: m.tag });
     }
   }
 
@@ -3585,6 +3611,7 @@ export async function generateCmo3(input) {
     //   2. Asymmetric perspective (far side of rotation shifts more).
     //   3. Cross-axis Y-on-AngleX + X-on-AngleY (tilt-while-turning cue).
     //   4. Row/col fade (top/bottom/edge columns move less than middle).
+    const hairParallaxGuids = new Map();
     const faceParallaxGuids = new Map(); // groupKey → pidCDeformerGuid
     if (pidParamAngleZ && facePivotCx !== null && faceUnionBbox && pidBodyXGuid) {
       // ── Face Rotation (CRotationDeformerSource) ──
@@ -3602,6 +3629,7 @@ export async function generateCmo3(input) {
       // region build (A.3 pairing, A.6b cell expansion), 3D rotation math
       // with #3 eye-parallax amp + #5 far-eye squash, and the deformer emit.
       const pidFpGuid = emitFaceParallax(x, {
+        headVolume, hairParallaxGuids,
         pidParamAngleX, pidParamAngleY, pidFaceRotGuid,
         faceUnionBbox, facePivotCx, facePivotCy, faceMeshBbox,
         meshes,
@@ -3665,7 +3693,7 @@ export async function generateCmo3(input) {
     for (const entry of rigWarpTargetNodesToReparent) {
       const { node, isFaceTag, isNeckTag } = entry;
       if (isFaceTag && pidFpUnified) {
-        node.attrs['xs.ref'] = pidFpUnified;
+        node.attrs['xs.ref'] = hairParallaxGuids.get(entry.tag) || pidFpUnified;
       } else if (isNeckTag && pidNeckWarpGuid) {
         node.attrs['xs.ref'] = pidNeckWarpGuid;
       } else {

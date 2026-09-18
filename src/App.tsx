@@ -24,8 +24,9 @@ import {
 } from 'lucide-react';
 import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
 import { prepRequest, submitPrep, recoverPrepState, type PrepJob } from './prepQueue';
+import { proRequest, type ProRun } from './proQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
-import { saveAsset, readAsset, downloadBlob } from './assets';
+import { saveAsset, saveAssets, readAsset, downloadBlob } from './assets';
 import {
   isJpeg,
   isPng,
@@ -73,6 +74,11 @@ type Task = {
   warnings?: string[];
   mode?: 'standard' | 'pro';
   proStateIds?: string[];
+  proRunId?: string;
+  proRun?: ProRun;
+  proQueueError?: string;
+  proMergeError?: string;
+  proRigPassed?: boolean;
   proStateAssets?: Record<string, { filename: string; uploadedAt: string }>;
   /** States found inside a professionally authored multi-state PSD. */
   proEmbeddedStateIds?: string[];
@@ -104,8 +110,15 @@ type HistoryJob = Job & {
   attempts?: number;
 };
 const STORAGE = 'morph.production.tasks';
+const proRigWarnings = (warnings: string[]) => warnings
+  .filter(w => !w.includes('仅作静态预览'))
+  .map(w => w.startsWith('以下参数未通过有效目标检查')
+    ? w.replace(/ParamMouthForm、?|、ParamMouthForm/g, '') : w)
+  .filter(w => !w.endsWith('不计作可用动作：'));
 const stage = (t: Task) =>
-  t.mode === 'pro' && t.proStage === 'base_psd_ready'
+  t.mode === 'pro' && t.proRigPassed && t.nativeRuntimeFile
+    ? t.cmoAccepted ? 'Pro：原生运行包已验收' : 'Pro：嘴部与九向已生成 · 待视觉验收'
+    : t.mode === 'pro' && t.proStage === 'base_psd_ready'
     ? 'Pro：基础 PSD 已就绪 · 待状态图'
     : t.mode === 'pro' && t.proStage === 'embedded_states_ready'
       ? 'Pro：已识别内嵌差分 · 可生成 CMO3'
@@ -128,11 +141,13 @@ const stage = (t: Task) =>
               : t.remoteJobId
                 ? '后台拆分中'
                 : t.prepState === 'needs-review'
-                  ? '生成图已保存 · 待构图复核'
+                  ? '生图质检未通过 · 已阻止拆层'
                 : t.prepState === 'uncertain'
                   ? '生图结果待确认 · 未自动重试'
                 : ['connecting', 'queued', 'running'].includes(t.prepState || '')
                   ? '服务端生图处理中'
+                : t.preparedFile && t.prepAccepted
+                  ? '生图质检通过 · 待拆层'
                 : t.inputKind === 'image' && !t.preparedFile
                   ? t.prepState === 'failed'
                     ? '生图预处理失败'
@@ -298,9 +313,6 @@ function WorkbenchApp() {
   const [prepMode, setPrepMode] = useState<PrepMode>('generate');
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
-    'action_03_hand_on_hip_arms_only',
-    'action_04_arms_crossed_crossed_arms',
-    'action_05_thinking_arms_only',
   ]);
   const [toast, setToast] = useState(''),
     [connection, setConnection] = useState(
@@ -320,6 +332,7 @@ function WorkbenchApp() {
   const productionAttempted = useRef(new Set<string>());
   const productionArtifactsSyncing = useRef(new Set<string>());
   const prepRefreshing = useRef(new Set<string>());
+  const proRefreshing = useRef(new Set<string>());
   const prepHistoryLoaded = useRef(false);
   const currentTasks = useRef(tasks);
   useEffect(() => { currentTasks.current = tasks; }, [tasks]);
@@ -429,7 +442,7 @@ function WorkbenchApp() {
         id: `prep-${job.id}`, name: job.name, referenceName: '服务端生图记录', inputKind: 'image',
         prepJobId: job.id, prepProvider: job.provider, prepAutoSplit: false,
         // Re-download saved results through the same validation path.
-        prepState: job.status === 'succeeded' ? 'queued' : job.status,
+        prepState: ['succeeded', 'needs-review'].includes(job.status) ? 'queued' : job.status,
         prepMessage: job.message, createdAt: new Date(job.created_at * 1000).toLocaleString('zh-CN'),
       }));
       return [...current, ...recovered];
@@ -686,7 +699,7 @@ function WorkbenchApp() {
       const source = await proStatePsd(t, state.id);
       return { state, ...source };
     }));
-    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs);
+    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs, { preserveOrder: !!t.proRunId });
     const filename = `${t.name}-live2d-pro-merged.psd`;
     const reportName = `${t.name}-live2d-pro-merge-report.json`;
     await saveAsset(`${t.id}:pro-merged-psd`, result.psd);
@@ -697,6 +710,7 @@ function WorkbenchApp() {
       proMergedFile: filename,
       proMergeReportFile: reportName,
       proStage: 'merge_ready',
+      proMergeError: undefined,
       qaPassed: false,
       remoteMessage: `已合并 ${states.length} 个状态；替换层默认隐藏，等待 PSD 预览验收。`,
     });
@@ -711,6 +725,50 @@ function WorkbenchApp() {
       ? saved.map((item) => item.id === t.id ? { ...item, ...patch } : item)
       : [...saved, { ...t, ...patch }]));
     update(t.id, patch);
+  }
+  async function syncPro(t: Task) {
+    if (proRefreshing.current.has(t.id) || t.proMergedFile) return;
+    proRefreshing.current.add(t.id);
+    try {
+      let run: ProRun;
+      const runId = t.proRunId || crypto.randomUUID().replaceAll('-', '');
+      if (!t.proRun) {
+        if (!t.remoteJobId || !t.psdFile) throw new Error('自动队列需要已完成的基础拆分任务。');
+        const reference = await readAsset(`${t.id}:prepared`);
+        if (!reference) throw new Error('缺少中立主图，请恢复基础主图；不会使用其他状态作为参考。');
+        rememberPrep(t, { proRunId: runId });
+        const form = new FormData();
+        form.append('job_id', runId); form.append('base_id', t.remoteJobId);
+        form.append('states', JSON.stringify(t.proStateIds ?? []));
+        form.append('provider', t.prepProvider ?? 'doubao');
+        form.append('image', reference, 'neutral.png');
+        run = await proRequest<ProRun>('/jobs', form);
+      } else {
+        run = await proRequest<ProRun>(`/jobs/${runId}`);
+      }
+      const assets = { ...t.proStateAssets };
+      for (const state of run.states) {
+        if (state.status !== 'succeeded' || assets[state.id]) continue;
+        const data = await proRequest<ArrayBuffer>(`/jobs/${runId}/states/${state.id}/output`);
+        if (new TextDecoder().decode(data.slice(0, 4)) !== '8BPS') throw new Error('状态返回文件不是 PSD');
+        await saveAsset(`${t.id}:pro-state:${state.id}:psd`, new Blob([data]));
+        assets[state.id] = { filename: `${state.id}.psd`, uploadedAt: new Date().toLocaleString('zh-CN') };
+      }
+      const next = { ...t, proRunId: runId, proRun: run, proStateAssets: assets };
+      update(t.id, { proRunId: runId, proRun: run, proStateAssets: assets,
+        proStage: 'state_decomposition', proQueueError: undefined, remoteMessage: run.message });
+      if (run.status === 'ready' && !t.proMergeError) {
+        try { await mergeProStates(next); }
+        catch (e) { update(t.id, { proMergeError: e instanceof Error ? e.message : '合层失败，原始 PSD 已保留' }); }
+      }
+    } catch (e) {
+      update(t.id, { proQueueError: e instanceof Error ? e.message : 'Pro 状态暂未同步' });
+    } finally { proRefreshing.current.delete(t.id); }
+  }
+  async function retryProState(t: Task, stateId: string) {
+    if (!t.proRunId || !window.confirm('仅重试该状态。若上次结果未知，重新生图可能再次计费，是否继续？')) return;
+    const run = await proRequest<ProRun>(`/jobs/${t.proRunId}/states/${stateId}/retry`, new FormData());
+    update(t.id, { proRun: run, proMergeError: undefined, proQueueError: undefined });
   }
   async function prepare(t: Task): Promise<File | undefined> {
     const provider = t.prepProvider ?? 'doubao';
@@ -736,16 +794,20 @@ function WorkbenchApp() {
     prepRefreshing.current.add(t.id);
     try {
       const job = await prepRequest<PrepJob>(`/jobs/${t.prepJobId}`);
-      if (job.status === 'succeeded' && t.preparedFile) return;
-      update(t.id, { prepState: job.status === 'succeeded' ? 'queued' : job.status,
+      update(t.id, { prepState: ['succeeded', 'needs-review'].includes(job.status) ? 'queued' : job.status,
         prepMessage: job.status === 'succeeded' ? '服务端已出图，正在取回并检查构图…' : job.message });
-      if (job.status !== 'succeeded' || t.preparedFile) return;
+      if (!['succeeded', 'needs-review'].includes(job.status)) return;
       const bytes = await prepRequest<ArrayBuffer>(`/jobs/${job.id}/output`);
       const png = await asPreparedPng(bytes);
       const filename = `${t.name}-generated.png`;
       // Persist and expose the candidate BEFORE the heuristic can reject it.
       await saveAsset(`${t.id}:prepared`, png);
       update(t.id, { preparedFile: filename, prepState: 'needs-review', prepAccepted: false });
+      if (job.status !== 'succeeded' || (job.quality?.status !== 'passed' || job.quality?.version !== 'image-quality-v4')) {
+        update(t.id, { prepState: 'needs-review', prepAccepted: false,
+          prepMessage: job.quality?.reasons?.join('；') || '生成图尚未通过服务端视觉检查，已阻止自动拆层。' });
+        return;
+      }
       try {
         await assertLive2dFriendlyFrame(png);
       } catch (error) {
@@ -754,7 +816,7 @@ function WorkbenchApp() {
         return;
       }
       update(t.id, { prepState: 'succeeded', prepAccepted: true,
-        prepMessage: '生成图已保存，构图基础检查通过（非 AI 语义验收）。' });
+        prepMessage: '生成图已通过参考图对比与完整性检查；模型成品仍需视觉验收。' });
       if (!t.remoteJobId && t.prepAutoSplit) {
         try {
           await submitToSeeThrough({ ...t, preparedFile: filename, prepState: 'succeeded' }, new File([png], filename, { type: 'image/png' }));
@@ -773,6 +835,13 @@ function WorkbenchApp() {
     await startImagePipeline(next);
   }
   async function submitToSeeThrough(t: Task, preparedImage?: File) {
+    if (t.inputKind === 'image' && t.prepState !== 'user-confirmed' && t.prepJobId) {
+      const job = await prepRequest<PrepJob>(`/jobs/${t.prepJobId}`);
+      if (job.status !== 'succeeded' || job.quality?.status !== 'passed' || job.quality.version !== 'image-quality-v4') {
+        update(t.id, { prepAccepted: false, prepState: 'needs-review', prepMessage: '当前生图检查未通过，已阻止提交拆层。' });
+        throw new Error('当前生图检查未通过，已阻止提交拆层。请先复核现有图片。');
+      }
+    }
     const f =
       preparedImage ??
       (t.inputKind === 'image' ? await prepared(t) : await input(t));
@@ -857,7 +926,8 @@ function WorkbenchApp() {
           proStage: 'base_psd_ready',
           remoteMessage: '基础 PSD 已就绪。下一步将按 Persona Lock 生成并拆分所选状态图。',
         });
-        setToast('Pro 基础 PSD 已保存；状态图生成与差分合并入口已准备。');
+        await syncPro({ ...t, psdFile: filename });
+        setToast('Pro 基础 PSD 已保存，正在连接多状态队列。');
         return;
       }
       setProgress('PSD 已下载，正在自动生成运行时包…');
@@ -887,6 +957,9 @@ function WorkbenchApp() {
       try {
         for (const item of currentTasks.current) {
           if (cancelled) break;
+          if (item.mode === 'pro' && item.proRunId && !item.proMergedFile) {
+            await syncPro(item);
+          }
           if (!item.prepJobId || item.preparedFile || !['queued', 'running', 'succeeded'].includes(item.prepState || '')) continue;
           try { await refreshPrep(item); }
           catch (error) {
@@ -935,17 +1008,44 @@ function WorkbenchApp() {
       cmoFile: `${result.name}.cmo3`,
       runtimeFile: undefined,
       nativeRuntimeFile: undefined,
+      proRigPassed: false,
       rigReportFile: `${result.name}-rig-report.json`,
       hasGenerated: true,
       cmoAccepted: false,
       warnings: result.report.warnings,
     });
     try {
-      const runtime = await compileNative(result.cmo, setProgress);
-      await saveAsset(`${t.id}:runtime`, runtime);
-      await saveAsset(`${t.id}:native-runtime`, runtime);
-      update(t.id, {runtimeFile: `${result.name}-native-runtime.zip`, nativeRuntimeFile: `${result.name}-native-runtime.zip`});
-      setToast('原生 MOC3 已编译并接入网页预览；Core 检查通过，视觉效果请确认。');
+      const runtime = await compileNative(result.cmo, setProgress, t.mode === 'pro' ? 'pro-rig-v1' : 'standard');
+      if (t.mode === 'pro') {
+        const { default: JSZip } = await import('jszip');
+        const native = await JSZip.loadAsync(runtime);
+        const enhanced = await native.file('enhanced.cmo3')?.async('blob');
+        const verificationText = await native.file('pro-verification.json')?.async('string');
+        const verification = verificationText ? JSON.parse(verificationText) : null;
+        if (!enhanced || verification?.pipelineVersion !== 'pro-rig-v1' || verification.status !== 'passed')
+          throw new Error('Pro 增强工程或组合检查报告缺失；不交付不完整运行包。');
+        const authoring = await JSZip.loadAsync(result.bundle);
+        authoring.file(`${result.name}.cmo3`, enhanced);
+        authoring.file('pro-verification.json', verificationText!);
+        const report = { ...result.report, proRig: verification, runtimeBindingStatus: 'native-compiled',
+          validation: 'Pro 嘴部与九向原生编译、组合检查通过；待视觉验收。',
+          warnings: proRigWarnings(result.report.warnings) };
+        authoring.file('morph-report.json', JSON.stringify(report, null, 2));
+        await saveAssets([
+          {key: `${t.id}:cmo-base`, value: result.cmo},
+          {key: `${t.id}:cmo`, value: enhanced},
+          {key: `${t.id}:bundle`, value: await authoring.generateAsync({type: 'blob'})},
+          {key: `${t.id}:rig-report`, value: new Blob([JSON.stringify(report, null, 2)], {type: 'application/json'})},
+        ]);
+        update(t.id, {warnings: report.warnings});
+      }
+      await saveAssets([
+        {key: `${t.id}:runtime`, value: runtime},
+        {key: `${t.id}:native-runtime`, value: runtime},
+        {key: `${t.id}:native-runtime-prepared`, value: runtime},
+      ]);
+      update(t.id, {runtimeFile: `${result.name}-native-runtime.zip`, nativeRuntimeFile: `${result.name}-native-runtime.zip`, proRigPassed: t.mode === 'pro'});
+      setToast(t.mode === 'pro' ? 'Pro 原生嘴部与九向已接入预览，2700 组检查通过；请确认视觉效果。' : '原生 MOC3 已编译并接入网页预览；Core 检查通过，视觉效果请确认。');
     } catch (error) {
       const message = error instanceof Error ? error.message : '原生导出失败';
       update(t.id, {warnings: [...result.report.warnings, message]});
@@ -983,6 +1083,7 @@ function WorkbenchApp() {
       runtimeFile: undefined,
       rigReportFile: undefined,
       nativeRuntimeFile: undefined,
+      proRigPassed: false,
       cmoAccepted: false,
       warnings: [],
     };
@@ -1219,7 +1320,8 @@ function WorkbenchApp() {
               <b>选择首批状态</b>
               <small>基础 PSD 完成后，这些状态会按同一 Persona Lock 逐一生成、拆层与合并。</small>
               <div>
-                {LIVE2D_PRO_STATES.map((state) => {
+                <small>仅特殊手势走生图与拆分，逐个串行完成。表情沿用已有模型参数；没有绑定的表情不会自动补齐。</small>
+                {LIVE2D_PRO_STATES.filter(state => state.kind === 'action').map((state) => {
                   const checked = proStateIds.includes(state.id);
                   return (
                     <label key={state.id}>
@@ -1385,7 +1487,26 @@ function WorkbenchApp() {
                   下载 Pro 状态清单与提示词约束
                 </button>
                 {task.proStage === 'base_psd_ready' && (
-                  <small>基础 PSD 已完成。导入每个状态经 See-Through 拆分后的 PSD，随后可在此浏览器本地合层。</small>
+                  <small>基础 PSD 已完成。服务端逐个生成并拆分状态；收齐后工作台自动合层。关闭网页不会中断队列，合层会在重新打开后继续。</small>
+                )}
+                {task.psdFile && task.remoteJobId && !task.proMergedFile && task.proStage !== 'embedded_states_ready' && (
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    <button className="ghost-button" disabled={busy} onClick={() => void operate(() => syncPro(task))}>
+                      {task.proRunId ? '恢复／同步多状态队列' : '启动所选状态自动队列'}
+                    </button>
+                    <small>{task.proRun?.message}</small>
+                    {task.proQueueError && <p role="alert">{task.proQueueError}</p>}
+                    {task.proMergeError && <p role="alert">合层待处理：{task.proMergeError}。状态 PSD 已保留，不会自动重生。</p>}
+                    {task.proRun?.states.map(state => (
+                      <div key={state.id} style={{ display: 'grid', gap: 6 }}>
+                        <b>{LIVE2D_PRO_STATES.find(s => s.id === state.id)?.label ?? state.id}</b>
+                        <small>第 {state.attempt} 次 · {state.message}</small>
+                        {task.proRun?.status === 'needs_attention' && ['failed', 'uncertain'].includes(state.status) && (
+                          <button className="ghost-button" disabled={busy} onClick={() => void operate(() => retryProState(task, state.id))}>仅重试此状态（可能计费）</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
                 {task.proStage === 'embedded_states_ready' && (
                   <small>
@@ -1396,8 +1517,8 @@ function WorkbenchApp() {
                 {task.psdFile && task.proStage !== 'embedded_states_ready' && (
                   <section className="pro-state-imports">
                     <div>
-                      <b>状态 PSD 收集</b>
-                      <small>每个文件应对应同一 Persona Lock 下的一个状态，并与基础 PSD 画布一致。</small>
+                      <b>状态 PSD 收集／手动替换</b>
+                      <small>自动队列会填入结果；也可手动导入修正版。画布必须与基础 PSD 一致。</small>
                     </div>
                     {selectedProStates(task.proStateIds ?? []).map((state) => {
                       const asset = task.proStateAssets?.[state.id];
@@ -1469,6 +1590,12 @@ function WorkbenchApp() {
               <section>
                 <p>生图任务：{task.prepJobId.slice(0, 12)} · {task.prepMessage}</p>
                 <button className="ghost-button" disabled={busy} onClick={() => void operate(() => refreshPrep(task))}>查询／恢复生图任务</button>
+                {!task.remoteJobId && task.prepState === 'needs-review' && (
+                  <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
+                    await prepRequest(`/jobs/${task.prepJobId}/review`, new FormData());
+                    await refreshPrep(task);
+                  })}>重新检查现有图片（不重新生图）</button>
+                )}
                 {!task.remoteJobId && ['failed', 'uncertain', 'needs-review'].includes(task.prepState || '') && (
                   <button className="ghost-button" disabled={busy} onClick={() => void operate(() => regenerate(task))}>重新生成（新任务，可能计费）</button>
                 )}
@@ -1582,13 +1709,13 @@ function WorkbenchApp() {
                   确认输入质检通过
                 </button>
               )}
-            {task.qaPassed && (
+            {(task.qaPassed || (task.mode === 'pro' && task.proMergedFile)) && (
               <button
                 className="primary-button"
                 disabled={busy}
                 onClick={() => void operate(() => generate(task))}
               >
-                {task.hasGenerated ? '重新生成运行时包' : '在浏览器生成运行时包'}
+                {task.hasGenerated ? '重新生成运行时包' : !task.qaPassed ? '生成待验收预览（嘴部与九向）' : '在浏览器生成运行时包'}
               </button>
             )}
             {busy && <output>{progress || '处理中…'}</output>}
@@ -1654,7 +1781,7 @@ function WorkbenchApp() {
                 </button>
               </>
             )}
-            {task.warnings?.map((w, i) => (
+            {(task.proRigPassed ? proRigWarnings(task.warnings ?? []) : task.warnings)?.map((w, i) => (
               <small key={i}>{w}</small>
             ))}
             {task.rigReportFile && <RigNormalizationPreview task={task} />}
@@ -1675,10 +1802,11 @@ function WorkbenchApp() {
               <NativeRuntimeViewer
                 key={`${task.id}:${task.nativeRuntimeFile || ''}`}
                 savedPackageName={task.nativeRuntimeFile}
-                loadSavedPackage={() => readAsset(`${task.id}:native-runtime`)}
+                loadSavedPackage={async () => (await readAsset(`${task.id}:native-runtime-prepared`)) ?? readAsset(`${task.id}:native-runtime`)}
+                savePreparedPackage={(file) => saveAsset(`${task.id}:native-runtime-prepared`, file)}
                 savePackage={async (file) => {
-                  await saveAsset(`${task.id}:native-runtime`, file);
-                  update(task.id, { nativeRuntimeFile: file.name, cmoAccepted: false });
+                  await saveAssets([{ key: `${task.id}:native-runtime`, value: file }, { key: `${task.id}:native-runtime-prepared`, value: file }]);
+                  update(task.id, { nativeRuntimeFile: file.name, cmoAccepted: false, proRigPassed: false });
                   setToast('原生 Cubism 运行时包已仅在此浏览器保存，可随时回到此任务预览。');
                 }}
               />
@@ -1771,7 +1899,7 @@ function proFlowState(task: Task, step: 'source' | 'persona' | 'basePsd' | 'stat
   if (step === 'states') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : task.psdFile ? 'working' : 'queued';
   if (step === 'statePsd') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : collectedStates ? 'working' : task.psdFile ? 'working' : 'queued';
   if (step === 'merge') return stage === 'merge_ready' ? 'done' : stage === 'state_decomposition' ? 'working' : 'queued';
-  return task.hasGenerated ? 'done' : stage === 'merge_ready' || embedded ? 'working' : 'queued';
+  return task.proRigPassed && task.nativeRuntimeFile ? 'done' : task.hasGenerated || stage === 'merge_ready' || embedded ? 'working' : 'queued';
 }
 
 function ProFlowNode({
@@ -1827,7 +1955,7 @@ function ProProductionLine({ task }: { task: Task }) {
       <div className="pro-flow-exit">
         <ProFlowNode title="语义差分合层" note="写入默认隐藏的 action / expression 图层" state={proFlowState(task, 'merge')}><Combine size={17} /></ProFlowNode>
         <ArrowRight className="pro-flow-arrow" size={19} />
-        <ProFlowNode title="Cubism 交付" note="CMO3 整理，MOC3 官方编译验收" state={proFlowState(task, 'delivery')}><Box size={17} /></ProFlowNode>
+        <ProFlowNode title="嘴部 · 九向 · 原生交付" note="原生嘴型、九向绑定、2700 组检查；待视觉验收" state={proFlowState(task, 'delivery')}><Box size={17} /></ProFlowNode>
       </div>
     </section>
   );

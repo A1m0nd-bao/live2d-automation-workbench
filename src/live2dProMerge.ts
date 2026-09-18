@@ -1,4 +1,5 @@
 import { readPsd, writePsd } from 'ag-psd';
+import { cleanupProOrder, proBaseLeaves, identicalProSlot } from './proPsdCleanup';
 import {
   type ProLayerProbe,
   type ProState,
@@ -12,6 +13,7 @@ type PsdLayer = {
   right?: number;
   bottom?: number;
   hidden?: boolean;
+  opened?: boolean;
   opacity?: number;
   blendMode?: string;
   imageData?: { data: Uint8ClampedArray | Uint8Array; width: number; height: number };
@@ -28,13 +30,37 @@ export type ProMergeInput = { state: ProState; data: ArrayBuffer; filename: stri
 export type ProMergeReport = {
   version: 1;
   baseCanvas: [number, number];
+  mouth: ReturnType<typeof locateProMouth>;
+  cleanup: ReturnType<typeof cleanupProOrder>;
   states: Array<{
     id: string;
     source: string;
     outputLayers: string[];
+    reusedBaseSlots: string[];
+    cleanup: ReturnType<typeof cleanupProOrder>;
     warnings: string[];
   }>;
 };
+
+/** Geometry hint only: layer naming cannot prove segmentation quality. */
+export function locateProMouth(layers: ProLayerProbe[], canvas: [number, number]) {
+  const names = (name: string) => name.trim().toLowerCase().replace(/[ -]+/g, '_');
+  const candidates = layers.filter(l => ['mouth', 'mouth_nose', '嘴', '嘴巴', '口'].includes(names(l.name)));
+  const candidate = candidates.length === 1 ? candidates[0] : undefined;
+  const box = candidate?.bounds;
+  const valid = box && box.every(Number.isFinite) && box[0] >= 0 && box[1] >= 0 && box[2] > box[0] && box[3] > box[1] && box[2] <= canvas[0] && box[3] <= canvas[1];
+  const independent = candidate && names(candidate.name) !== 'mouth_nose';
+  return {
+    version: 1 as const,
+    coordinateSpace: 'source-psd-pixels' as const,
+    status: valid && independent ? 'located_needs_review' : 'needs_manual_location',
+    candidates,
+    anchor: valid && independent ? { bounds: box, center: [(box[0]+box[2])/2, (box[1]+box[3])/2] } : null,
+    replacementApplied: false,
+    nativeRigVerified: false,
+    review: ['确认嘴层非空且不含鼻子或下巴', '检查最大张嘴范围，不直接将薄嘴层高度当作张嘴上限', '确认脸层没有残留旧嘴', '确认表情嘴与说话嘴不重叠'],
+  };
+}
 
 const aliases = (slot: string) => ({
   handwear: ['handwear', 'handwear-l', 'handwear-r'],
@@ -57,6 +83,22 @@ function bounds(layer: PsdLayer): [number, number, number, number] {
 }
 
 function probe(layer: PsdLayer): ProLayerProbe {
+  // See-Through may return either a trimmed layer or a full-canvas layer
+  // with transparent padding. Compare visible content, not storage bounds.
+  const image = layer.imageData;
+  if (image) {
+    let left = image.width, top = image.height, right = 0, bottom = 0;
+    for (let y = 0; y < image.height; y += 1)
+      for (let x = 0; x < image.width; x += 1) {
+        if (image.data[(y * image.width + x) * 4 + 3] <= 32) continue;
+        left = Math.min(left, x); top = Math.min(top, y);
+        right = Math.max(right, x + 1); bottom = Math.max(bottom, y + 1);
+      }
+    if (right > left && bottom > top) {
+      const [originX, originY] = bounds(layer);
+      return { name: layer.name || '', bounds: [originX + left, originY + top, originX + right, originY + bottom] };
+    }
+  }
   return { name: layer.name || '', bounds: bounds(layer) };
 }
 
@@ -136,37 +178,54 @@ function removeExistingVariant(document: PsdDocument, id: string) {
  * writes hidden variant groups only; base layers remain untouched. The caller
  * must review the report before passing the file to Cubism.
  */
-export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[]) {
+export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[], options: { preserveOrder?: boolean } = {}) {
   const document = readPsd(base, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
-  const baseLayers = leaves(document.children).map(probe);
+  const inspectOrder = (layers: PsdLayer[] | undefined) => {
+    const report = cleanupProOrder(options.preserveOrder ? structuredClone(layers ?? []) : layers);
+    return options.preserveOrder ? { ...report, status: 'needs_review', changed: [], warnings: [...report.warnings,
+      '自动队列保留源图层顺序，未套用模板排序；仍需视觉遮挡验收。'] } : report;
+  };
+  const cleanup = inspectOrder(document.children);
+  const baseRaster = proBaseLeaves(document.children);
+  const baseLayers = baseRaster.map(probe);
   const report: ProMergeReport = {
     version: 1,
     baseCanvas: [document.width, document.height],
+    mouth: locateProMouth(baseLayers, [document.width, document.height]),
+    cleanup,
     states: [],
   };
   for (const input of inputs) {
     const source = readPsd(input.data, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
     if (source.width !== document.width || source.height !== document.height)
       throw new Error(`${input.state.label} PSD 画布为 ${source.width}×${source.height}，与基础 PSD ${document.width}×${document.height} 不一致。`);
-    const stateLayers = leaves(source.children);
+    const stateCleanup = inspectOrder(source.children);
+    const stateLayers = proBaseLeaves(source.children);
     const plan = planLive2DProDiff(input.state, baseLayers, stateLayers.map(probe));
     if (!plan.ready)
       throw new Error(`${input.state.label} 无法合并：${plan.warnings.join('；')}`);
 
     const children: PsdLayer[] = [];
+    const reusedBaseSlots: string[] = [];
     for (const slot of input.state.slotTargets) {
       const names = new Set(aliases(slot));
       const sources = stateLayers.filter((layer) => names.has(layer.name || ''));
       if (!sources.length) throw new Error(`${input.state.label} 缺少 ${slot} 的像素图层。`);
+      if (identicalProSlot(baseRaster.filter(layer => names.has(layer.name || '')), sources)) {
+        reusedBaseSlots.push(slot);
+        continue;
+      }
       children.push(composite(sources, `${input.state.id}__${slot}`));
     }
     removeExistingVariant(document, input.state.id);
-    (document.children ||= []).push({ name: input.state.id, hidden: true, opened: false, children });
+    if (children.length) (document.children ||= []).push({ name: input.state.id, hidden: true, opened: false, children });
     report.states.push({
       id: input.state.id,
       source: input.filename,
       outputLayers: children.map((layer) => layer.name || ''),
-      warnings: plan.warnings,
+      reusedBaseSlots,
+      cleanup: stateCleanup,
+      warnings: [...plan.warnings, ...stateCleanup.warnings, ...(!children.length ? ['所有目标槽位与基础层完全一致，未生成空动作组。'] : [])],
     });
   }
   const data = writePsd(document as never, { noBackground: true, trimImageData: false });

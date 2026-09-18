@@ -14,6 +14,7 @@ import {
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
 import { cleanRigLayer, calibratePose, assertRigMesh, bindLimbMesh } from './autoRigPreflight.js';
 import { normalizePsdRigLayers } from './psdRigNormalization.js';
+import { resolveVariantLayerBinding } from './variantBinding.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
@@ -153,6 +154,7 @@ export async function generateCubism(
   // model identifier.
   const safeName = stableAsciiName(name);
   let project;
+  let psdQuality = null;
   let preview;
   try {
     onProgress('读取文件…');
@@ -169,6 +171,9 @@ export async function generateCubism(
       const buffer = await file.arrayBuffer();
       validatePsdHeader(buffer);
       const parsed = importPsd(buffer);
+      psdQuality = parsed.quality;
+      warnings.push(...psdQuality.issues, ...psdQuality.warnings);
+      if (psdQuality.changed.length) onProgress(`PSD 已自动修复 ${psdQuality.changed.length} 项排序关系，保留原始素材。`);
       const sourceVariantManifest = extractVariantManifest(buffer);
       // A Pro PSD can contain a library of action/expression alternates.  A
       // production run must only materialise the states selected for this
@@ -304,7 +309,12 @@ export async function generateCubism(
         layers,
         ids,
         () => crypto.randomUUID(),
-        { lowerBodyRigReady: normalization.lowerBodyRigReady },
+        {
+          lowerBodyRigReady: normalization.lowerBodyRigReady,
+          combinedArmAlternates: variantManifest.variants.some((variant) =>
+            variant.parts.some((part) => part.slot === 'handwear'),
+          ),
+        },
       );
       project = {
         version: 1,
@@ -395,14 +405,22 @@ export async function generateCubism(
         assertRigMesh(mesh, layer, width, height);
         const variant = variantByPart.get(layer.name);
         const slot = variant?.parts.find(part => part.name === layer.name)?.slot;
-        const tag = matchTag(slot ?? layer.name);
+        const binding = resolveVariantLayerBinding({
+          slot,
+          layers,
+          assignments,
+          groupDefs,
+          layerIndex: i,
+        });
+        if (binding.error) throw Error(`${layer.name} ${binding.error}`);
+        const tag = matchTag(binding.semanticTag ?? layer.name);
         // Alternative artwork inherits the canonical limb's ancestors. Its
         // own elbow requires pose-specific anchors; never skin a raised arm
         // with the neutral arm's elbow coordinates.
-        const assignmentIndex = slot ? layers.findIndex(part => part.name === slot) : i;
-        if (slot && assignmentIndex < 0) throw Error(`${layer.name} 缺少对应基础图层 ${slot}，已拦截动作绑定`);
         if (slot && (tag === 'handwear-l' || tag === 'handwear-r'))
           warnings.push(`${layer.name} 已继承基础手臂父级，但未配置该姿势的独立肘点；此替换姿势暂不追加屈肘。`);
+        if (binding.combinedArmState)
+          warnings.push(`${layer.name} 是双臂合成动作层，已绑定到 torso 跟随的 bothArms；该状态不追加单侧屈肘。`);
         if (isInitiallyVisible(layer)) bindLimbMesh(mesh, tag, skeleton, groupDefs);
         project.autoRigPreflight.meshes.push({ name:layer.name, tag, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height}, jointBoneId:mesh.jointBoneId ?? null, weightRange: mesh.boneWeights ? { min:Math.min(...mesh.boneWeights), max:Math.max(...mesh.boneWeights) } : null });
         const source = URL.createObjectURL(await png(canvas));
@@ -414,7 +432,7 @@ export async function generateCubism(
           name: layer.name,
           semanticTag: tag,
           textureId: ids[i],
-          parent: assignments.get(assignmentIndex)?.parentGroupId ?? null,
+          parent: binding.parentGroupId,
           draw_order: assignments.get(i)?.drawOrder ?? layers.length - 1 - i,
           visible: true,
           opacity: isInitiallyVisible(layer) ? layer.opacity : 0,
@@ -487,6 +505,7 @@ export async function generateCubism(
     const report = {
       engine: ENGINE_VERSION,
       source: file.name,
+      psdQuality,
       meshCount: project.nodes.filter((node) => node.type === 'part').length,
       autoRigDiagnostics: project.autoRigDiagnostics ?? null,
       autoRigPreflight: project.autoRigPreflight ?? null,

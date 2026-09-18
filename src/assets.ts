@@ -8,11 +8,15 @@ async function database() {
   });
 }
 export async function saveAsset(key: string, value: Blob) {
+  return saveAssets([{ key, value }]);
+}
+/** Atomically replace an original/derived pair so task restoration cannot mix versions. */
+export async function saveAssets(entries: Array<{ key: string; value: Blob }>) {
   const db = await database();
   try {
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction('files', 'readwrite');
-      tx.objectStore('files').put(value, key);
+      for (const { key, value } of entries) tx.objectStore('files').put(value, key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
       tx.onabort = () => reject(tx.error);

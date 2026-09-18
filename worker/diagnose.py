@@ -31,7 +31,11 @@ def run():
         with image.open('rb') as handle:
             upload = check(client.post(BASE + '/gradio_api/upload', files={'files': (image.name, handle, 'image/png')}), 'upload').json()
         record('uploaded', reference=upload)
-        payload = {'data': [{'path': upload[0], 'orig_name': image.name, 'meta': {'_type': 'gradio.FileData'}}, 768, 42, False]}
+        resolution = int(os.environ.get('SEE_THROUGH_RESOLUTION', '768'))
+        seed = int(os.environ.get('SEE_THROUGH_SEED', '42'))
+        split_limbs = os.environ.get('SEE_THROUGH_SPLIT_LIMBS', 'false').lower() == 'true'
+        record('parameters', resolution=resolution, seed=seed, split_limbs=split_limbs)
+        payload = {'data': [{'path': upload[0], 'orig_name': image.name, 'meta': {'_type': 'gradio.FileData'}}, resolution, seed, split_limbs]}
         event_id = check(client.post(BASE + '/gradio_api/call/inference', json=payload), 'submit').json()['event_id']
         record('submitted', event_id=event_id)
         started = time.monotonic()
