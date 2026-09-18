@@ -105,8 +105,10 @@ figcaption {
   margin-top: 14px;
 }
 .runtime-stage {
-  display: grid;
-  min-height: 360px;
+  display: block;
+  height: clamp(360px, 65vh, 640px);
+  min-height: 0;
+  align-self: start;
   place-items: center;
   overflow: hidden;
   border: 1px solid #d3e0f5;
@@ -124,6 +126,8 @@ figcaption {
   border: 1px solid #e0e7f1;
   border-radius: 10px;
   background: #f8faff;
+  max-height: 640px;
+  overflow-y: auto;
 }
 .runtime-controls > p { margin: 0; color: #435673; font-size: 12px; line-height: 1.5; }
 .runtime-controls > small { color: #326c5b; line-height: 1.45; }
@@ -153,6 +157,13 @@ figcaption {
 .runtime-motion:hover { border-color: #6988d5; background: #f5f8ff; }
 .runtime-motion--action { border-color: #a99adf; background: #f8f5ff; color: #514582; }
 .runtime-motion small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-data-panel { margin-top: 16px; display: grid; gap: 10px; min-width: 0; }
+.runtime-data-panel select { display: block; width: 100%; padding: 8px; }
+.runtime-data-panel pre { padding: 14px; max-height: 360px; overflow: auto; background: #15213e; color: #e2eefc; font: 12px/1.5 monospace; white-space: pre; border-radius: 8px; }
+.runtime-data-table { max-height: 300px; overflow: auto; }
+.runtime-data-table table { border-collapse: collapse; width: 100%; font-size: 12px; font-variant-numeric: tabular-nums; }
+.runtime-data-table td, .runtime-data-table th { text-align: left; padding: 7px; border-bottom: 1px solid #d3e0f5; white-space: nowrap; }
+.runtime-data-table th { position: sticky; top: 0; background: #f8faff; }
 figure {
   margin: 12px 0 0;
 }
@@ -464,3 +475,11 @@ button:disabled {
   .pro-flow-fork { padding-left: 10px; }
   .pro-lane-label { min-width: 0; }
 }
+.standalone-preview { max-width: 1500px; margin: auto; padding: 24px; }
+.standalone-preview header a { color: #526457; }
+.standalone-preview h1 { font-size: 28px; margin: 16px 0 8px; }
+.preview-import-panel { padding: 18px; margin: 20px 0; background: #f0f3ef; border-radius: 14px; }
+.preview-import-panel .ghost-button { display: inline-flex; margin: 4px; }
+.preview-import-panel input[type=file] { max-width: 220px; }
+.standalone-preview .runtime-stage { min-height: 620px; }
+@media(max-width:700px) { .standalone-preview { padding: 12px; } .standalone-preview .runtime-stage { min-height: 420px; } .standalone-preview .runtime-preview-grid { grid-template-columns: minmax(0, 1fr); } .standalone-preview .variant-preview-heading { flex-wrap: wrap; } .standalone-preview .runtime-controls { max-height: 650px; } }
