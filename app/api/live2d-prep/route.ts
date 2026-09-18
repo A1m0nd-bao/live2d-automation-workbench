@@ -121,7 +121,7 @@ export async function POST(request: Request) {
           },
           body: JSON.stringify({
             model: process.env.VOLCENGINE_ARK_MODEL || LIVE2D_PREP_MODEL,
-            prompt: live2dPrepPrompt(),
+            prompt: live2dPrepPrompt('doubao'),
             image: [`data:${image.type};base64,${base64(input)}`],
             size: LIVE2D_PREP_SIZE,
             sequential_image_generation: 'disabled',
@@ -162,7 +162,7 @@ async function requestImage2(image: File, input: ArrayBuffer) {
     },
     body: JSON.stringify({
       model: config.model,
-      prompt: live2dPrepPrompt(),
+      prompt: live2dPrepPrompt('image2'),
       images: [{ image_url: `data:${image.type};base64,${base64(input)}` }],
       size: LIVE2D_PREP_SIZE,
       background: 'transparent',

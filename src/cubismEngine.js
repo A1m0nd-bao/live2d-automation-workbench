@@ -1,3 +1,4 @@
+import { resolveWaveProfile, WAVE_VARIANT, WAVE_MESH_OPTIONS, trimWaveMesh } from './waveRig.js';
 import JSZip from 'jszip';
 import thirdPartyLicense from './vendor/stretchystudio/LICENSE?raw';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
@@ -11,8 +12,9 @@ import {
   buildArmatureNodes,
 } from './vendor/stretchystudio/io/armatureOrganizer.js';
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
-import { cleanRigLayer, calibratePose, assertRigMesh, limbWeights } from './autoRigPreflight.js';
+import { cleanRigLayer, calibratePose, assertRigMesh, bindLimbMesh } from './autoRigPreflight.js';
 import { normalizePsdRigLayers } from './psdRigNormalization.js';
+import { resolveVariantLayerBinding } from './variantBinding.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
@@ -140,7 +142,7 @@ export async function generateCubism(
   file,
   name,
   onProgress = (_message) => {},
-  { variantIds } = {},
+  { variantIds, waveProfile } = {},
 ) {
   if (file.size > 100 * 1024 * 1024)
     throw new Error('当前支持最大 100 MB 的工程文件。');
@@ -152,6 +154,7 @@ export async function generateCubism(
   // model identifier.
   const safeName = stableAsciiName(name);
   let project;
+  let psdQuality = null;
   let preview;
   try {
     onProgress('读取文件…');
@@ -168,6 +171,9 @@ export async function generateCubism(
       const buffer = await file.arrayBuffer();
       validatePsdHeader(buffer);
       const parsed = importPsd(buffer);
+      psdQuality = parsed.quality;
+      warnings.push(...psdQuality.issues, ...psdQuality.warnings);
+      if (psdQuality.changed.length) onProgress(`PSD 已自动修复 ${psdQuality.changed.length} 项排序关系，保留原始素材。`);
       const sourceVariantManifest = extractVariantManifest(buffer);
       // A Pro PSD can contain a library of action/expression alternates.  A
       // production run must only materialise the states selected for this
@@ -190,6 +196,9 @@ export async function generateCubism(
         ),
       );
       const { width, height } = parsed;
+      const waveRig = variantManifest.variants.some(v => v.id === 'action_02_wave_arms_only')
+        ? resolveWaveProfile(parsed.layers, width, height, waveProfile) : null;
+      if (waveRig) warnings.push('已加入抬手过渡和连续挥手关键形态；动作需通过 CMO3 原生导出后运行。');
       if (!parsed.layers.length || parsed.layers.length > 120)
         throw new Error('PSD 需要包含 1–120 个有效图层。');
       // Keep hidden PSD layers: they are alternate action/expression parts.
@@ -202,6 +211,7 @@ export async function generateCubism(
           return !sourceVariant || activeVariantPartNames.has(layer.name);
         })
         .map(layer => cleanRigLayer(layer));
+      warnings.push(...cleaned.map(entry => entry.audit.warning).filter(Boolean));
       let layers = cleaned.map(entry => entry.layer);
       const candidates = [
         'handwear',
@@ -299,12 +309,18 @@ export async function generateCubism(
         layers,
         ids,
         () => crypto.randomUUID(),
-        { lowerBodyRigReady: normalization.lowerBodyRigReady },
+        {
+          lowerBodyRigReady: normalization.lowerBodyRigReady,
+          combinedArmAlternates: variantManifest.variants.some((variant) =>
+            variant.parts.some((part) => part.slot === 'handwear'),
+          ),
+        },
       );
       project = {
         version: 1,
         canvas: { width, height },
         autoRigDiagnostics: poseDiagnostics,
+        waveRig,
         autoRigPreflight: { version: 3, layers: cleaned.map(entry => entry.audit), normalization: normalization.audit, meshes: [] },
         autoRigAnchors: { head: skeleton.headBase },
         textures: [],
@@ -326,6 +342,7 @@ export async function generateCubism(
           .map((variant) => ({
             id: 'ParamActionWave',
             name: 'Action: Wave',
+            min: 0, max: waveRig ? 3 : 1,
             variantId: variant.id,
             baseSlots: variant.parts.map((part) => part.slot),
           })),
@@ -376,36 +393,35 @@ export async function generateCubism(
         tile.height = layer.height;
         tile.getContext('2d').putImageData(layer.imageData, 0, 0);
         canvas.getContext('2d').drawImage(tile, layer.x, layer.y);
+        const waveSlot = layer.name.startsWith(`${WAVE_VARIANT}__`) ? layer.name.slice(WAVE_VARIANT.length + 2) : layer.name;
+        const isWaveMesh = !!waveRig?.slots[waveSlot];
         const mesh = generateMesh(
           canvas.getContext('2d').getImageData(0, 0, width, height).data,
           width,
           height,
-          { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1 },
+          { alphaThreshold: 1, gridSpacing: Math.max(6, Math.min(24, Math.min(layer.width, layer.height) / 5)), edgePadding: Math.min(8, Math.min(layer.width, layer.height) / 8), seed: i + 1, ...(isWaveMesh ? WAVE_MESH_OPTIONS : {}) },
         );
+        if (isWaveMesh) trimWaveMesh(mesh, canvas.getContext('2d').getImageData(0, 0, width, height).data, width);
         assertRigMesh(mesh, layer, width, height);
-        const tag = matchTag(layer.name);
-        const limb = tag === 'handwear-l' ? { side: 'l', joint: 'leftElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
-          : tag === 'handwear-r' ? { side: 'r', joint: 'rightElbow', pivot: 'Elbow', endpoint: 'Wrist', label: '肘部' }
-          : tag === 'legwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
-          : tag === 'legwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部' }
-          : tag === 'footwear-l' ? { side: 'l', joint: 'leftKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
-          : tag === 'footwear-r' ? { side: 'r', joint: 'rightKnee', pivot: 'Knee', endpoint: 'Ankle', label: '膝部（鞋随小腿）' }
-          : null;
-        if (limb && isInitiallyVisible(layer)) {
-          const joint = groupDefs.find(group => group.boneRole === limb.joint);
-          if (joint) {
-            mesh.jointBoneId = joint.id;
-            mesh.boneWeights = limbWeights(mesh.vertices, skeleton[limb.side + limb.pivot], skeleton[limb.side + limb.endpoint]);
-            const minWeight = Math.min(...mesh.boneWeights);
-            const maxWeight = Math.max(...mesh.boneWeights);
-            // Shoes are wholly below the knee/ankle segment, so every vertex
-            // should follow that segment.  A leg/arm mesh instead needs a
-            // spread of weights across its joint to make an actual bend.
-            const isFootwear = tag === 'footwear-l' || tag === 'footwear-r';
-            if (isFootwear ? minWeight < 0.8 : minWeight > 0.15 || maxWeight < 0.75)
-              throw Error(`${layer.name} ${limb.label}权重没有同时覆盖关节两侧，已拦截导出`);
-          }
-        }
+        const variant = variantByPart.get(layer.name);
+        const slot = variant?.parts.find(part => part.name === layer.name)?.slot;
+        const binding = resolveVariantLayerBinding({
+          slot,
+          layers,
+          assignments,
+          groupDefs,
+          layerIndex: i,
+        });
+        if (binding.error) throw Error(`${layer.name} ${binding.error}`);
+        const tag = matchTag(binding.semanticTag ?? layer.name);
+        // Alternative artwork inherits the canonical limb's ancestors. Its
+        // own elbow requires pose-specific anchors; never skin a raised arm
+        // with the neutral arm's elbow coordinates.
+        if (slot && (tag === 'handwear-l' || tag === 'handwear-r'))
+          warnings.push(`${layer.name} 已继承基础手臂父级，但未配置该姿势的独立肘点；此替换姿势暂不追加屈肘。`);
+        if (binding.combinedArmState)
+          warnings.push(`${layer.name} 是双臂合成动作层，已绑定到 torso 跟随的 bothArms；该状态不追加单侧屈肘。`);
+        if (isInitiallyVisible(layer)) bindLimbMesh(mesh, tag, skeleton, groupDefs);
         project.autoRigPreflight.meshes.push({ name:layer.name, tag, vertices:mesh.vertices.length, triangles:mesh.triangles.length, bounds:{x:layer.x,y:layer.y,width:layer.width,height:layer.height}, jointBoneId:mesh.jointBoneId ?? null, weightRange: mesh.boneWeights ? { min:Math.min(...mesh.boneWeights), max:Math.max(...mesh.boneWeights) } : null });
         const source = URL.createObjectURL(await png(canvas));
         urls.push(source);
@@ -414,8 +430,9 @@ export async function generateCubism(
           id: ids[i],
           type: 'part',
           name: layer.name,
+          semanticTag: tag,
           textureId: ids[i],
-          parent: assignments.get(i)?.parentGroupId ?? null,
+          parent: binding.parentGroupId,
           draw_order: assignments.get(i)?.drawOrder ?? layers.length - 1 - i,
           visible: true,
           opacity: isInitiallyVisible(layer) ? layer.opacity : 0,
@@ -488,6 +505,7 @@ export async function generateCubism(
     const report = {
       engine: ENGINE_VERSION,
       source: file.name,
+      psdQuality,
       meshCount: project.nodes.filter((node) => node.type === 'part').length,
       autoRigDiagnostics: project.autoRigDiagnostics ?? null,
       autoRigPreflight: project.autoRigPreflight ?? null,

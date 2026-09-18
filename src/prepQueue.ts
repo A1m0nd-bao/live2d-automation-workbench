@@ -3,7 +3,8 @@ import type { Live2dPrepProvider } from './live2dPrep';
 
 export type PrepJob = {
   id: string; name: string; provider: Live2dPrepProvider;
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'uncertain';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'uncertain' | 'needs-review';
+  quality?: {version?: string; status: string; reasons?: string[]};
   message: string; created_at: number; updated_at: number;
 };
 
@@ -15,7 +16,7 @@ export async function prepRequest<T>(path: string, body?: FormData): Promise<T> 
     response = await fetch(`${config.relayUrl}/prep${path}`, {
       method: body ? 'POST' : 'GET', body,
       headers: { 'X-Morph-Device-Token': config.deviceToken },
-      signal: AbortSignal.timeout(body ? 30_000 : 15_000),
+      signal: AbortSignal.timeout(path.endsWith('/review') ? 150_000 : body ? 30_000 : 15_000),
       cache: 'no-store',
     });
   } catch {
@@ -37,7 +38,10 @@ export async function submitPrep(jobId: string, image: File, provider: Live2dPre
   return prepRequest<PrepJob>('/jobs', form);
 }
 
-export function recoverPrepState<T extends { prepJobId?: string; prepState?: string; prepMessage?: string }>(task: T): T {
+export function recoverPrepState<T extends { prepJobId?: string; prepState?: string; prepMessage?: string; remoteJobId?: string }>(task: T): T {
+  if (task.prepJobId && task.prepState === 'succeeded' && !task.remoteJobId) {
+    return { ...task, prepState: 'queued', prepMessage: '正在核对当前版本的生图检查结果；不会重新生成。' };
+  }
   if (!['queued', 'running', 'connecting'].includes(task.prepState ?? '')) return task;
   return { ...task, prepState: task.prepJobId ? 'queued' : 'failed', prepMessage: task.prepJobId
     ? '正在恢复服务端生图状态；不会重新生成。'

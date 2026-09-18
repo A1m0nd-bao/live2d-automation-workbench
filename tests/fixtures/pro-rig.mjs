@@ -1,0 +1,10 @@
+import fs from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+const root=fileURLToPath(new URL('../../',import.meta.url)).replace(/\/$/,'');
+const {generateCmo3}=await import(root+'/src/vendor/stretchystudio/io/live2d/cmo3writer.js');
+const {buildRawPng}=await import(root+'/src/vendor/stretchystudio/io/live2d/cmo3/pngHelpers.js');
+const texture=buildRawPng(512,512);
+const shapes=[['face',160,60,180,180],['mouth',235,190,30,4],['nose',247,163,7,8],['eyewhite-l',190,125,35,15],['eyewhite-r',275,125,35,15],['irides-l',200,124,12,15],['irides-r',285,124,12,15],['eyelash-l',188,120,40,7],['eyelash-r',273,120,40,7],['neck',233,230,34,40],['topwear',175,266,150,160],['front_hair',150,40,200,60]];
+const meshes=shapes.map(([tag,x,y,w,h],i)=>({partId:tag,name:tag,tag,pngData:texture,vertices:[x,y,x+w,y,x,y+h,x+w,y+h],uvs:[0,0,1,0,0,1,1,1],triangles:[0,1,2,1,3,2],texWidth:512,texHeight:512,drawOrder:tag==='face'?0:i+1}));
+const r=await generateCmo3({canvasW:512,canvasH:512,meshes,modelName:'independent-pro-fixture',generateRig:true,generatePhysics:true});
+await fs.writeFile(process.argv[2],r.cmo3);

@@ -1,0 +1,8 @@
+{
+  "preset": "calm",
+  "motionScale": 0.48,
+  "emotionIntensity": 0.55,
+  "headDelaySeconds": 0.14,
+  "bodyDelaySeconds": 0.24,
+  "blinkIntervalSeconds": [3.6, 6.2]
+}

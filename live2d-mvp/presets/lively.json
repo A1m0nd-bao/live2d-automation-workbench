@@ -1,0 +1,8 @@
+{
+  "preset": "lively",
+  "motionScale": 0.9,
+  "emotionIntensity": 0.95,
+  "headDelaySeconds": 0.06,
+  "bodyDelaySeconds": 0.13,
+  "blinkIntervalSeconds": [2.2, 4.3]
+}

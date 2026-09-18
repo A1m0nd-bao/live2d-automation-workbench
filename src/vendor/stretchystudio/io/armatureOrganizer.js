@@ -275,7 +275,9 @@ export async function getDWPoseSession(onStatus) {
   if (_cachedSessionPromise) return _cachedSessionPromise;
   _cachedSessionPromise = (async () => {
     onStatus?.('首次使用：正在下载 AI 姿态模型…');
-    const response = await fetch(DWPOSE_URL);
+    // Offline/blocked model hosts must not stall the whole native Pro pipeline.
+    // generateCubism already falls back to calibrated layer bounds on failure.
+    const response = await fetch(DWPOSE_URL, { signal: AbortSignal.timeout(45_000) });
     if (!response.ok)
       throw new Error(`DWPose 模型下载失败（${response.status}）。`);
     const payload = await response.arrayBuffer();
@@ -403,7 +405,14 @@ export async function runDWPose(layers, psdW, psdH, onnxSession, onStatus) {
  */
 function applyDWPoseKeypoints(kps, psdW, psdH) {
   function clamp(p) {
-    return { x: Math.max(0, Math.min(psdW, p.x)), y: Math.max(0, Math.min(psdH, p.y)) };
+    // Keep the raw SimCC peak for callers which need to decide whether an
+    // automatically proposed joint should be reviewed.  Existing rig code
+    // only reads x/y, so preserving this diagnostic is backwards compatible.
+    return {
+      x: Math.max(0, Math.min(psdW, p.x)),
+      y: Math.max(0, Math.min(psdH, p.y)),
+      confidence: Number.isFinite(p.conf) ? p.conf : null,
+    };
   }
   const sk = {
     nose:       clamp(kps[0]),
@@ -533,7 +542,11 @@ export function buildArmatureNodes(skeleton, groups, layers, partIds, uidFn, opt
     eyes:      layers.some(l => IRIS_TAGS.has(matchTag(l.name))),
     leftArm:   groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-l')),
     rightArm:  groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-r')),
-    bothArms:  groups.arms === 'merged',
+    // A Pro alternate can author both arms in one raster layer even when the
+    // neutral pose is correctly split left/right. Keep a torso-following
+    // parent for that state; it is not safe to arbitrarily assign it to one
+    // elbow chain.
+    bothArms:  groups.arms === 'merged' || options.combinedArmAlternates === true,
     leftElbow: groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-l')),
     rightElbow:groups.arms === 'split' || (groups.arms === 'partial' && layers.some(l => matchTag(l.name) === 'handwear-r')),
     leftLeg:   lowerBodyRigReady && (groups.legs === 'split' || (groups.legs === 'partial' && layers.some(l => matchTag(l.name) === 'legwear-l'))),

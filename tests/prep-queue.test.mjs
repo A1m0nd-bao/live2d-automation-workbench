@@ -26,6 +26,8 @@ test('refresh converts stale legacy spinner to actionable failure', () => {
   assert.equal(durable.prepState, 'queued');
   assert.match(durable.prepMessage, /不会重新生成/);
   assert.equal(api.recoverPrepState({ prepState: 'needs-review' }).prepState, 'needs-review');
+  assert.equal(api.recoverPrepState({ prepState: 'succeeded', prepJobId: 'a'.repeat(32) }).prepState, 'queued');
+  assert.equal(api.recoverPrepState({ prepState: 'succeeded', prepJobId: 'a'.repeat(32), remoteJobId: 'existing' }).prepState, 'succeeded');
 });
 
 test('upload uses one stable ID, chosen provider and device token, no login or provider key', async () => {

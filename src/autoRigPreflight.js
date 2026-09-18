@@ -73,12 +73,26 @@ export function cleanRigLayer(layer, { seedAlpha = 32, edgeRadius = 3 } = {}) {
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
-  if (maxX < minX) throw Error(`${layer.name} 清理后没有有效区域`);
   // Large changes need a person to distinguish noise from intentional translucency.
   // A million alpha=1 background pixels must not outweigh a small real mouth.
   // Guard visible (>8/255) artwork separately from quantified near-zero haze.
-  if (visibleRemovedMass / Math.max(1, visibleMass) > 0.15)
-    throw Error(`${layer.name} 清理将影响超过 15% 的可见 Alpha 总量，需核查原图层，未自动删除`);
+  const proposedVisibleRemovedFraction = visibleRemovedMass / Math.max(1, visibleMass);
+  const cleanupSkipped = proposedVisibleRemovedFraction > 0.15 || maxX < minX;
+  let warning = null;
+  if (cleanupSkipped) {
+    warning = `${layer.name} 自动清理可能影响原有细节（预计移除 ${(proposedVisibleRemovedFraction * 100).toFixed(1)}% 的可见 Alpha），已跳过清理并保留全部非透明像素，请复核图层边界`;
+    // Crop only fully transparent margins; never discard ambiguous artwork.
+    support.fill(1);
+    minX = w; minY = h; maxX = -1; maxY = -1;
+    for (let i = 0; i < w * h; i++) {
+      if (!data[i * 4 + 3]) continue;
+      const x = i % w, y = Math.floor(i / w);
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    }
+    removedPixels = 0; removedMass = 0; visibleRemovedMass = 0;
+    rejectedBorderSeeds = 0;
+  }
   const width = maxX - minX + 1, height = maxY - minY + 1;
   const cropped = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -89,6 +103,7 @@ export function cleanRigLayer(layer, { seedAlpha = 32, edgeRadius = 3 } = {}) {
     ? new ImageData(cropped, width, height) : { data: cropped, width, height };
   const cleaned = { ...layer, x: (layer.x ?? 0) + minX, y: (layer.y ?? 0) + minY, width, height, imageData };
   return { layer: cleaned, audit: { name: layer.name, threshold, edgeRadius,
+    cleanupSkipped, warning, proposedVisibleRemovedFraction,
     beforePixels, removedPixels, rejectedBorderSeeds, removedAlphaFraction: removedMass / beforeMass,
     visibleRemovedFraction: visibleRemovedMass / Math.max(1, visibleMass),
     bounds: { x: cleaned.x, y: cleaned.y, width, height }, translucent: maxAlpha < seedAlpha } };
@@ -161,12 +176,34 @@ export function assertRigMesh(mesh, layer, w, h) {
   }
 }
 
-export function limbWeights(vertices, pivot, endpoint) {
+export function limbWeights(vertices, pivot, endpoint, transitionFraction = 1) {
   const dx = endpoint.x - pivot.x, dy = endpoint.y - pivot.y;
   const length2 = dx * dx + dy * dy;
   if (length2 < 4) throw Error('肢体关节点重合，无法生成权重');
   return vertices.map(v => {
-    const t = Math.max(0, Math.min(1, ((v.x - pivot.x) * dx + (v.y - pivot.y) * dy) / length2));
+    const t = Math.max(0, Math.min(1, ((v.x - pivot.x) * dx + (v.y - pivot.y) * dy) / (length2 * transitionFraction)));
     return t * t * (3 - 2 * t);
   });
+}
+
+// Use the same spatial weight field for a leg and its shoe. Past the short
+// joint transition the lower limb moves rigidly, preserving ankle overlap.
+export function bindLimbMesh(mesh, tag, skeleton, groups) {
+  const match = /^(handwear|legwear|footwear)-([lr])$/.exec(tag ?? '');
+  if (!match) return null;
+  const [, part, side] = match;
+  const arm = part === 'handwear', foot = part === 'footwear';
+  const role = (side === 'l' ? 'left' : 'right') + (arm ? 'Elbow' : 'Knee');
+  const joint = groups.find(group => group.boneRole === role);
+  if (!joint) return null;
+  const pivot = skeleton[side + (arm ? 'Elbow' : 'Knee')];
+  const end = skeleton[side + (arm ? 'Wrist' : 'Ankle')];
+  const weights = limbWeights(mesh.vertices, pivot, end, 0.3);
+  const min = Math.min(...weights), max = Math.max(...weights);
+  if (foot ? min < 0.95 : min > 0.15 || max < 0.95)
+    throw Error(`${tag} 关节权重范围异常 (${min.toFixed(2)}–${max.toFixed(2)})，需检查关节点`);
+  mesh.jointBoneId = joint.id;
+  mesh.boneWeights = weights;
+  mesh.jointPivot = { ...pivot };
+  return { role, min, max };
 }

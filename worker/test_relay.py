@@ -16,6 +16,55 @@ spec.loader.exec_module(relay)
 
 
 class RelayTests(unittest.TestCase):
+    def test_foreground_failure_never_submits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(relay, 'DATA_ROOT', root), patch.object(relay, 'DB_PATH', root / 'jobs.db'):
+                relay.init_db()
+                (root / 'test').mkdir()
+                (root / 'test/source').write_bytes(b'original')
+                with relay.db() as db:
+                    db.execute("INSERT INTO jobs (id,name,status,message) VALUES ('test','test','queued','new')")
+                with patch.object(relay, 'prepare_foreground', new=AsyncMock(side_effect=TimeoutError())), patch.object(relay.httpx, 'AsyncClient') as upstream:
+                    asyncio.run(relay.monitor('test'))
+                    upstream.assert_not_called()
+                self.assertEqual(relay.get_job('test').status, 'failed')
+                self.assertEqual(relay.get_job('test').attempts, 0)
+                self.assertEqual((root / 'test/source').read_bytes(), b'original')
+
+    def test_legacy_jobs_bypass_cutout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(relay, 'DATA_ROOT', Path(directory)), patch.object(relay.asyncio, 'create_subprocess_exec') as spawn:
+                self.assertEqual(asyncio.run(relay.prepare_foreground('old')), Path(directory) / 'old/source')
+                spawn.assert_not_called()
+
+    def test_foreground_timeout_kills_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'test').mkdir()
+            (root / 'test/foreground-request.json').write_text('{}')
+            from unittest.mock import MagicMock
+            child = MagicMock(returncode=None)
+            child.communicate = AsyncMock(side_effect=TimeoutError())
+            child.wait = AsyncMock()
+            with patch.object(relay, 'DATA_ROOT', root), patch.object(relay, 'update_job'), patch.object(relay, 'record_event'), patch.object(relay.asyncio, 'create_subprocess_exec', new=AsyncMock(return_value=child)):
+                with self.assertRaises(TimeoutError):
+                    asyncio.run(relay.prepare_foreground('test'))
+            child.kill.assert_called_once()
+            child.wait.assert_awaited_once()
+
+    def test_completed_foreground_reused_after_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'test/cutout').mkdir(parents=True)
+            (root / 'test/foreground-request.json').write_text('{}')
+            (root / 'test/cutout/report.json').write_text('{}')
+            target = root / 'test/cutout/submission.png'
+            target.write_bytes(b'prepared')
+            with patch.object(relay, 'DATA_ROOT', root), patch.object(relay.asyncio, 'create_subprocess_exec') as spawn:
+                self.assertEqual(asyncio.run(relay.prepare_foreground('test')), target)
+                spawn.assert_not_called()
+
     def exercise(self, event, download=b'8BPS\x00\x01' + bytes(30)):
         requests = []
         def handler(request):

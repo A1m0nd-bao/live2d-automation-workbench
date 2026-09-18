@@ -1,3 +1,4 @@
+import { buildWaveAction, buildWaveMotions } from '../../../../waveRig.js';
 /**
  * Main Live2D export orchestrator.
  *
@@ -172,6 +173,7 @@ export async function exportLive2D(project, images, opts = {}) {
  * @param {object} opts
  * @param {string} [opts.modelName='model']
  * @param {boolean} [opts.generateRig=false] - Generate standard Live2D rig (warp deformers, standard params)
+ * @param {'legacy'|'volume-v2'} [opts.headVolume='legacy'] - Candidate head volume; requires per-character acceptance.
  * @param {boolean} [opts.generatePhysics] - Emit CPhysicsSettingsSourceSet (hair + clothing pendulums). Defaults to `generateRig`.
  * @param {string[]} [opts.physicsDisabledCategories] - Category names to SUPPRESS (e.g. ['hair'] for buzz-cut characters).
  * @param {function} [opts.onProgress]
@@ -181,6 +183,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
   const {
     modelName = 'model',
     generateRig = false,
+    headVolume = 'legacy',
     generatePhysics = generateRig,
     physicsDisabledCategories = null,
     onProgress = () => {},
@@ -266,6 +269,10 @@ export async function exportLive2DProject(project, images, opts = {}) {
         jointPivotX = jointBone.transform.pivotX ?? 0;
         jointPivotY = jointBone.transform.pivotY ?? 0;
       }
+      if (mesh.jointPivot) {
+        jointPivotX = mesh.jointPivot.x;
+        jointPivotY = mesh.jointPivot.y;
+      }
     }
 
     // Walk up the ancestor chain to find the nearest warpDeformer ancestor (if any).
@@ -298,7 +305,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
 
     meshes.push({
       name: meshName,
-      tag: matchTag(meshName),
+      tag: part.semanticTag ?? matchTag(meshName),
       partId: part.id,
       parentGroupId: part.parent ?? null,
       warpDeformerParentId,
@@ -314,11 +321,11 @@ export async function exportLive2DProject(project, images, opts = {}) {
       pngData,
       texWidth: canvasW,
       texHeight: canvasH,
-      actionSwitch: actionSwitch && actionState ? {
+      actionSwitch: buildWaveAction(vertices, project.waveRig, meshName) ?? (actionSwitch && actionState ? {
         id: actionSwitch.id,
         name: actionSwitch.name,
         state: actionState,
-      } : null,
+      } : null),
       limbBend,
     });
   }
@@ -348,6 +355,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     animations: project.animations ?? [],
     modelName,
     generateRig,
+    headVolume,
     generatePhysics,
     physicsDisabledCategories,
     physicsRules: project.physicsRules ?? [],
@@ -362,11 +370,16 @@ export async function exportLive2DProject(project, images, opts = {}) {
   const hasRigDebug = !!rigDebugLog;
 
   // Bundle into ZIP if we have animations OR a rig debug log (Phase 0 diagnostic).
-  if (hasAnimations || hasRigDebug) {
+  if (hasAnimations || hasRigDebug || project.waveRig) {
     const cmo3FileName = `${modelName}.cmo3`;
     const { default: JSZip } = await import('jszip');
     const zip = new JSZip();
     zip.file(cmo3FileName, cmo3);
+    if (project.waveRig) {
+      zip.file('wave-rig-profile.json', JSON.stringify(project.waveRig, null, 2));
+      for (const [name, motion] of Object.entries(buildWaveMotions()))
+        zip.file(`motion/${name}.motion3.json`, JSON.stringify(motion, null, 2));
+    }
 
     if (hasAnimations) {
       onProgress('Generating .can3 animation...');
