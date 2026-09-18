@@ -23,9 +23,32 @@ test('detached real details and uniformly translucent parts survive',()=>{
   const faint=layer('veil');for(let y=20;y<50;y++)for(let x=20;x<50;x++)pixel(faint,x,y,20);
   const c=cleanRigLayer(faint);assert.equal(c.audit.removedPixels,0);assert.equal(c.audit.translucent,true);
 });
-test('large ambiguous alpha deletion is blocked rather than silently erasing art',()=>{
+test('large ambiguous alpha deletion preserves artwork and reports a warning',()=>{
   const l=layer();for(let y=0;y<100;y++)for(let x=0;x<100;x++)pixel(l,x,y,20);pixel(l,50,50,255);
-  assert.throws(()=>cleanRigLayer(l),/15%/);
+  const original = l.imageData.data.slice();
+  const {layer:c,audit}=cleanRigLayer(l);
+  assert.equal(audit.cleanupSkipped,true);
+  assert.ok(audit.proposedVisibleRemovedFraction>0.15);
+  assert.match(audit.warning,/已跳过清理/);
+  assert.equal(audit.removedPixels,0);
+  assert.equal(audit.visibleRemovedFraction,0);
+  assert.equal(audit.removedAlphaFraction,0);
+  assert.deepEqual(c.imageData.data,original);
+  assert.deepEqual(l.imageData.data,original);
+});
+test('ambiguous nose keeps faint details and crops only fully transparent margins',()=>{
+  const l=layer('nose');l.x=12;l.y=25;
+  for(let y=20;y<40;y++)for(let x=30;x<50;x++)pixel(l,x,y,20);
+  pixel(l,40,30,255);
+  const {layer:c,audit}=cleanRigLayer(l);
+  assert.equal(audit.cleanupSkipped,true);
+  assert.deepEqual(audit.bounds,{x:42,y:45,width:20,height:20});
+  for(let y=0;y<20;y++)for(let x=0;x<20;x++)
+    assert.deepEqual(c.imageData.data.slice((y*20+x)*4,(y*20+x+1)*4),
+      l.imageData.data.slice(((y+20)*100+x+30)*4,((y+20)*100+x+31)*4));
+});
+test('empty layers remain invalid',()=>{
+  assert.throws(()=>cleanRigLayer(layer('nose')),/没有有效像素/);
 });
 test('full-canvas near-zero haze and isolated edge specks do not enlarge a small feature',()=>{
   const l=layer('nose');

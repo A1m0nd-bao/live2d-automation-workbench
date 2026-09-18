@@ -73,12 +73,26 @@ export function cleanRigLayer(layer, { seedAlpha = 32, edgeRadius = 3 } = {}) {
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
-  if (maxX < minX) throw Error(`${layer.name} 清理后没有有效区域`);
   // Large changes need a person to distinguish noise from intentional translucency.
   // A million alpha=1 background pixels must not outweigh a small real mouth.
   // Guard visible (>8/255) artwork separately from quantified near-zero haze.
-  if (visibleRemovedMass / Math.max(1, visibleMass) > 0.15)
-    throw Error(`${layer.name} 清理将影响超过 15% 的可见 Alpha 总量，需核查原图层，未自动删除`);
+  const proposedVisibleRemovedFraction = visibleRemovedMass / Math.max(1, visibleMass);
+  const cleanupSkipped = proposedVisibleRemovedFraction > 0.15 || maxX < minX;
+  let warning = null;
+  if (cleanupSkipped) {
+    warning = `${layer.name} 自动清理可能影响原有细节（预计移除 ${(proposedVisibleRemovedFraction * 100).toFixed(1)}% 的可见 Alpha），已跳过清理并保留全部非透明像素，请复核图层边界`;
+    // Crop only fully transparent margins; never discard ambiguous artwork.
+    support.fill(1);
+    minX = w; minY = h; maxX = -1; maxY = -1;
+    for (let i = 0; i < w * h; i++) {
+      if (!data[i * 4 + 3]) continue;
+      const x = i % w, y = Math.floor(i / w);
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    }
+    removedPixels = 0; removedMass = 0; visibleRemovedMass = 0;
+    rejectedBorderSeeds = 0;
+  }
   const width = maxX - minX + 1, height = maxY - minY + 1;
   const cropped = new Uint8ClampedArray(width * height * 4);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
@@ -89,6 +103,7 @@ export function cleanRigLayer(layer, { seedAlpha = 32, edgeRadius = 3 } = {}) {
     ? new ImageData(cropped, width, height) : { data: cropped, width, height };
   const cleaned = { ...layer, x: (layer.x ?? 0) + minX, y: (layer.y ?? 0) + minY, width, height, imageData };
   return { layer: cleaned, audit: { name: layer.name, threshold, edgeRadius,
+    cleanupSkipped, warning, proposedVisibleRemovedFraction,
     beforePixels, removedPixels, rejectedBorderSeeds, removedAlphaFraction: removedMass / beforeMass,
     visibleRemovedFraction: visibleRemovedMass / Math.max(1, visibleMass),
     bounds: { x: cleaned.x, y: cleaned.y, width, height }, translucent: maxAlpha < seedAlpha } };

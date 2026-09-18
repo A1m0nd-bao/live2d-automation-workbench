@@ -41,6 +41,8 @@ import { NativeRuntimeViewer } from './NativeRuntimeViewer';
 import { compileNative } from './nativeExport';
 import './production.css';
 
+const WaveWorkbench = lazy(() => import('./WaveWorkbench.jsx'));
+
 type Task = {
   id: string;
   name: string;
@@ -270,6 +272,12 @@ export default function App() {
   return isPreview ? <Suspense fallback={<p>正在加载预览器…</p>}><RuntimePreviewPage /></Suspense> : <WorkbenchApp />;
 }
 function WorkbenchApp() {
+  const [waveOpen, setWaveOpen] = useState(false);
+  useEffect(() => {
+    const sync = () => setWaveOpen(window.location.hash === '#wave');
+    sync(); window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
   const [tasks, setTasks] = useState<Task[]>([]),
     [hydrated, setHydrated] = useState(false);
   const [selected, setSelected] = useState(''),
@@ -987,6 +995,9 @@ function WorkbenchApp() {
         inputKind: k,
       });
   }
+  if (waveOpen) return <Suspense fallback={<p style={{ padding: 32 }}>加载挥手工作台…</p>}>
+    <WaveWorkbench onBack={() => { window.location.hash = ''; setWaveOpen(false); }} />
+  </Suspense>;
   return (
     <main className="app-shell">
       <aside className="side-rail">
@@ -1000,6 +1011,9 @@ function WorkbenchApp() {
         </button>
         <nav className="main-nav">
           <a className="nav-item" href="?page=preview"><Box size={18} />角色交互预览</a>
+          <button className="nav-item" onClick={() => { window.location.hash = 'wave'; setWaveOpen(true); }}>
+            <WandSparkles size={18} />挥手动作实验室
+          </button>
           <button className="nav-item active" onClick={() => setSelected('')}>
             <FolderOpen size={18} />
             生产任务
