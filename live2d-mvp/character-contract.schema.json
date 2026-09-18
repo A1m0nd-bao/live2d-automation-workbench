@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Live2D MVP Character Contract",
+  "description": "Small, per-character configuration used by a reusable Live2D motion pipeline.",
+  "type": "object",
+  "required": ["version", "character", "style", "motion", "parameterMap"],
+  "properties": {
+    "version": { "const": 1 },
+    "character": {
+      "type": "object",
+      "required": ["id", "sourceModel"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "sourceModel": { "type": "string", "minLength": 1 }
+      }
+    },
+    "style": {
+      "type": "object",
+      "required": ["preset", "motionScale", "emotionIntensity"],
+      "properties": {
+        "preset": { "enum": ["gentle", "lively", "calm"] },
+        "motionScale": { "type": "number", "minimum": 0.3, "maximum": 1.2 },
+        "emotionIntensity": { "type": "number", "minimum": 0.3, "maximum": 1.2 },
+        "headDelaySeconds": { "type": "number", "minimum": 0, "maximum": 0.3 },
+        "bodyDelaySeconds": { "type": "number", "minimum": 0, "maximum": 0.5 },
+        "blinkIntervalSeconds": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": { "type": "number", "minimum": 1.5, "maximum": 8 }
+        }
+      }
+    },
+    "motion": {
+      "type": "object",
+      "required": ["allowedActions", "allowPhysics"],
+      "properties": {
+        "allowedActions": {
+          "type": "array",
+          "items": { "enum": ["idle", "blink", "talk", "nod", "shake", "happy", "thinking", "surprised", "shy"] }
+        },
+        "allowPhysics": { "type": "boolean" }
+      }
+    },
+    "parameterMap": {
+      "type": "object",
+      "description": "Canonical role to concrete Cubism parameter ID. Null means unavailable.",
+      "additionalProperties": { "type": ["string", "null"] }
+    }
+  },
+  "additionalProperties": false
+}

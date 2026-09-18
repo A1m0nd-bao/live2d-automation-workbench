@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "character": {
+    "id": "hiyori_pro_t11",
+    "sourceModel": "../hiyori-motion-demo/repo/models/hiyori_pro_t11/hiyori_pro_t11.model3.json"
+  },
+  "style": {
+    "preset": "gentle",
+    "motionScale": 0.65,
+    "emotionIntensity": 0.7,
+    "headDelaySeconds": 0.1,
+    "bodyDelaySeconds": 0.18,
+    "blinkIntervalSeconds": [2.8, 5.2]
+  },
+  "motion": {
+    "allowedActions": ["idle", "blink", "talk", "nod", "shake", "happy", "thinking", "surprised", "shy"],
+    "allowPhysics": true
+  },
+  "parameterMap": {
+    "headYaw": "ParamAngleX",
+    "headPitch": "ParamAngleY",
+    "headRoll": "ParamAngleZ",
+    "bodyYaw": "ParamBodyAngleX",
+    "bodyPitch": "ParamBodyAngleY",
+    "bodyRoll": "ParamBodyAngleZ",
+    "eyeLeftOpen": "ParamEyeLOpen",
+    "eyeRightOpen": "ParamEyeROpen",
+    "eyeBallX": "ParamEyeBallX",
+    "eyeBallY": "ParamEyeBallY",
+    "browLeftY": "ParamBrowLY",
+    "browRightY": "ParamBrowRY",
+    "mouthOpen": "ParamMouthOpenY",
+    "mouthForm": "ParamMouthForm",
+    "breath": "ParamBreath",
+    "cheek": "ParamCheek"
+  }
+}

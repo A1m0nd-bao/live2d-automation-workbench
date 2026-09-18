@@ -3,6 +3,8 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
+import sys
 from pathlib import Path
 import zipfile
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -11,7 +13,7 @@ from fastapi.responses import FileResponse
 
 class NativeExport:
     def __init__(self, root, authorize):
-        self.root = Path(root) / 'native-export'
+        self.root = Path(root).resolve() / 'native-export'
         self.root.mkdir(parents=True, exist_ok=True)
         self.authorize = authorize
         self.router = APIRouter(prefix='/native-export')
@@ -20,10 +22,17 @@ class NativeExport:
         self.java = os.environ.get('MORPH_EXPORT_JAVA', '')
         self.classes = os.environ.get('MORPH_EXPORT_CLASSES', '')
         self.libs = os.environ.get('MORPH_CUBISM_LIBS', '')
+        self.node = os.environ.get('MORPH_EXPORT_NODE', '') or shutil.which('node')
+        self.core = os.environ.get('MORPH_CUBISM_WEB_CORE', '')
+        self.pro_scripts = Path(__file__).resolve().parents[2] / 'scripts' / 'pro-rig'
 
         @self.router.post('/jobs')
-        async def submit(request: Request, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+        async def submit(request: Request, profile: str = 'standard', x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
             authorize(x_relay_token, x_morph_device_token)
+            if profile not in ('standard', 'pro-rig-v1'):
+                raise HTTPException(400, '未知原生绑定流程')
+            if profile == 'pro-rig-v1' and (not self.node or not self.core or not Path(self.core).is_file()):
+                raise HTTPException(503, 'Pro 绑定需要本机 Node 与 MORPH_CUBISM_WEB_CORE（官方 Web Core 文件）；原工程已保留')
             if not all(Path(p).exists() for p in [self.java, self.classes, self.libs]) or not self.java:
                 raise HTTPException(503, '本机原生导出器尚未配置')
             data = bytearray()
@@ -33,11 +42,12 @@ class NativeExport:
                     raise HTTPException(413, 'CMO3 超过 200 MB')
             if data[:4] != b'CAFF':
                 raise HTTPException(400, '需要真实 CMO3 文件')
-            job = hashlib.sha256(data).hexdigest()
+            job = hashlib.sha256(data if profile == 'standard' else profile.encode() + b'\0' + data).hexdigest()
             folder = self.root / job
             if not folder.exists():
                 folder.mkdir()
                 (folder / 'input.cmo3').write_bytes(data)
+                (folder / 'options.json').write_text(json.dumps({'profile': profile}))
                 self.save(job, 'queued', '等待原生编译')
             status = self.read(job)
             if status['status'] in ('queued', 'running'):
@@ -62,7 +72,10 @@ class NativeExport:
         p = self.root / job / 'status.json'
         if not p.exists():
             raise HTTPException(404, '任务不存在')
-        return json.loads(p.read_text())
+        result = json.loads(p.read_text())
+        options = p.parent / 'options.json'
+        result['profile'] = json.loads(options.read_text())['profile'] if options.exists() else 'standard'
+        return result
 
     def save(self, job, status, message):
         p = self.root / job / 'status.json'
@@ -93,12 +106,27 @@ class NativeExport:
             process = None
             self.save(job, 'running', '原生编译与 Core 参数检查中')
             try:
+                profile = self.read(job)['profile']
+                source = directory / 'input.cmo3'
+                if profile == 'pro-rig-v1':
+                    self.save(job, 'running', 'Pro：定位独立嘴部、绑定原生嘴型并核查九向关键形态')
+                    donor = directory / 'mouth-donor'
+                    if donor.exists():
+                        shutil.rmtree(donor)  # Only this job's disposable generated donor.
+                    for name in ('enhanced.cmo3', 'enhanced.integration.json', 'pro-verification.json'):
+                        (directory / name).unlink(missing_ok=True)
+                    await self.command(directory, self.node, str(self.pro_scripts / 'build-mouth.mjs'), str(donor))
+                    await self.command(directory, sys.executable, str(self.pro_scripts / 'integrate.py'), 'pro', str(source), str(donor), str(directory / 'enhanced.cmo3'))
+                    baseline = directory / 'baseline'
+                    baseline.mkdir(exist_ok=True)
+                    await self.compile(directory, source, baseline / 'model.moc3')
+                    source = directory / 'enhanced.cmo3'
                 with (directory / 'compiler.log').open('wb') as log:
                     process = await asyncio.create_subprocess_exec(
                         self.java, '-Xmx2g', '-Djava.awt.headless=true', f'-Djava.library.path={self.libs}',
                         f'-DlogsFilePath={directory / "logs"}', f'-DlogFilename={directory / "native.log"}',
                         '-cp', self.classes + os.pathsep + self.libs + '/*', 'autolive2d.bridge.ArchiveExportBridge',
-                        str(directory / 'input.cmo3'), str(directory / 'model.moc3'), str(directory / 'progress.txt'),
+                        str(source), str(directory / 'model.moc3'), str(directory / 'progress.txt'),
                         cwd=directory, stdout=log, stderr=log)
                     await asyncio.wait_for(process.wait(), 240)
                 report = json.loads((directory / 'model.moc3.report.json').read_text())
@@ -112,13 +140,23 @@ class NativeExport:
                 textures = [f'texture_{i}.png' for i in range(report['textureCount'])]
                 manifest = dict(Version=3, FileReferences=dict(Moc='model.moc3', Textures=textures), Groups=[dict(Target='Parameter', Name='EyeBlink', Ids=['ParamEyeLOpen', 'ParamEyeROpen']), dict(Target='Parameter', Name='LipSync', Ids=['ParamMouthOpenY'])])
                 (directory / 'model.model3.json').write_text(json.dumps(manifest))
+                extra = []
+                if profile == 'pro-rig-v1':
+                    self.save(job, 'running', 'Pro：检查九向 × 张嘴 × 嘴型 × 眨眼的 2700 组组合')
+                    await self.command(directory, self.node, str(self.pro_scripts / 'verify.mjs'), self.core,
+                                       str(directory / 'baseline/model.moc3'), str(directory / 'model.moc3'),
+                                       str(directory / 'enhanced.integration.json'), str(directory / 'pro-verification.json'))
+                    qa = json.loads((directory / 'pro-verification.json').read_text())
+                    if qa.get('status') != 'passed' or qa.get('sampledCombinations') != 2700:
+                        raise RuntimeError('Pro 组合检查未通过')
+                    extra = ['enhanced.cmo3', 'enhanced.integration.json', 'pro-verification.json']
                 with zipfile.ZipFile(directory / 'runtime.tmp', 'w', zipfile.ZIP_DEFLATED) as archive:
-                    for name in ['model.moc3', 'model.model3.json', 'model.moc3.report.json', *textures]:
+                    for name in ['model.moc3', 'model.model3.json', 'model.moc3.report.json', *textures, *extra]:
                         if not (directory / name).stat().st_size:
                             raise RuntimeError('产物为空')
                         archive.write(directory / name, name)
                 (directory / 'runtime.tmp').replace(directory / 'runtime.zip')
-                self.save(job, 'succeeded', '原生运行包已生成，Core 检查通过；视觉效果请在预览中确认')
+                self.save(job, 'succeeded', 'Pro 嘴部、九向与原生导出完成，2700 组检查通过；待视觉验收' if profile == 'pro-rig-v1' else '原生运行包已生成，Core 检查通过；视觉效果请在预览中确认')
             except asyncio.CancelledError:
                 self.save(job, 'queued', '服务重启后继续编译')
                 raise
@@ -128,3 +166,29 @@ class NativeExport:
                 if process and process.returncode is None:
                     process.kill()
                     await process.wait()
+
+    async def command(self, directory, *args):
+        """Bounded local commands; cancellation must also reap the child."""
+        process = None
+        try:
+            with (directory / 'pro-pipeline.log').open('ab') as log:
+                process = await asyncio.create_subprocess_exec(*args, cwd=directory, stdout=log, stderr=log)
+                await asyncio.wait_for(process.wait(), 240)
+            if process.returncode:
+                # The log is local, includes no provider requests or credentials.
+                lines = (directory / 'pro-pipeline.log').read_text(errors='replace').splitlines()
+                detail = next((line for line in reversed(lines) if line.startswith(('ValueError:', 'AssertionError:'))), '请查看本机 pro-pipeline.log')
+                raise RuntimeError(f'Pro 绑定或检查失败：{detail}')
+        finally:
+            if process and process.returncode is None:
+                process.kill()
+                await process.wait()
+
+    async def compile(self, directory, source, destination):
+        await self.command(directory, self.java, '-Xmx2g', '-Djava.awt.headless=true',
+                           f'-Djava.library.path={self.libs}', f'-DlogsFilePath={directory / "logs"}',
+                           f'-DlogFilename={directory / "baseline.log"}', '-cp', self.classes + os.pathsep + self.libs + '/*',
+                           'autolive2d.bridge.ArchiveExportBridge', str(source), str(destination), str(directory / 'baseline-progress.txt'))
+        report = json.loads(Path(str(destination) + '.report.json').read_text())
+        if report.get('status') != 'ok' or not report.get('consistency'):
+            raise RuntimeError('Pro 基线编译失败')
