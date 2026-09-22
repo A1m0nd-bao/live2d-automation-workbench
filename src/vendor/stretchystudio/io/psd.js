@@ -28,7 +28,7 @@ import { applyPsdQuality } from '../../../psdQuality.ts';
  */
 export function importPsd(buffer) {
   const psd = readPsd(buffer, { skipLayerImageData: false, useImageData: true });
-  const quality = applyPsdQuality(psd, psd.children?.some(l => /^(action|expression)_/.test(l.name || '')) ? 'pro' : 'ordinary');
+  const quality = applyPsdQuality(psd, psd.children?.some(l => /^(action|expression)_/.test(l.name || '')) ? 'pro' : 'ordinary', { preserveOrder: true });
 
   const layers = [];
 

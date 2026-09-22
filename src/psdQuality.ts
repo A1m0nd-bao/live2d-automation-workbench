@@ -12,7 +12,7 @@ const isVariant=(s='')=>/^(action|expression)_/.test(s);
 function overlap(a:CleanupLayer,b:CleanupLayer){
   return Math.max(a.left??0,b.left??0)<Math.min(a.right??0,b.right??0)&&Math.max(a.top??0,b.top??0)<Math.min(a.bottom??0,b.bottom??0);
 }
-export function applyPsdQuality(document:{width:number;height:number;children?:CleanupLayer[]},mode:'ordinary'|'pro'='ordinary') {
+export function applyPsdQuality(document:{width:number;height:number;children?:CleanupLayer[]},mode:'ordinary'|'pro'='ordinary',options:{preserveOrder?:boolean}={}) {
  const changed:string[]=[],warnings:string[]=[],issues:string[]=[];
  const rank=new Map(ORDINARY_PSD_STANDARD.order.map((s,i)=>[key(s),i]));
  let nonEmpty=0;const seen:string[]=[];
@@ -41,6 +41,7 @@ export function applyPsdQuality(document:{width:number;height:number;children?:C
   }
   const inverted=edges.filter(([a,b])=>items.indexOf(a)>items.indexOf(b));
   if(!inverted.length)return;
+  if(options.preserveOrder){warnings.push(`${path}: 模板排序建议与源 PSD 不同；已保留源顺序，需人工确认遮挡，不自动重排`);return;}
   if(!safe||candidates.length!==ordinary.length){issues.push(`${path}: 存在遮挡顺序冲突及复杂依赖，保留待修，不退回生成`);return;}
   const remaining=[...ordinary],sorted:CleanupLayer[]=[];
   while(remaining.length){const next=remaining.find(l=>!edges.some(([a,b])=>b===l&&remaining.includes(a)));if(!next){issues.push(`${path}: 排序关系冲突`);return;}sorted.push(next);remaining.splice(remaining.indexOf(next),1);}

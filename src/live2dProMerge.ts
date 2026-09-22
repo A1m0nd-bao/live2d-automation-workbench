@@ -179,10 +179,11 @@ function removeExistingVariant(document: PsdDocument, id: string) {
  * must review the report before passing the file to Cubism.
  */
 export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[], options: { preserveOrder?: boolean } = {}) {
+  const preserveOrder = options.preserveOrder !== false;
   const document = readPsd(base, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
   const inspectOrder = (layers: PsdLayer[] | undefined) => {
-    const report = cleanupProOrder(options.preserveOrder ? structuredClone(layers ?? []) : layers);
-    return options.preserveOrder ? { ...report, status: 'needs_review', changed: [], warnings: [...report.warnings,
+    const report = cleanupProOrder(preserveOrder ? structuredClone(layers ?? []) : layers);
+    return preserveOrder ? { ...report, status: 'needs_review', changed: [], warnings: [...report.warnings,
       '自动队列保留源图层顺序，未套用模板排序；仍需视觉遮挡验收。'] } : report;
   };
   const cleanup = inspectOrder(document.children);
