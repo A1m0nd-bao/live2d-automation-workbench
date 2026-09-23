@@ -1,5 +1,5 @@
 """Exercise the real writer and graph merge on a fresh, character-free fixture."""
-import importlib.util,subprocess,sys,tempfile,unittest
+import importlib.util,json,math,subprocess,sys,tempfile,unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'scripts/pro-rig'))
@@ -40,4 +40,16 @@ class ProRigGraphTests(unittest.TestCase):
    for f in fs:archive.deep(f,'positions').text=rest
   p=self.altered('empty',edit)
   with self.assertRaisesRegex(ValueError,'全部相同'):self.build(p,'empty-out.cmo3')
+ def test_mouth_orientation_follows_authored_corners(self):
+  slope=.2
+  self.build(self.root/'base.cmo3','flat-out.cmo3')
+  baseline=json.loads((self.root/'flat-out.integration.json').read_text())['mouthPlacement']['rotationDegrees']
+  def edit(r):
+   mouth=next(e for e in r.find('shared') if e.tag=='CArtMeshSource' and archive.name(e)=='mouth')
+   form=archive.field(mouth,'keyforms')[0];p=list(map(float,archive.deep(form,'positions').text.split()))
+   for i in range(0,len(p),2):p[i+1]+=slope*(p[i]-250)
+   archive.deep(form,'positions').text=' '.join(map(str,p))
+  source=self.altered('sloped-mouth',edit);self.build(source,'sloped-out.cmo3')
+  report=json.loads((self.root/'sloped-out.integration.json').read_text())
+  self.assertGreater(report['mouthPlacement']['rotationDegrees'],baseline+1)
 if __name__=='__main__':unittest.main()
