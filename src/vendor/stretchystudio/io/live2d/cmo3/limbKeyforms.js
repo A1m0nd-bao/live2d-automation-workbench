@@ -4,10 +4,13 @@ import { uuid } from '../xmlbuilder.js';
 // must exist in Cubism's keyform grid, including the invisible bent states.
 export function emitLimbGrid(x, { grid, gridPid, binding, bindingPid, bone, angles,
   action, actionPid, restForm, name }) {
-  const actionKeys = !action ? [0] : Array.isArray(action.stateOpacities)
+  // The paired arm state is authoritative. Old timeline samples may still be
+  // attached to one side and must not produce a different fade curve.
+  const explicitActionState = action?.state === 'base' || action?.state === 'alternate';
+  const actionKeys = !action ? [0] : Array.isArray(action.stateOpacities) && !explicitActionState
     ? action.stateOpacities.map((_, i) => i)
     : [0, action.transitionStart ?? 0.35, action.transitionEnd ?? 0.65, 1];
-  const opacities = !action ? [1] : Array.isArray(action.stateOpacities)
+  const opacities = !action ? [1] : Array.isArray(action.stateOpacities) && !explicitActionState
     ? action.stateOpacities
     : action.state === 'alternate' ? [0, 0, 1, 1] : [1, 1, 0, 0];
   const dimensions = [{ node: binding, pid: bindingPid, param: bone.pidParam, id: bone.paramId, keys: angles }];

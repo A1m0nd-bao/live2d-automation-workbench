@@ -12,7 +12,7 @@ function fixture(action) {
   const forms = emitLimbGrid(x, {grid, gridPid, binding, bindingPid,
     bone:{pidParam:'#elbow',paramId:'ParamElbow'}, angles,
     action, actionPid:'#action',restForm:'#rest',name:'arm'});
-  return {grid, forms, angles};
+  return {x, grid, forms, angles};
 }
 const child = (node, name) => node.children.find(c => c.attrs['xs.n'] === name);
 
@@ -28,6 +28,19 @@ for (const state of ['base', 'alternate']) await test(`${state}: full action × 
     assert.deepEqual(forms.slice(a*5,a*5+5).map(f=>f.angle),angles);
     const opacity = state === 'base' ? (a<2?1:0) : (a<2?0:1);
     assert.ok(forms.slice(a*5,a*5+5).every(f=>f.opacity===opacity));
+  }
+});
+
+for (const state of ['base', 'alternate']) await test(`${state}: explicit arm state ignores stale opacity timeline`, () => {
+  const staleOpacityTimeline = Array.from({length:49}, (_, index) => index / 48);
+  const {x, forms} = fixture({id:'ParamActionWave',state,stateOpacities:staleOpacityTimeline});
+  const actionBinding = x._shared.find((node) => node.tag === 'KeyformBindingSource' &&
+    node.children.some((part) => part.attrs['xs.n'] === 'description' && part.text === 'ParamActionWave'));
+  assert.deepEqual(child(actionBinding,'keys').children.map((key) => Number(key.text)), [0,0.35,0.65,1]);
+  assert.equal(forms.length,20);
+  for(let actionIndex=0;actionIndex<4;actionIndex++) {
+    const expected = state === 'base' ? (actionIndex<2?1:0) : (actionIndex<2?0:1);
+    assert.ok(forms.slice(actionIndex*5,actionIndex*5+5).every((form) => form.opacity===expected));
   }
 });
 

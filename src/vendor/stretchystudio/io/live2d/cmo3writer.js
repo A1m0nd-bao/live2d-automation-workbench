@@ -893,9 +893,10 @@ export async function generateCmo3(input) {
       && generateRig && m.tag === 'neck' && !!pidParamAngleXEarly;
     const actionSwitch = m.actionSwitch ?? null;
     const actionParamPid = actionSwitch ? actionParamPids.get(actionSwitch.id) : null;
+    const explicitActionState = actionSwitch?.state === 'base' || actionSwitch?.state === 'alternate';
     const hasActionSwitch = !!actionParamPid &&
       (Array.isArray(actionSwitch.stateOpacities) ||
-        actionSwitch.state === 'base' || actionSwitch.state === 'alternate');
+        explicitActionState);
     const limbBend = m.limbBend ?? null;
     const limbBendParamPid = limbBend ? limbBendParamPids.get(limbBend.id) : null;
     const hasLimbBend = !hasBakedKeyforms && !hasEyelidClosure
@@ -916,7 +917,7 @@ export async function generateCmo3(input) {
     let limbBendFormGuids = null; // [rest, subtle, small flex]
 
     if (hasActionSwitch && !hasBakedKeyforms) {
-      if (Array.isArray(actionSwitch.stateOpacities)) {
+      if (Array.isArray(actionSwitch.stateOpacities) && !explicitActionState) {
         const stateCount = actionSwitch.stateOpacities.length;
         if (stateCount < 2 || (actionSwitch.keys && (actionSwitch.keys.length !== stateCount ||
           actionSwitch.keys.some((v, i, a) => !Number.isFinite(v) || (i > 0 && v <= a[i - 1])))) ||
