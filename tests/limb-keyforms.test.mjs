@@ -51,6 +51,26 @@ await test('non-action limb retains a one-axis five-key grid',()=>{
   assert.ok(forms.every(f=>f.opacity===1));
 });
 
+await test('sampled wave action uses its actual phase keys, not sample indices',()=>{
+  const keys=Array.from({length:49},(_,i)=>i<33?i/32:1+(i-32)/8);
+  const stateOpacities=keys.map((_,i)=>i/48);
+  const {x,grid,forms}=fixture({id:'ParamActionWave',keys,stateOpacities,
+    stateVertices:keys.map((_,i)=>[i])});
+  const actionBinding=x._shared.find(node=>node.tag==='KeyformBindingSource'&&
+    node.children.some(part=>part.attrs['xs.n']==='description'&&part.text==='ParamActionWave'));
+  assert.deepEqual(child(actionBinding,'keys').children.map(key=>Number(key.text)),keys);
+  assert.equal(child(grid,'keyformsOnGrid').children.length,49*5);
+  assert.equal(forms.length,49*5);
+  assert.equal(forms[0].opacity,0);
+  assert.equal(forms.at(-1).opacity,1);
+  assert.equal(keys.at(-1),3);
+});
+
+await test('sampled action with mismatched phase and opacity arrays is rejected',()=>{
+  assert.throws(()=>fixture({id:'ParamActionWave',keys:[0,1,2],stateOpacities:[1,0]}),
+    /Invalid sampled action keyforms/);
+});
+
 await test('shoe and leg have identical spatial weights and knee pivots at their overlap',()=>{
   const skeleton={lKnee:{x:100,y:100},lAnkle:{x:100,y:300}};
   const groups=[{id:'knee',boneRole:'leftKnee'}];

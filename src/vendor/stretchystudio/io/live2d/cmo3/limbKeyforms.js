@@ -7,9 +7,16 @@ export function emitLimbGrid(x, { grid, gridPid, binding, bindingPid, bone, angl
   // The paired arm state is authoritative. Old timeline samples may still be
   // attached to one side and must not produce a different fade curve.
   const explicitActionState = action?.state === 'base' || action?.state === 'alternate';
-  const actionKeys = !action ? [0] : Array.isArray(action.stateOpacities) && !explicitActionState
-    ? action.stateOpacities.map((_, i) => i)
+  const sampledAction = Array.isArray(action?.stateOpacities) && !explicitActionState;
+  if (sampledAction && action.keys && action.keys.length !== action.stateOpacities.length)
+    throw Error('Invalid sampled action keyforms');
+  if (sampledAction && action.stateVertices && action.stateVertices.length !== action.stateOpacities.length)
+    throw Error('Invalid sampled action keyforms');
+  const actionKeys = !action ? [0] : sampledAction
+    ? (action.keys ?? action.stateOpacities.map((_, i) => i))
     : [0, action.transitionStart ?? 0.35, action.transitionEnd ?? 0.65, 1];
+  if (sampledAction && (actionKeys.some((value, i) => !Number.isFinite(value) || (i > 0 && value <= actionKeys[i - 1]))))
+    throw Error('Invalid sampled action keyforms');
   const opacities = !action ? [1] : Array.isArray(action.stateOpacities) && !explicitActionState
     ? action.stateOpacities
     : action.state === 'alternate' ? [0, 0, 1, 1] : [1, 1, 0, 0];
