@@ -55,3 +55,29 @@ export function resolveVariantLayerBinding({
     error: `缺少对应基础图层 ${slot}，已拦截动作绑定`,
   };
 }
+
+/** Keep the neutral arm when its wave alternate does not actually move. */
+export function selectWaveVariantParts(manifest, layers, waveRig) {
+  const byName = new Map(layers.map((layer) => [layer.name, layer]));
+  const skipped = [];
+  const variants = manifest.variants.map((variant) => ({
+    ...variant,
+    parts: variant.parts.filter((part) => {
+      if (variant.id !== 'action_02_wave_arms_only' || !/^handwear-[lr]$/.test(part.slot)) return true;
+      const base = byName.get(part.slot);
+      const alternate = byName.get(part.name);
+      const a = base?.imageData?.data;
+      const b = alternate?.imageData?.data;
+      let identical = Boolean(a && b && base.x === alternate.x && base.y === alternate.y
+        && base.width === alternate.width && base.height === alternate.height
+        && base.opacity === alternate.opacity && a.length === b.length);
+      if (identical) for (let i = 0; i < a.length; i += 1) {
+        if (a[i] !== b[i]) { identical = false; break; }
+      }
+      if (!identical && waveRig?.slots?.[part.slot]?.active !== false) return true;
+      skipped.push({ name: part.name, reason: identical ? 'identical' : 'inactive' });
+      return false;
+    }),
+  })).filter((variant) => variant.parts.length > 0);
+  return { manifest: { ...manifest, variants }, skipped };
+}

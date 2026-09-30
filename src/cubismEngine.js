@@ -14,7 +14,7 @@ import {
 import { generateMesh } from './vendor/stretchystudio/mesh/generate.js';
 import { cleanRigLayer, calibratePose, assertRigMesh, bindLimbMesh } from './autoRigPreflight.js';
 import { normalizePsdRigLayers } from './psdRigNormalization.js';
-import { resolveVariantLayerBinding } from './variantBinding.js';
+import { resolveVariantLayerBinding, selectWaveVariantParts } from './variantBinding.js';
 import { exportLive2D, exportLive2DProject } from './vendor/stretchystudio/io/live2d/exporter.js';
 import {
   saveProject,
@@ -182,7 +182,7 @@ export async function generateCubism(
       const selectedVariantIds = Array.isArray(variantIds) && variantIds.length
         ? new Set(variantIds)
         : null;
-      const variantManifest = selectedVariantIds
+      const selectedVariantManifest = selectedVariantIds
         ? {
           ...sourceVariantManifest,
           variants: sourceVariantManifest.variants.filter((variant) =>
@@ -190,14 +190,19 @@ export async function generateCubism(
           ),
         }
         : sourceVariantManifest;
+      const { width, height } = parsed;
+      const waveRig = selectedVariantManifest.variants.some(v => v.id === 'action_02_wave_arms_only')
+        ? resolveWaveProfile(parsed.layers, width, height, waveProfile) : null;
+      const { manifest: variantManifest, skipped: unchangedWaveArms } =
+        selectWaveVariantParts(selectedVariantManifest, parsed.layers, waveRig);
+      if (unchangedWaveArms.length) warnings.push(
+        `挥手时保留 ${unchangedWaveArms.map((part) => part.name).join('、')} 的基础手臂，不再淡出后换入未移动的复制层。`,
+      );
       const activeVariantPartNames = new Set(
         variantManifest.variants.flatMap((variant) =>
           variant.parts.map((part) => part.name),
         ),
       );
-      const { width, height } = parsed;
-      const waveRig = variantManifest.variants.some(v => v.id === 'action_02_wave_arms_only')
-        ? resolveWaveProfile(parsed.layers, width, height, waveProfile) : null;
       if (waveRig) warnings.push('已加入抬手过渡和连续挥手关键形态；动作需通过 CMO3 原生导出后运行。');
       if (!parsed.layers.length || parsed.layers.length > 120)
         throw new Error('PSD 需要包含 1–120 个有效图层。');
@@ -394,7 +399,7 @@ export async function generateCubism(
         tile.getContext('2d').putImageData(layer.imageData, 0, 0);
         canvas.getContext('2d').drawImage(tile, layer.x, layer.y);
         const waveSlot = layer.name.startsWith(`${WAVE_VARIANT}__`) ? layer.name.slice(WAVE_VARIANT.length + 2) : layer.name;
-        const isWaveMesh = !!waveRig?.slots[waveSlot];
+        const isWaveMesh = waveRig?.slots[waveSlot]?.active === true;
         const mesh = generateMesh(
           canvas.getContext('2d').getImageData(0, 0, width, height).data,
           width,
@@ -433,7 +438,11 @@ export async function generateCubism(
           semanticTag: tag,
           textureId: ids[i],
           parent: binding.parentGroupId,
-          draw_order: assignments.get(i)?.drawOrder ?? layers.length - 1 - i,
+          // Alternate artwork must occupy its neutral counterpart's painter
+          // slot, even if the PSD action group is stored elsewhere.
+          draw_order: assignments.get(binding.assignmentIndex)?.drawOrder
+            ?? assignments.get(i)?.drawOrder
+            ?? layers.length - 1 - i,
           visible: true,
           opacity: isInitiallyVisible(layer) ? layer.opacity : 0,
           transform: transform(),

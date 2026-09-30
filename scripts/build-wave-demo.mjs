@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { initializeCanvas } from 'ag-psd';
 import sharp from 'sharp';
-import { importPsd } from '../src/vendor/stretchystudio/io/psd.js';
+import { extractVariantManifest, importPsd } from '../src/vendor/stretchystudio/io/psd.js';
 import { generateMesh } from '../src/vendor/stretchystudio/mesh/generate.js';
 import { generateCmo3 } from '../src/vendor/stretchystudio/io/live2d/cmo3writer.js';
 import { matchTag } from '../src/vendor/stretchystudio/io/armatureOrganizer.js';
 import { resolveWaveProfile, buildWaveAction, buildWaveMotions, WAVE_PARAMETER, WAVE_VARIANT, WAVE_MESH_OPTIONS, trimWaveMesh } from '../src/waveRig.js';
+import { selectWaveVariantParts } from '../src/variantBinding.js';
 
 initializeCanvas((w, h) => ({ width: w, height: h, getContext: () => ({
   createImageData: (width, height) => ({ width, height, data: new Uint8ClampedArray(width * height * 4) }),
@@ -15,12 +16,16 @@ initializeCanvas((w, h) => ({ width: w, height: h, getContext: () => ({
 const source = process.argv[2];
 if (!source) throw Error('Usage: node scripts/build-wave-demo.mjs source.psd [output-directory]');
 const out = path.resolve(process.argv[3] ?? 'outputs/wave-v5');
-const parsed = importPsd(await fs.readFile(source));
+const raw = await fs.readFile(source);
+const parsed = importPsd(raw);
 const { width, height } = parsed;
 const profile = resolveWaveProfile(parsed.layers, width, height);
 if (!profile) throw Error('This asset needs a calibrated wave profile; no guessed joint positions were applied.');
 await fs.mkdir(out, { recursive: true });
-const layers = [...parsed.layers].reverse().filter(l => !l.name.includes('__') || l.name === `${WAVE_VARIANT}__handwear-r`);
+const selected = selectWaveVariantParts(extractVariantManifest(raw), parsed.layers, profile);
+const wave = selected.manifest.variants.find(variant => variant.id === WAVE_VARIANT);
+const activeAlternates = new Set(wave?.parts.map(part => part.name) ?? []);
+const layers = [...parsed.layers].reverse().filter(l => !l.name.includes('__') || activeAlternates.has(l.name));
 const meshes = [], visual = [];
 for (const [index, layer] of layers.entries()) {
   const pixels = new Uint8ClampedArray(width * height * 4);
@@ -30,9 +35,11 @@ for (const [index, layer] of layers.entries()) {
   const vertices = mesh.vertices.flatMap(v => [v.restX, v.restY]);
   const actionSwitch = buildWaveAction(vertices, profile, layer.name);
   const png = await sharp(Buffer.from(pixels), { raw: { width, height, channels: 4 } }).png().toBuffer();
+  const slot = wave?.parts.find(part => part.name === layer.name)?.slot;
+  const neutralIndex = slot ? layers.findIndex(part => part.name === slot) : index;
   meshes.push({ name: layer.name, tag: matchTag(layer.name), partId: `mesh_${index}`, parentGroupId: null,
     vertices, triangles: mesh.triangles.flat(), uvs: vertices.map((v, i) => v / (i % 2 ? height : width)),
-    pngData: png, texWidth: width, texHeight: height, drawOrder: index, actionSwitch });
+    pngData: png, texWidth: width, texHeight: height, drawOrder: neutralIndex, actionSwitch });
   visual.push({ name: layer.name, vertices, triangles: mesh.triangles, action: actionSwitch, png: `data:image/png;base64,${png.toString('base64')}`, pixels });
 }
 const { cmo3, rigDebugLog } = await generateCmo3({ canvasW: width, canvasH: height, meshes, groups: [], generateRig: true,

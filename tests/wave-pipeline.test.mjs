@@ -5,6 +5,7 @@ import { analyzeWaveInput, validateWaveProfile, buildArmWeightField } from '../s
 import { buildWaveAction, deformWaveVertices } from '../src/waveRig.js';
 import { validateWaveGeometry } from '../src/wave/waveValidator.js';
 import { phaseAtTime, sampleWaveMesh } from '../src/wave/waveRenderer.js';
+import { selectWaveVariantParts } from '../src/variantBinding.js';
 
 function arm(name, points, scale=1, offset=0, mirror=false) {
   const transform=p=>({x:(mirror?220-p.x:p.x)*scale+offset,y:p.y*scale+offset});
@@ -55,6 +56,23 @@ test('automatic profiles adapt to translated, scaled and mirrored people',()=>{
     assert.equal(validateWaveProfile(profile,input),profile);
     assert.throws(()=>validateWaveProfile(original,input),/不属于/);
   }
+});
+
+test('the non-waving arm never becomes an opacity-switched replacement',()=>{
+  const p=fixture(),profile=analyzeWaveInput(readWaveLayers(p));
+  const manifest={variants:[{id:'action_02_wave_arms_only',kind:'action',parts:[
+    {name:'action_02_wave_arms_only__handwear-l',slot:'handwear-l'},
+    {name:'action_02_wave_arms_only__handwear-r',slot:'handwear-r'},
+  ]}]};
+  const {manifest:selected,skipped}=selectWaveVariantParts(manifest,p.layers,profile);
+  assert.deepEqual(skipped,[{name:'action_02_wave_arms_only__handwear-l',reason:'identical'}]);
+  assert.deepEqual(selected.variants[0].parts.map(part=>part.slot),['handwear-r']);
+  assert.equal(buildWaveAction([175,30,185,115,190,200],profile,'handwear-l'),null);
+  // A small paint difference must not turn a stationary hand into a second
+  // action switch if the measured arm motion is still inactive.
+  p.layers.find(layer=>layer.name==='action_02_wave_arms_only__handwear-l').imageData.data[0]^=1;
+  const changed=selectWaveVariantParts(manifest,p.layers,profile);
+  assert.deepEqual(changed.skipped,[{name:'action_02_wave_arms_only__handwear-l',reason:'inactive'}]);
 });
 
 test('pixel changes invalidate saved calibration, even with identical names and bounds',()=>{
