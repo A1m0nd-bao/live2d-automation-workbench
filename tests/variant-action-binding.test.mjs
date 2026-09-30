@@ -53,3 +53,21 @@ test('an unknown replacement slot remains a hard stop', () => {
   });
   assert.match(binding.error, /missing_slot/);
 });
+
+test('the waving arm inherits its neutral painter slot', () => {
+  const layers = [
+    { name: 'action_02_wave_arms_only__handwear-r' },
+    { name: 'topwear' },
+    { name: 'handwear-r' },
+  ];
+  const assignments = new Map([
+    [0, { parentGroupId: 'action-group', drawOrder: 0 }],
+    [2, { parentGroupId: 'right-arm', drawOrder: 2 }],
+  ]);
+  const binding = resolveVariantLayerBinding({
+    slot: 'handwear-r', layers, assignments, groupDefs: [], layerIndex: 0,
+  });
+  assert.equal(binding.assignmentIndex, 2);
+  assert.equal(binding.parentGroupId, 'right-arm');
+  assert.equal(assignments.get(binding.assignmentIndex).drawOrder, 2);
+});

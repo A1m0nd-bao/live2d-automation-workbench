@@ -387,6 +387,12 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
           const t = Math.min(1, Math.max(0, (performance.now() - state.began) / 500));
           state.current = state.from + (state.target - state.from) * t * t * (3 - 2 * t);
           writeParameter(coreModel, 'ParamActionWave', state.current);
+          if (t === 1) {
+            // Release pose ownership after the switch. An always-active
+            // controller otherwise overwrites later motion clips each frame.
+            values.current.set('ParamActionWave', state.target);
+            state.active = false;
+          }
         }
         if (performance.now() - lastRead > 200 && version === generation.current) {
           lastRead = performance.now(); setLiveValues(Array.from(core.parameters.values));
@@ -478,6 +484,9 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     // value. This mirrors the official sample player: start the action from
     // the neutral parameter state, then sample real runtime geometry.
     values.current.clear();
+    pose.current.active = false;
+    const wave = parameterSnapshot(core).find((item) => item.id === 'ParamActionWave');
+    if (wave) writeParameter(current.model.internalModel.coreModel, wave.id, wave.defaultValue);
     setParameters(parameterSnapshot(core));
     setMeasurement('播放检测不等于成品验收；请检查鞋子跟随、挥手换图及组合动作。');
     playing.current = motion;
@@ -537,6 +546,7 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
   };
 
   const selectPose = (target: number) => {
+    playing.current = null;
     values.current.delete('ParamActionWave');
     const p = runtime.current?.model.internalModel.coreModel._model.parameters;
     const current = p ? p.values[p.ids.indexOf('ParamActionWave')] : pose.current.current;
