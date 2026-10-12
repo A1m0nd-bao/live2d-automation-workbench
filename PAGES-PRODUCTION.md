@@ -14,6 +14,14 @@
 
 ## Use
 
+### Batch production
+
+The sidebar's **批量生产** opens the batch panel. It accepts 1–100 PNG/JPEG files, preserves their chosen order and uploads original bytes without regeneration, padding, cutout or visual-QA rejection. Defaults match the October batch runs: resolution 1024, seed 42, split left/right limbs enabled. Settings are snapshotted per batch. The authenticated Relay must include `worker/app/batch_queue.py` and the updated `main.py`.
+
+The client saves random batch/item IDs and SHA-256 fingerprints before submitting. Upload recovery reuses those IDs; conflicting bytes return 409. A batch starts only after all sources are saved server-side. The Relay owns sequencing, continues while the browser is closed, records failures and skips explicitly failed items. Unknown inference submissions block further inference; reconnects use the saved Gradio event ID. Pause stops future submissions, not a running job. Refresh restores batch history; completed PSDs are downloaded in a ZIP with a status manifest. ZIP download still requires an open browser; reconnecting later can download the saved outputs.
+
+**批量制作已完成的 PSD** downloads completed sources into the workbench and runs the existing standard/Pro local authoring path sequentially, producing CMO3 and native MOC3 packages with a per-character failure manifest. Existing PSDs may also be selected together in **新建生产任务**. Saved native packages are reused on continuation; this local authoring step requires the browser to remain open. Pro uses states actually present in the PSD, rather than inventing absent pose artwork. GPU splitting and local authoring are independent, so local work can begin while remaining images continue to split.
+
 Import accepted PSD when creating a task, confirm input QA, generate, then download CMO3 and the ZIP backup. PNG/JPG tasks default to the selected provider (Doubao OR Image-2). Connect the Relay, configure the chosen provider on the server, then start. Missing configuration fails early; no provider fallback or source-image fallback occurs. A user may explicitly check “已处理，跳过生图”; this is `user-confirmed`, never AI-approved. Replacing input resets generation. Cropped references are allowed: the prompt requests conservative completion of unseen body parts.
 
 Generation source, prompt snapshot, model, timestamps, task state and result are persisted in the Relay's `MORPH_DATA_ROOT/prep` (SQLite + files). Browser localStorage/IndexedDB are local UI/cache, not the generation record authority. Authenticated history recovers the latest 100 generation records and outputs. Recovered history does NOT auto-submit another decomposition. Reimport the source to regenerate if the local input is absent.

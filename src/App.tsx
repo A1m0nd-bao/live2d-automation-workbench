@@ -40,6 +40,7 @@ import { ProductionAccess } from './ProductionAccess';
 import { createProjectFromLocalTask, uploadProjectArtifact } from './productionLedger';
 import { NativeRuntimeViewer } from './NativeRuntimeViewer';
 import { compileNative } from './nativeExport';
+import type { SplitBatch } from './batchQueue';
 import './production.css';
 
 const WaveWorkbench = lazy(() => import('./WaveWorkbench.jsx'));
@@ -88,6 +89,7 @@ type Task = {
   cloudProjectId?: string;
   cloudSyncState?: 'syncing' | 'synced' | 'failed';
   cloudArtifactKeys?: string[];
+  batchId?: string;
 };
 type Job = {
   jobId?: string;
@@ -281,6 +283,7 @@ async function padForSeeThrough(source: File) {
 }
 
 const RuntimePreviewPage = lazy(() => import('./RuntimePreviewPage'));
+const BatchPanel = lazy(() => import('./BatchPanel'));
 export default function App() {
   const [isPreview, setIsPreview] = useState(false);
   useEffect(() => { setIsPreview(new URLSearchParams(location.search).get('page') === 'preview'); }, []);
@@ -305,7 +308,9 @@ function WorkbenchApp() {
       events: string;
     } | null>(null);
   const [name, setName] = useState(''),
-    [file, setFile] = useState<File | null>(null);
+    [file, setFile] = useState<File | null>(null),
+    [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [splitBatchFiles, setSplitBatchFiles] = useState<File[]>([]);
   const [directRelayUrl, setDirectRelayUrl] = useState(''),
     [directDeviceToken, setDirectDeviceToken] = useState('');
   const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
@@ -345,6 +350,15 @@ function WorkbenchApp() {
       (t.remoteState === 'queued' || t.remoteState === 'running'),
   ).length;
   const deliveredCount = tasks.filter((t) => t.hasGenerated).length;
+  const batchRuntimeCounts: Record<string, number> = {};
+  const countedBatchFiles = new Set<string>();
+  for (const item of tasks) {
+    const key = `${item.batchId}:${item.referenceName}`;
+    if (item.batchId && item.nativeRuntimeFile && !countedBatchFiles.has(key)) {
+      countedBatchFiles.add(key);
+      batchRuntimeCounts[item.batchId] = (batchRuntimeCounts[item.batchId] ?? 0) + 1;
+    }
+  }
   const pipelineSteps = [
     {
       title: '参考图',
@@ -664,6 +678,82 @@ function WorkbenchApp() {
     return new File([blob], t.psdFile, {
       type: 'image/vnd.adobe.photoshop',
     });
+  }
+  async function importPsdBatch(files: File[], batchId: string, mode: 'standard' | 'pro') {
+    const imported: Task[] = [];
+    for (const [index, source] of files.entries()) {
+      if (validate(source) !== 'psd') throw new Error('本地批量制作仅接受 PSD。');
+      const existing = currentTasks.current.find(t => t.batchId === batchId && t.referenceName === source.name && t.mode === mode);
+      if (existing) { imported.push(existing); continue; }
+      const taskId = `${batchId}-${mode}-${index}`;
+      const manifest = mode === 'pro'
+        ? extractVariantManifest(await source.arrayBuffer()) as unknown as VariantManifest : null;
+      const available = new Set(manifest?.variants.map(v => v.id) ?? []);
+      const embedded = LIVE2D_PRO_STATES.filter(s => available.has(s.id)).map(s => s.id);
+      await saveAsset(`${taskId}:input`, source);
+      const next: Task = {
+        id: taskId, batchId, name: source.name.replace(/\.psd$/i, ''), referenceName: source.name,
+        inputFile: source.name, inputKind: 'psd', psdFile: source.name,
+        createdAt: new Date().toLocaleString('zh-CN'), mode,
+        proStateIds: mode === 'pro' ? embedded : undefined,
+        proEmbeddedStateIds: mode === 'pro' ? embedded : undefined,
+        proStage: mode === 'pro' ? 'embedded_states_ready' : undefined,
+        qaPassed: false,
+        remoteMessage: '批量导入：原始 PSD 已保存，可接续本地制作。',
+      };
+      imported.push(next);
+    }
+    setTasks(all => [...imported.filter(item => !all.some(t => t.id === item.id)), ...all]);
+    setSelected('');
+    return imported;
+  }
+  async function produceBatch(items: Task[], batchName: string) {
+    if (lock.current) throw new Error('本地制作队列已有任务在运行，请等待完成。');
+    lock.current = true; setBusy(true);
+    const reports: Array<{ name: string; status: string; error?: string }> = [];
+    try {
+      for (const [index, item] of items.entries()) {
+        setProgress(`本地制作 ${index + 1}/${items.length} · ${item.name}`);
+        try {
+          if (!await readAsset(`${item.id}:native-runtime`)) {
+            const savedCmo = await readAsset(`${item.id}:cmo`);
+            if (savedCmo && item.mode !== 'pro') {
+              const runtime = await compileNative(savedCmo, setProgress, 'standard');
+              await saveAssets([{ key: `${item.id}:runtime`, value: runtime }, { key: `${item.id}:native-runtime`, value: runtime }]);
+              update(item.id, { nativeRuntimeFile: `${item.name}-native-runtime.zip`, runtimeFile: `${item.name}-native-runtime.zip` });
+            } else {
+              await generate(item);
+            }
+          }
+          reports.push({ name: item.name, status: 'succeeded' });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '本地制作失败';
+          update(item.id, { warnings: [message] });
+          reports.push({ name: item.name, status: 'failed', error: message });
+        }
+      }
+      const { default: JSZip } = await import('jszip');
+      const zip = new JSZip();
+      for (const [i, item] of items.entries()) {
+        const folder = zip.folder(`${String(i + 1).padStart(3, '0')}-${item.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')}`)!;
+        for (const [suffix, filename] of [['input', 'source.psd'], ['cmo', 'model.cmo3'], ['native-runtime', 'native-runtime.zip'], ['rig-report', 'rig-report.json']]) {
+          const blob = await readAsset(`${item.id}:${suffix}`);
+          if (blob) folder.file(filename, blob);
+        }
+      }
+      zip.file('manifest.json', JSON.stringify({ batchName, items: reports }, null, 2));
+      downloadBlob(await zip.generateAsync({ type: 'blob' }), `${batchName}-制作包.zip`);
+      setToast(`本地制作 ${reports.filter(r => r.status === 'succeeded').length}/${items.length}，已下载打包文件。失败原因保留在清单中。`);
+    } finally { lock.current = false; setBusy(false); setProgress(''); }
+  }
+  async function produceSplitBatch(batch: SplitBatch, mode: 'standard' | 'pro') {
+    const files: File[] = [];
+    for (const item of batch.items.filter(item => item.status === 'succeeded')) {
+      const bytes = await serviceRequest<ArrayBuffer>('output', { jobId: item.id });
+      files.push(new File([bytes], item.filename, { type: 'image/vnd.adobe.photoshop' }));
+    }
+    const imported = await importPsdBatch(files, batch.id, mode);
+    await produceBatch(imported, batch.name);
   }
   async function proStatePsd(t: Task, stateId: string) {
     const asset = t.proStateAssets?.[stateId];
@@ -1119,6 +1209,9 @@ function WorkbenchApp() {
             <FolderOpen size={18} />
             生产任务
           </button>
+          <button className="nav-item" onClick={() => document.querySelector('[aria-label="批量生产"]')?.scrollIntoView({ behavior: 'smooth' })}>
+            <Layers3 size={18} />批量生产
+          </button>
           <button className="nav-item" onClick={() => setGuide(true)}>
             <Settings2 size={18} />
             流程与隐私
@@ -1265,6 +1358,18 @@ function WorkbenchApp() {
               </button>
             </article>
           </section>
+          <Suspense fallback={<p>正在加载批量生产…</p>}>
+            <BatchPanel seedFiles={splitBatchFiles} runtimeCounts={batchRuntimeCounts} onProduce={produceSplitBatch} />
+          </Suspense>
+          {tasks.some(item => item.batchId) && <section className="batch-panel" aria-label="本地批量制作">
+            <h2>已导入 PSD 的制作队列</h2>
+            <p>CMO3 / MOC3 在本地逐个生成。刷新后可继续，已保存的运行包会复用。</p>
+            {[...new Set(tasks.filter(item => item.batchId).map(item => `${item.batchId}:${item.mode}`))].map(key => {
+              const group = tasks.filter(item => `${item.batchId}:${item.mode}` === key);
+              return <div key={key} className="batch-actions"><span>{group[0].mode === 'pro' ? 'Pro' : '标准'} · {group.filter(item => item.nativeRuntimeFile).length}/{group.length} 个 MOC3</span>
+                <button className="primary-button" disabled={busy} onClick={() => void produceBatch(group, `PSD-${group[0].batchId!.slice(0, 8)}`).catch(error => setToast(error instanceof Error ? error.message : '批量制作失败'))}>批量制作 / 继续未完成项</button></div>;
+            })}
+          </section>}
         </div>
       </section>
       {toast && (
@@ -1347,8 +1452,9 @@ function WorkbenchApp() {
             参考图 / 已验收 PSD / Stretchy 工程
             <input
               type="file"
+              multiple
               accept=".png,.jpg,.jpeg,.psd,.stretch"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              onChange={(e) => { const files = Array.from(e.target.files || []); setBatchFiles(files); setFile(files[0] || null); }}
             />
           </label>
           <button
@@ -1356,16 +1462,32 @@ function WorkbenchApp() {
             disabled={busy}
             onClick={() =>
               void operate(async () => {
-                if (!name.trim() || !file)
-                  throw new Error('请填写名称并选择文件。');
-                const k = validate(file),
+                const selectedFiles = batchFiles.length ? batchFiles : file ? [file] : [];
+                if (!selectedFiles.length || (!name.trim() && selectedFiles.length === 1)) throw new Error('请填写名称并选择文件。');
+                if (selectedFiles.length > 1) {
+                  const kinds = selectedFiles.map(validate);
+                  if (kinds.every(kind => kind === 'image')) {
+                    setSplitBatchFiles(selectedFiles);
+                    setCreate(false); setName(''); setFile(null); setBatchFiles([]);
+                    setToast('原图已转入批量生产，请在批量面板核对顺序并开始。');
+                    window.setTimeout(() => document.querySelector('[aria-label="批量生产"]')?.scrollIntoView({ behavior: 'smooth' }), 0);
+                    return;
+                  }
+                  if (!kinds.every(kind => kind === 'psd')) throw new Error('请将图片和 PSD 分开批量上传。');
+                  await importPsdBatch(selectedFiles, crypto.randomUUID(), productionMode);
+                  setCreate(false); setName(''); setFile(null); setBatchFiles([]);
+                  setToast('PSD 已批量导入，可点击「批量制作」启动本地队列。');
+                  return;
+                }
+                const sourceFile = selectedFiles[0];
+                const k = validate(sourceFile),
                   id = crypto.randomUUID();
-                await saveAsset(`${id}:input`, file);
+                await saveAsset(`${id}:input`, sourceFile);
                 const selectedStates = productionMode === 'pro' ? selectedProStates(proStateIds) : [];
                 if (productionMode === 'pro' && !selectedStates.length)
                   throw new Error('Live2D Pro 至少选择一个动作或表情状态。');
                 if (productionMode === 'pro') {
-                  const manifest = buildLive2DProManifest(file.name, proStateIds);
+                  const manifest = buildLive2DProManifest(sourceFile.name, proStateIds);
                   await saveAsset(`${id}:pro-manifest`, new Blob([
                     JSON.stringify(manifest, null, 2),
                   ], { type: 'application/json' }));
@@ -1376,7 +1498,7 @@ function WorkbenchApp() {
                 // a base PSD waiting for a second See-Through pass.
                 const embeddedStateIds = productionMode === 'pro' && k === 'psd'
                   ? (() => {
-                    const bufferPromise = file.arrayBuffer();
+                    const bufferPromise = sourceFile.arrayBuffer();
                     return bufferPromise.then((buffer) => {
                       const manifest = extractVariantManifest(buffer) as unknown as VariantManifest;
                       const available = new Set(manifest.variants.map((variant) => variant.id));
@@ -1391,12 +1513,12 @@ function WorkbenchApp() {
                 const next: Task = {
                   id,
                   name: name.trim(),
-                  referenceName: file.name,
-                  inputFile: file.name,
+                  referenceName: sourceFile.name,
+                  inputFile: sourceFile.name,
                   inputKind: k,
                   prepProvider: k === 'image' ? prepProvider : undefined,
                   prepMode: k === 'image' ? prepMode : undefined,
-                  psdFile: k === 'psd' ? file.name : undefined,
+                  psdFile: k === 'psd' ? sourceFile.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
                   mode: productionMode,
                   proStateIds: productionMode === 'pro' ? proStateIds : undefined,
@@ -1415,6 +1537,7 @@ function WorkbenchApp() {
                 setCreate(false);
                 setName('');
                 setFile(null);
+                setBatchFiles([]);
                 setPrepMode('generate');
                 if (k === 'image') {
                   if (productionMode === 'pro') await startProBasePipeline(next);

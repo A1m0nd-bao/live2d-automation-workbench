@@ -14,7 +14,7 @@ import sqlite3
 import sys
 import uuid
 import importlib.util
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit, unquote
@@ -102,11 +102,16 @@ class JobHistory(JobStatus):
     updated_at: str
 
 
-def db() -> sqlite3.Connection:
+@contextmanager
+def db():
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
-    return connection
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def init_db() -> None:
@@ -274,47 +279,60 @@ async def monitor(job_id: str) -> None:
             record_event(job_id, "foreground_failure", error=detail)
             update_job(job_id, status="failed", message="抠图未通过，已停止拆层", error=detail)
             return
+        batch_options_path = DATA_ROOT / job_id / 'batch-options.json'
+        batch_options = json.loads(batch_options_path.read_text()) if batch_options_path.exists() else None
+        checkpoint = DATA_ROOT / job_id / 'batch-inference.json'
         for attempt in range(1, MAX_ATTEMPTS + 1):
             stage = "upload"
+            terminal_error = False
             update_job(job_id, status="queued", message="正在连接 See-Through 队列…", attempts=attempt, error=None)
             headers = {"Authorization": f"Bearer {MODELSCOPE_TOKEN}"}
             timeout = httpx.Timeout(connect=30, read=90, write=60, pool=30)
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    source_mime, source_suffix = source_image_type(source)
-                    source_name = f"source{source_suffix}"
-                    with source.open("rb") as handle:
-                        upload = await client.post(
-                            f"{UPSTREAM}/gradio_api/upload",
-                            headers=headers,
-                            files={"files": (source_name, handle, source_mime)},
+                    saved = json.loads(checkpoint.read_text()) if batch_options and checkpoint.exists() else None
+                    if saved:
+                        if not saved.get('event_id'):
+                            update_job(job_id, status='running', message='上游提交结果未知，批次已等待人工确认；不会重复提交', error='uncertain submission')
+                            return
+                        event_id = saved['event_id']
+                    else:
+                        source_mime, source_suffix = source_image_type(source)
+                        source_name = f"source{source_suffix}"
+                        with source.open("rb") as handle:
+                            upload = await client.post(
+                                f"{UPSTREAM}/gradio_api/upload", headers=headers,
+                                files={"files": (source_name, handle, source_mime)},
+                            )
+                        if not upload.is_success:
+                            raise RuntimeError(await upstream_error(upload))
+                        uploaded: Any = upload.json()
+                        if isinstance(uploaded, list):
+                            uploaded = uploaded[0] if uploaded else None
+                        if isinstance(uploaded, dict):
+                            uploaded = (uploaded.get("files") or uploaded.get("data") or [None])[0]
+                        if not uploaded:
+                            raise RuntimeError("See-Through did not return an uploaded file reference")
+                        input_file = file_data(uploaded, source_name, source_mime) if isinstance(uploaded, str) else uploaded
+                        stage = "submit"
+                        if batch_options:
+                            checkpoint.write_text(json.dumps({'event_id': None}))
+                        call = await client.post(
+                            f"{UPSTREAM}/gradio_api/call/inference",
+                            headers={**headers, "Content-Type": "application/json"},
+                            json={"data": [input_file, (batch_options or {}).get('resolution', INFERENCE_RESOLUTION),
+                                           (batch_options or {}).get('seed', 42), (batch_options or {}).get('split_limbs', SPLIT_LIMBS)]},
                         )
-                    if not upload.is_success:
-                        raise RuntimeError(await upstream_error(upload))
-                    uploaded: Any = upload.json()
-                    if isinstance(uploaded, list):
-                        uploaded = uploaded[0] if uploaded else None
-                    if isinstance(uploaded, dict):
-                        uploaded = (uploaded.get("files") or uploaded.get("data") or [None])[0]
-                    if not uploaded:
-                        raise RuntimeError("See-Through did not return an uploaded file reference")
-                    input_file = (
-                        file_data(uploaded, source_name, source_mime)
-                        if isinstance(uploaded, str)
-                        else uploaded
-                    )
-                    stage = "submit"
-                    call = await client.post(
-                        f"{UPSTREAM}/gradio_api/call/inference",
-                        headers={**headers, "Content-Type": "application/json"},
-                        json={"data": [input_file, INFERENCE_RESOLUTION, 42, SPLIT_LIMBS]},
-                    )
-                    if not call.is_success:
-                        raise RuntimeError(await upstream_error(call))
-                    event_id = (call.json() or {}).get("event_id")
-                    if not isinstance(event_id, str) or not event_id:
-                        raise RuntimeError("See-Through did not return a Gradio event id")
-                    record_event(job_id, "submitted", attempt=attempt, event_id=event_id)
+                        if not call.is_success:
+                            if batch_options and call.status_code < 500:
+                                checkpoint.unlink(missing_ok=True)
+                            raise RuntimeError(await upstream_error(call))
+                        event_id = (call.json() or {}).get("event_id")
+                        if not isinstance(event_id, str) or not event_id:
+                            raise RuntimeError("See-Through did not return a Gradio event id")
+                        if batch_options:
+                            checkpoint.write_text(json.dumps({'event_id': event_id}))
+                        record_event(job_id, "submitted", attempt=attempt, event_id=event_id)
                     update_job(job_id, status="running", message="上游已接收，等待处理结果（可能仍在排队）", queue_rank=None, queue_eta_seconds=None)
                     stage = "listen"
                     deadline = asyncio.get_running_loop().time() + 1200
@@ -339,8 +357,10 @@ async def monitor(job_id: str) -> None:
                                 continue
                             record_event(job_id, "upstream_event", attempt=attempt, event=event_type, data=json.loads(raw))
                             if event_type == "error":
+                                terminal_error = True
                                 raise RuntimeError(f"See-Through emitted error: {raw}")
                             if event_type == "complete":
+                                terminal_error = bool(batch_options)
                                 output = json.loads(raw)
                                 output_url = find_psd_output(output)
                                 if not output_url:
@@ -362,8 +382,14 @@ async def monitor(job_id: str) -> None:
             except Exception as error:
                 detail = f"{stage}: {error}"
                 record_event(job_id, "failure", attempt=attempt, error=detail)
+                if batch_options and terminal_error:
+                    update_job(job_id, status='failed', message='See-Through 已明确返回失败，批次继续下一张', error=detail)
+                    return
                 if attempt == MAX_ATTEMPTS:
-                    update_job(job_id, status="failed", message="See-Through 任务失败", error=detail)
+                    if batch_options and checkpoint.exists():
+                        update_job(job_id, status='running', message='已提交任务连接中断，保留任务等待恢复；不会重复推理', error=detail)
+                    else:
+                        update_job(job_id, status="failed", message="See-Through 任务失败", error=detail)
                 else:
                     update_job(job_id, status="queued", message="上次尝试失败，准备重试…", error=detail)
                     await asyncio.sleep(2**attempt)
@@ -384,8 +410,10 @@ async def lifespan(_: FastAPI):
         asyncio.create_task(monitor(row["id"]))
     try:
         await NATIVE_EXPORT.start()
+        await BATCH.start()
         yield
     finally:
+        await BATCH.stop()
         await PRO.stop()
         await PREP.stop()
         await NATIVE_EXPORT.stop()
@@ -406,6 +434,7 @@ def require_prep_token(relay, device):
 
 PREP = _prep_module.PrepQueue(DATA_ROOT, require_prep_token, PROCESSING_SLOTS)
 app.include_router(PREP.router)
+
 def pro_split_create(job_id, source, name):
     with db() as connection:
         connection.execute('BEGIN IMMEDIATE')
@@ -437,6 +466,33 @@ _native_module = importlib.util.module_from_spec(_native_spec)
 _native_spec.loader.exec_module(_native_module)
 NATIVE_EXPORT = _native_module.NativeExport(DATA_ROOT, require_prep_token)
 app.include_router(NATIVE_EXPORT.router)
+
+def batch_split_create(job_id, source, name, settings):
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        if not connection.execute('SELECT id FROM jobs WHERE id=?', (job_id,)).fetchone():
+            directory = DATA_ROOT / job_id
+            directory.mkdir(exist_ok=True)
+            (directory / 'source').write_bytes(source.read_bytes())
+            (directory / 'batch-options.json').write_text(json.dumps(settings))
+            connection.execute("INSERT INTO jobs (id,name,status,message) VALUES (?,?,'queued','批次等待串行拆件')", (job_id, name))
+    if job_id not in ACTIVE and get_job(job_id).status in {'queued', 'running'}:
+        asyncio.create_task(monitor(job_id))
+
+def batch_split_get(job_id):
+    try:
+        return get_job(job_id).model_dump()
+    except HTTPException as error:
+        if error.status_code == 404:
+            return None
+        raise
+
+_batch_spec = importlib.util.spec_from_file_location('morph_batch_queue', Path(__file__).with_name('batch_queue.py'))
+_batch_module = importlib.util.module_from_spec(_batch_spec)
+sys.modules[_batch_spec.name] = _batch_module
+_batch_spec.loader.exec_module(_batch_module)
+BATCH = _batch_module.BatchQueue(DATA_ROOT, require_prep_token, batch_split_create, batch_split_get)
+app.include_router(BATCH.router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -464,6 +520,17 @@ async def local_bootstrap(origin: str | None = Header(default=None)) -> dict[str
     if not LOCAL_BOOTSTRAP or not DEVICE_TOKEN or origin not in ALLOWED_ORIGINS:
         raise HTTPException(status_code=404, detail="Local bootstrap is unavailable")
     return {"deviceToken": DEVICE_TOKEN}
+
+
+@app.get("/local-models/dwpose")
+async def local_dwpose(x_morph_device_token: str | None = Header(default=None)):
+    if not LOCAL_BOOTSTRAP:
+        raise HTTPException(404, "Local models are unavailable")
+    require_prep_token(None, x_morph_device_token)
+    model = Path(os.environ.get("MORPH_DWPOSE_MODEL", str(Path.home() / ".morph-local-relay/models/dw-ll_ucoco_384.onnx")))
+    if not model.is_file() or model.stat().st_size != 134399116:
+        raise HTTPException(404, "Validated local DWPose model is unavailable")
+    return FileResponse(model, media_type="application/octet-stream")
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)

@@ -16,7 +16,7 @@ export async function proRequest<T>(path: string, body?: FormData): Promise<T> {
     signal: AbortSignal.timeout(path.endsWith('/output') ? 120000 : 30000), cache: 'no-store',
   });
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json().catch(() => ({})) as { detail?: unknown };
     throw new Error(typeof data.detail === 'string' ? data.detail : `Pro 队列 HTTP ${response.status}；请确认服务端已升级`);
   }
   return (path.endsWith('/output') ? response.arrayBuffer() : response.json()) as Promise<T>;

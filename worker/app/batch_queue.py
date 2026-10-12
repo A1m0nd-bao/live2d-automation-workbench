@@ -1,0 +1,247 @@
+"""Durable batches using the same authenticated, globally serial split queue."""
+from __future__ import annotations
+
+import asyncio
+from contextlib import contextmanager
+import hashlib
+import json
+from pathlib import Path
+import re
+import sqlite3
+import time
+import zipfile
+
+from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+ID = re.compile(r"^[a-f0-9]{32}$")
+MAX_IMAGE = 20 * 1024 * 1024
+
+
+class SplitSettings(BaseModel):
+    resolution: int = Field(default=1024, ge=768, le=1536)
+    seed: int = Field(default=42, ge=0, le=9999)
+    split_limbs: bool = True
+
+
+class BatchItem(BaseModel):
+    id: str
+    name: str = Field(min_length=1, max_length=200)
+    sha256: str
+
+
+class BatchInput(BaseModel):
+    id: str
+    name: str = Field(default="批量拆件", min_length=1, max_length=120)
+    settings: SplitSettings = Field(default_factory=SplitSettings)
+    items: list[BatchItem] = Field(min_length=1, max_length=100)
+
+
+class BatchQueue:
+    def __init__(self, root, authorize, split_create, split_get):
+        self.root = Path(root) / "batches"
+        self.authorize = authorize
+        self.split_create = split_create
+        self.split_get = split_get
+        self.router = APIRouter(prefix="/batches")
+        self.task = None
+        self.routes()
+
+    @contextmanager
+    def db(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(self.root / "batches.sqlite3", timeout=10)
+        con.row_factory = sqlite3.Row
+        try:
+            with con:
+                con.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, manifest TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL)")
+                con.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, position INTEGER NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
+                yield con
+        finally:
+            con.close()
+
+    def create(self, data):
+        ids = [data.id, *[item.id for item in data.items]]
+        if not all(ID.fullmatch(value) for value in ids) or len(set(ids)) != len(ids):
+            raise HTTPException(422, "批次与文件编号必须唯一且为32位十六进制")
+        for item in data.items:
+            if not re.fullmatch(r"[a-f0-9]{64}", item.sha256) or not re.search(r"\.(png|jpe?g)$", item.name, re.I):
+                raise HTTPException(422, "仅接受 PNG/JPEG，且必须提供原图校验值")
+        manifest = json.dumps(data.model_dump(), ensure_ascii=False, sort_keys=True)
+        with self.db() as con:
+            con.execute("BEGIN IMMEDIATE")
+            old = con.execute("SELECT manifest FROM batches WHERE id=?", (data.id,)).fetchone()
+            if old:
+                if old["manifest"] != manifest:
+                    raise HTTPException(409, "相同批次编号的内容不一致")
+            else:
+                if any(self.split_get(item.id) for item in data.items):
+                    raise HTTPException(409, "文件编号已用于既有拆件任务")
+                try:
+                    con.execute("INSERT INTO batches VALUES (?,?,'uploading',?)", (data.id, manifest, time.time()))
+                    con.executemany("INSERT INTO items (id,batch_id,position) VALUES (?,?,?)", [(item.id, data.id, i) for i, item in enumerate(data.items)])
+                except sqlite3.IntegrityError:
+                    raise HTTPException(409, "文件编号已用于其他批次")
+        return self.read(data.id)
+
+    def read(self, batch_id):
+        with self.db() as con:
+            row = con.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, "批次不存在")
+            uploaded = {item["id"]: bool(item["uploaded"]) for item in con.execute("SELECT * FROM items WHERE batch_id=?", (batch_id,))}
+        data = json.loads(row["manifest"])
+        items = []
+        for i, item in enumerate(data["items"]):
+            job = self.split_get(item["id"])
+            status = job["status"] if job else "pending" if uploaded[item["id"]] else "uploading"
+            safe_name = re.sub(r'[\\/\x00-\x1f:*?"<>|]', '_', item["name"]).rsplit('.', 1)[0]
+            items.append({**item, "uploaded": uploaded[item["id"]], "status": status,
+                          "message": job["error"] or job["message"] if job else "等待串行拆件" if uploaded[item["id"]] else "等待上传",
+                          "filename": f"{i+1:03d}-{safe_name}.psd"})
+        finished = sum(item["status"] in {"succeeded", "failed"} for item in items)
+        data.update(items=items, state="completed" if finished == len(items) else row["state"], created_at=row["created"],
+                    total=len(items), succeeded=sum(item["status"] == "succeeded" for item in items),
+                    failed=sum(item["status"] == "failed" for item in items))
+        return data
+
+    def upload(self, batch_id, item_id, data):
+        batch = self.read(batch_id)
+        item = next((item for item in batch["items"] if item["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "文件不属于该批次")
+        if len(data) > MAX_IMAGE:
+            raise HTTPException(413, "单张图片最大20 MB")
+        if not (data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(b"\xff\xd8\xff")):
+            raise HTTPException(415, "图片格式无效")
+        if hashlib.sha256(data).hexdigest() != item["sha256"]:
+            raise HTTPException(409, "图片与批次清单不一致")
+        directory = self.root / batch_id
+        directory.mkdir(exist_ok=True)
+        target = directory / f"{item_id}.source"
+        temp = target.with_suffix(".tmp")
+        temp.write_bytes(data)
+        temp.replace(target)
+        with self.db() as con:
+            con.execute("UPDATE items SET uploaded=1 WHERE id=? AND batch_id=?", (item_id, batch_id))
+        return self.read(batch_id)
+
+    def control(self, batch_id, action):
+        batch = self.read(batch_id)
+        if batch["state"] == "completed":
+            return batch
+        if action == "start" and any(not item["uploaded"] for item in batch["items"]):
+            raise HTTPException(409, "请先完成所有图片上传")
+        with self.db() as con:
+            con.execute("UPDATE batches SET state=? WHERE id=?", ("active" if action == "start" else "paused", batch_id))
+        return self.read(batch_id)
+
+    async def advance(self):
+        with self.db() as con:
+            ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
+            all_ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state!='completed'")]
+        # Pausing future submissions does not make an in-flight/unknown job safe to overlap.
+        if any(item["status"] in {"running", "queued"} for batch_id in all_ids for item in self.read(batch_id)["items"]):
+            return
+        # Never enqueue another batch item while a preceding item is in flight.
+        for batch_id in ids:
+            batch = self.read(batch_id)
+            for item in batch["items"]:
+                if item["status"] in {"succeeded", "failed"}:
+                    continue
+                if item["status"] == "pending":
+                    self.split_create(item["id"], self.root / batch_id / f"{item['id']}.source", item["filename"], batch["settings"])
+                return
+            with self.db() as con:
+                con.execute("UPDATE batches SET state='completed' WHERE id=?", (batch_id,))
+
+    async def start(self):
+        with self.db():
+            pass
+        async def loop():
+            while True:
+                try:
+                    await self.advance()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # Storage/service errors must not be interpreted as a new submission.
+                    import logging
+                    logging.exception("Batch scheduler could not advance")
+                await asyncio.sleep(2)
+        self.task = asyncio.create_task(loop())
+
+    async def stop(self):
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+
+    def archive(self, batch_id):
+        batch = self.read(batch_id)
+        directory = self.root / batch_id
+        directory.mkdir(exist_ok=True)
+        target = directory / "results.zip"
+        temporary = directory / "results.zip.tmp"
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            count = 0
+            for item in batch["items"]:
+                job = self.split_get(item["id"])
+                if item["status"] == "succeeded" and job and job.get("output_psd"):
+                    output = Path(job["output_psd"])
+                    if not output.is_file() or output.read_bytes()[:6] != b"8BPS\x00\x01":
+                        raise HTTPException(409, "成功记录缺少有效PSD，请检查服务端文件")
+                    archive.write(output, item["filename"])
+                    count += 1
+            if not count:
+                raise HTTPException(409, "尚无完成的PSD")
+            archive.writestr("manifest.json", json.dumps(batch, ensure_ascii=False, indent=2))
+        temporary.replace(target)
+        return target
+
+    def routes(self):
+        router = self.router
+        def auth(relay, device):
+            self.authorize(relay, device)
+
+        @router.post("")
+        async def create(data: BatchInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.create(data)
+
+        @router.get("")
+        async def history(x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            with self.db() as con:
+                ids = [row["id"] for row in con.execute("SELECT id FROM batches ORDER BY created DESC LIMIT 100")]
+            return [self.read(batch_id) for batch_id in ids]
+
+        @router.get("/{batch_id}")
+        async def read(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.read(batch_id)
+
+        @router.put("/{batch_id}/items/{item_id}")
+        async def upload(batch_id: str, item_id: str, request: Request, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            data = bytearray()
+            async for chunk in request.stream():
+                data.extend(chunk)
+                if len(data) > MAX_IMAGE:
+                    raise HTTPException(413, "单张图片最大20 MB")
+            return self.upload(batch_id, item_id, bytes(data))
+
+        @router.post("/{batch_id}/{action}")
+        async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            if action not in {"start", "pause"}:
+                raise HTTPException(404, "未知操作")
+            return self.control(batch_id, action)
+
+        @router.get("/{batch_id}/output")
+        async def output(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return FileResponse(self.archive(batch_id), media_type="application/zip", filename=f"batch-{batch_id[:8]}.zip")
