@@ -49,3 +49,17 @@ Local UI test on 2026-09-05: imported the accepted 1024×1024 ana.psd, generated
 `npm run build:pages` and `npm run build`
 
 Never add runtime ModelScope/relay credentials to a Vite environment variable or GitHub Pages artifact.
+
+# PSD-first Pro 状态形态（psd-pose-variants-v1）
+
+新版单张/批量 Pro 改为：基础分层 PSD → 完整肩袖手局部部件 → 当前角色锚点对齐 → 隐藏动作组合层。
+基础图片仍仅拆一次；已有 PSD 直接复用。状态不再生成全身图、不再逐张 See-Through。
+
+- 六个手势：挥手、叉腰、抱臂、思考、托掌、握拳。表情/嘴部保留原模型控制，本轮不重画。
+- 服务端需要 `psd-tools`、SciPy，复用已配置的生图提供方和视觉检查凭据。Image-2 请求透明 PNG；不透明部件仅做既有 CPU 背景透明化，再检查整臂，绝不回退云端语义拆件。
+- 使用真实源图层 `handwear-r` / `handwear-l`，拒绝缺失、重复、隐藏、含剪贴/遮罩的中立手臂。肩位/骨段定位按此 PSD，不使用另一角色常量；单侧动作复制另一侧原层。
+- 原始 PSD 不覆盖，原层顺序和像素保留，动作组置于上方且默认隐藏。导出后重开，比较中立像素、原层签名，并检查四个合成 RGBA 通道。
+- `/pro/pose-jobs` 使用独立持久队列；新版本和请求 ID 在浏览器提交前持久化。生成中断且未保存部件则标为未知，不自动重生。复核现有素材与明确付费重生分开。
+- 视觉检查同时看部件和实际合成结果。躯干层含残留旧袖、肩口无法衔接、手比例不符等会阻止导出；保留素材待处理，不假装自动修补通过。缺失/错误语义层需用户先整理。
+- 旧 `/pro/jobs` 任务只恢复原记录，不迁移、不因升级另发收费任务。已包含选定状态的 PSD 直接复用；批量继续会复用已完成的运行包。
+- 本轮验证覆盖持久状态机、模拟提供方合成链路、实际 PSD 重开、网页入口、类型检查和构建。测试不发起新的收费图像请求；不能据此声称所有角色的生成动作已视觉验收。

@@ -47,6 +47,11 @@ class ProQueue:
         self.prep, self.authorize = prep, authorize
         self.split_create, self.split_get, self.split_path = split_create, split_get, split_path
         self.router = APIRouter(prefix='/pro')
+        pose_spec = importlib.util.spec_from_file_location('morph_pose_queue', Path(__file__).with_name('pose_queue.py'))
+        pose_module = importlib.util.module_from_spec(pose_spec)
+        pose_spec.loader.exec_module(pose_module)
+        self.poses = pose_module.PoseQueue(root, prep, authorize)
+        # Already-prefixed subrouter must be included without /pro duplication.
         self.task = None
         self.routes()
 
@@ -172,9 +177,11 @@ class ProQueue:
 
     async def start(self):
         self.init()
+        await self.poses.start()
         self.task = asyncio.create_task(self.loop())
 
     async def stop(self):
+        await self.poses.stop()
         if self.task:
             self.task.cancel()
             try:

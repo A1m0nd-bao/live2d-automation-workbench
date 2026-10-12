@@ -35,6 +35,16 @@ export const LIVE2D_PRO_STATES: ProState[] = [
     direction: '仅改变双臂为轻微思考姿势；不得遮住脸，不得改变身体比例。',
   },
   {
+    id: 'action_07_palm_up_arms_only', label: '托掌', kind: 'action',
+    slotTargets: ['handwear-l', 'handwear-r'],
+    direction: '仅改变一侧完整手臂为自然托掌；另一侧复用基础 PSD。',
+  },
+  {
+    id: 'action_08_clenched_fist_arms_only', label: '握拳', kind: 'action',
+    slotTargets: ['handwear-l', 'handwear-r'],
+    direction: '仅改变一侧完整手臂为胸前握拳；另一侧复用基础 PSD。',
+  },
+  {
     id: 'expression_02_soft_smile_face_controls', label: '微笑', kind: 'expression',
     slotTargets: ['face', 'eyes', 'brows', 'mouth_nose', 'front_hair'],
     direction: '仅改变轻微微笑相关的脸、眼、眉、口鼻与必要的前发遮挡；身体姿势不变。',
@@ -74,11 +84,12 @@ export function buildLive2DProManifest(sourceName: string, stateIds: string[]): 
     selectedStates,
     requiredPipeline: [
       'Persona Lock：固定身份、服装、画风、镜头与光源。',
-      '生成中立全身主图与每个选中状态图；每张图保持相同画布和比例。',
-      '每张图分别提交 See-Through，保存对应 PSD。',
+      '基础原图整理并拆层一次；已有分层 PSD 直接复用，不再生成基础图。',
+      'psd-pose-variants：从基础 PSD 的原图层提取参考，仅生成完整肩—袖—肘—腕—手部件；不再生全身状态图或逐张 See-Through。',
+      '按当前 PSD 的肩位和骨段长度对齐；单侧动作直接复用另一侧原层，不猜左右、不强拉伸。',
       '嘴部定位：沿用基础 PSD 独立 mouth 图层的原画布坐标；缺失、重复或 mouth_nose 合层进入人工确认，不自动删除鼻子或脸部。',
       '原生嘴部：从唯一独立 mouth 图层读取位置，绑定嘴线、口腔、舌头的张嘴 × 嘴型关键形态；闭嘴保留原画，缺失或合层则停止并提示修正。',
-      '按 slotTargets 做语义差分，写入 action_*__slot 或 expression_*__slot。',
+      '保留基础层、顺序和中立像素，将完整替换部件写入隐藏 action_* 组；表情与嘴部不进入该部件生成流程。',
       '对每个状态做合成、遮挡、缺件和锚点一致性检查。',
       '将通过质检的主 PSD 交给 Cubism 多状态导出。',
       '九向转头：生成并核查 AngleX × AngleY 的 3×3 关键形态，保留角色自身的头部和眼睛绑定。',
@@ -97,10 +108,10 @@ export function buildLive2DProManifest(sourceName: string, stateIds: string[]): 
 
 export function live2dProStatePrompt(state: ProState) {
   return [
-    '以 Persona Lock 和中立主图为唯一角色设定，生成同一角色的 Live2D Pro 状态图。',
+    '以基础分层 PSD 的原画和手臂为权威参考，只生成完整肩袖手局部部件。',
     state.direction,
-    '保持正面或近正面全身构图、相同焦距、相同画布比例、相同光源、相同服装和配饰。',
-    '不要裁切四肢，不要新增道具、背景、角色或服装变化，不要改动角色身份。',
+    '不要生成全身图；保持服装材质、袖型、手掌和骨段比例，真实透明背景。',
+    '源 PSD 的其余图层不变，动作组默认隐藏，不再逐张拆件。',
   ].join('');
 }
 

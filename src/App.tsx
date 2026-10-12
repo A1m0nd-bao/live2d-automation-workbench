@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
 import { prepRequest, submitPrep, recoverPrepState, type PrepJob } from './prepQueue';
-import { proRequest, type ProRun } from './proQueue';
+import { proRequest, proRunPath, PSD_POSE_PIPELINE, type ProRun } from './proQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
 import { saveAsset, saveAssets, readAsset, downloadBlob } from './assets';
 import {
@@ -76,6 +76,7 @@ type Task = {
   mode?: 'standard' | 'pro';
   proStateIds?: string[];
   proRunId?: string;
+  proPipeline?: 'psd-pose-variants-v1';
   proRun?: ProRun;
   proQueueError?: string;
   proMergeError?: string;
@@ -121,11 +122,11 @@ const stage = (t: Task) =>
   t.mode === 'pro' && t.proRigPassed && t.nativeRuntimeFile
     ? t.cmoAccepted ? 'Pro：原生运行包已验收' : 'Pro：嘴部与九向已生成 · 待视觉验收'
     : t.mode === 'pro' && t.proStage === 'base_psd_ready'
-    ? 'Pro：基础 PSD 已就绪 · 待状态图'
+    ? 'Pro：基础 PSD 已就绪 · 待局部部件'
     : t.mode === 'pro' && t.proStage === 'embedded_states_ready'
       ? 'Pro：已识别内嵌差分 · 可生成 CMO3'
     : t.mode === 'pro' && t.proStage === 'state_generation'
-      ? 'Pro：等待状态图生成'
+      ? 'Pro：局部部件生成／合层中'
       : t.mode === 'pro' && t.proStage === 'persona_lock'
         ? 'Pro：等待基础状态处理'
         : t.cmoAccepted
@@ -679,25 +680,33 @@ function WorkbenchApp() {
       type: 'image/vnd.adobe.photoshop',
     });
   }
-  async function importPsdBatch(files: File[], batchId: string, mode: 'standard' | 'pro') {
+  async function importPsdBatch(files: File[], batchId: string, mode: 'standard' | 'pro', stateIds = proStateIds, provider = prepProvider) {
     const imported: Task[] = [];
     for (const [index, source] of files.entries()) {
       if (validate(source) !== 'psd') throw new Error('本地批量制作仅接受 PSD。');
       const existing = currentTasks.current.find(t => t.batchId === batchId && t.referenceName === source.name && t.mode === mode);
-      if (existing) { imported.push(existing); continue; }
+        if (existing) {
+          if (mode === 'pro' && (JSON.stringify([...(existing.proStateIds ?? [])].sort()) !== JSON.stringify([...stateIds].sort())
+              || (existing.prepProvider ?? 'doubao') !== provider))
+            throw new Error('此批 Pro 已按另一组动作或提供方建立；请新建 PSD 批次，避免覆盖已运行的任务或静默重复计费。');
+          imported.push(existing); continue;
+        }
       const taskId = `${batchId}-${mode}-${index}`;
       const manifest = mode === 'pro'
         ? extractVariantManifest(await source.arrayBuffer()) as unknown as VariantManifest : null;
       const available = new Set(manifest?.variants.map(v => v.id) ?? []);
       const embedded = LIVE2D_PRO_STATES.filter(s => available.has(s.id)).map(s => s.id);
+      const selected = mode === 'pro' ? [...stateIds] : [];
+      const allEmbedded = selected.length > 0 && selected.every(id => embedded.includes(id));
       await saveAsset(`${taskId}:input`, source);
       const next: Task = {
         id: taskId, batchId, name: source.name.replace(/\.psd$/i, ''), referenceName: source.name,
         inputFile: source.name, inputKind: 'psd', psdFile: source.name,
         createdAt: new Date().toLocaleString('zh-CN'), mode,
-        proStateIds: mode === 'pro' ? embedded : undefined,
+        proStateIds: mode === 'pro' ? selected : undefined,
         proEmbeddedStateIds: mode === 'pro' ? embedded : undefined,
-        proStage: mode === 'pro' ? 'embedded_states_ready' : undefined,
+        prepProvider: mode === 'pro' ? provider : undefined,
+        proStage: mode === 'pro' ? allEmbedded ? 'embedded_states_ready' : 'base_psd_ready' : undefined,
         qaPassed: false,
         remoteMessage: '批量导入：原始 PSD 已保存，可接续本地制作。',
       };
@@ -722,7 +731,19 @@ function WorkbenchApp() {
               await saveAssets([{ key: `${item.id}:runtime`, value: runtime }, { key: `${item.id}:native-runtime`, value: runtime }]);
               update(item.id, { nativeRuntimeFile: `${item.name}-native-runtime.zip`, runtimeFile: `${item.name}-native-runtime.zip` });
             } else {
-              await generate(item);
+              let ready = item;
+              if (item.mode === 'pro' && item.proStage !== 'embedded_states_ready' && !item.proMergedFile) {
+                for (;;) {
+                  const synced = await syncPro(ready);
+                  if (!synced) throw new Error('部件队列未同步；请查看任务错误，不会退回旧拆件流程。');
+                  ready = synced;
+                  if (ready.proMergedFile) break;
+                  if (ready.proRun?.status === 'needs_attention') throw new Error(ready.proRun.message);
+                  setProgress(`局部动作 ${index + 1}/${items.length} · ${item.name} · ${ready.proRun?.message || '等待服务端结果'}`);
+                  await new Promise(resolve => window.setTimeout(resolve, 8000));
+                }
+              }
+              await generate(ready);
             }
           }
           reports.push({ name: item.name, status: 'succeeded' });
@@ -736,23 +757,23 @@ function WorkbenchApp() {
       const zip = new JSZip();
       for (const [i, item] of items.entries()) {
         const folder = zip.folder(`${String(i + 1).padStart(3, '0')}-${item.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_')}`)!;
-        for (const [suffix, filename] of [['input', 'source.psd'], ['cmo', 'model.cmo3'], ['native-runtime', 'native-runtime.zip'], ['rig-report', 'rig-report.json']]) {
+        for (const [suffix, filename] of [['input', 'source.psd'], ['pro-merged-psd', 'multi-state.psd'], ['pro-merge-report', 'pose-report.json'], ['cmo', 'model.cmo3'], ['native-runtime', 'native-runtime.zip'], ['rig-report', 'rig-report.json']]) {
           const blob = await readAsset(`${item.id}:${suffix}`);
           if (blob) folder.file(filename, blob);
         }
       }
-      zip.file('manifest.json', JSON.stringify({ batchName, items: reports }, null, 2));
+      zip.file('manifest.json', JSON.stringify({ batchName, items: reports, visualAcceptance: 'pending_human_review' }, null, 2));
       downloadBlob(await zip.generateAsync({ type: 'blob' }), `${batchName}-制作包.zip`);
       setToast(`本地制作 ${reports.filter(r => r.status === 'succeeded').length}/${items.length}，已下载打包文件。失败原因保留在清单中。`);
     } finally { lock.current = false; setBusy(false); setProgress(''); }
   }
-  async function produceSplitBatch(batch: SplitBatch, mode: 'standard' | 'pro') {
+  async function produceSplitBatch(batch: SplitBatch, mode: 'standard' | 'pro', stateIds: string[], provider: Live2dPrepProvider) {
     const files: File[] = [];
     for (const item of batch.items.filter(item => item.status === 'succeeded')) {
       const bytes = await serviceRequest<ArrayBuffer>('output', { jobId: item.id });
       files.push(new File([bytes], item.filename, { type: 'image/vnd.adobe.photoshop' }));
     }
-    const imported = await importPsdBatch(files, batch.id, mode);
+    const imported = await importPsdBatch(files, batch.id, mode, stateIds, provider);
     await produceBatch(imported, batch.name);
   }
   async function proStatePsd(t: Task, stateId: string) {
@@ -822,19 +843,44 @@ function WorkbenchApp() {
     try {
       let run: ProRun;
       const runId = t.proRunId || crypto.randomUUID().replaceAll('-', '');
+      // Persist the pipeline before POST. Restoring a legacy run only queries
+      // its original endpoint; never silently starts the paid replacement.
+      const pipeline = t.proPipeline ?? t.proRun?.pipeline ?? (t.proRunId ? undefined : PSD_POSE_PIPELINE);
       if (!t.proRun) {
-        if (!t.remoteJobId || !t.psdFile) throw new Error('自动队列需要已完成的基础拆分任务。');
-        const reference = await readAsset(`${t.id}:prepared`);
-        if (!reference) throw new Error('缺少中立主图，请恢复基础主图；不会使用其他状态作为参考。');
-        rememberPrep(t, { proRunId: runId });
-        const form = new FormData();
-        form.append('job_id', runId); form.append('base_id', t.remoteJobId);
-        form.append('states', JSON.stringify(t.proStateIds ?? []));
-        form.append('provider', t.prepProvider ?? 'doubao');
-        form.append('image', reference, 'neutral.png');
-        run = await proRequest<ProRun>('/jobs', form);
+        if (!t.psdFile) throw new Error('请先准备分层基础 PSD。');
+        if (pipeline !== PSD_POSE_PIPELINE) {
+          run = await proRequest<ProRun>(`/jobs/${runId}`);
+        } else {
+          const base = await psdInput(t);
+          rememberPrep(t, { proRunId: runId, proPipeline: pipeline, proStage: 'state_generation' });
+          const form = new FormData();
+          form.append('job_id', runId);
+          form.append('states', JSON.stringify(t.proStateIds ?? []));
+          form.append('provider', t.prepProvider ?? 'doubao');
+          form.append('psd', base, 'source.psd');
+          run = await proRequest<ProRun>('/pose-jobs', form);
+        }
       } else {
-        run = await proRequest<ProRun>(`/jobs/${runId}`);
+        run = await proRequest<ProRun>(proRunPath(runId, pipeline));
+      }
+      if (run.pipeline === PSD_POSE_PIPELINE) {
+        const patch: Partial<Task> = { proRunId: runId, proPipeline: run.pipeline, proRun: run,
+          proStage: 'state_generation', proQueueError: undefined, remoteMessage: run.message };
+        if (run.status === 'ready') {
+          const [data, report] = await Promise.all([
+            proRequest<ArrayBuffer>(`/pose-jobs/${runId}/output`),
+            proRequest<unknown>(`/pose-jobs/${runId}/report`),
+          ]);
+          if (new TextDecoder().decode(data.slice(0, 4)) !== '8BPS') throw new Error('部件合层返回文件不是 PSD');
+          await saveAssets([
+            { key: `${t.id}:pro-merged-psd`, value: new Blob([data]) },
+            { key: `${t.id}:pro-merge-report`, value: new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }) },
+          ]);
+          Object.assign(patch, { proMergedFile: `${t.name}-psd-pose-variants.psd`, proMergeReportFile: `${t.name}-pose-report.json`,
+            proStage: 'merge_ready', proMergeError: undefined, qaPassed: false });
+        }
+        update(t.id, patch);
+        return { ...t, ...patch };
       }
       const assets = { ...t.proStateAssets };
       for (const state of run.states) {
@@ -851,13 +897,14 @@ function WorkbenchApp() {
         try { await mergeProStates(next); }
         catch (e) { update(t.id, { proMergeError: e instanceof Error ? e.message : '合层失败，原始 PSD 已保留' }); }
       }
+      return next;
     } catch (e) {
       update(t.id, { proQueueError: e instanceof Error ? e.message : 'Pro 状态暂未同步' });
     } finally { proRefreshing.current.delete(t.id); }
   }
   async function retryProState(t: Task, stateId: string) {
     if (!t.proRunId || !window.confirm('仅重试该状态。若上次结果未知，重新生图可能再次计费，是否继续？')) return;
-    const run = await proRequest<ProRun>(`/jobs/${t.proRunId}/states/${stateId}/retry`, new FormData());
+    const run = await proRequest<ProRun>(`${proRunPath(t.proRunId, t.proPipeline ?? t.proRun?.pipeline)}/states/${stateId}/retry`, new FormData());
     update(t.id, { proRun: run, proMergeError: undefined, proQueueError: undefined });
   }
   async function prepare(t: Task): Promise<File | undefined> {
@@ -1014,7 +1061,7 @@ function WorkbenchApp() {
           psdFile: filename,
           qaPassed: false,
           proStage: 'base_psd_ready',
-          remoteMessage: '基础 PSD 已就绪。下一步将按 Persona Lock 生成并拆分所选状态图。',
+          remoteMessage: '基础 PSD 已就绪。下一步仅生成完整手臂部件，按源 PSD 对齐合层，不再逐张拆件。',
         });
         await syncPro({ ...t, psdFile: filename });
         setToast('Pro 基础 PSD 已保存，正在连接多状态队列。');
@@ -1071,6 +1118,9 @@ function WorkbenchApp() {
     return () => clearInterval(timer);
   }, [task]);
   async function generate(t: Task) {
+    if (t.mode === 'pro' && (t.proStateIds?.length ?? 0) > 0 && !t.proMergedFile
+        && !t.proStateIds!.every(id => t.proEmbeddedStateIds?.includes(id)))
+      throw new Error('所选动作尚未完成部件合层；请先完成或处理状态队列，不会用空状态 PSD 生成交付包。');
     const merged = t.proMergedFile
       ? await readAsset(`${t.id}:pro-merged-psd`)
       : undefined;
@@ -1381,7 +1431,7 @@ function WorkbenchApp() {
         <Modal title="新建生产任务" close={() => setCreate(false)}>
           <p>
             原图保存在当前浏览器。PNG/JPG 上传后会自动生成 Live2D 友好图、提交
-            See-Through、轮询下载 PSD 并尝试生成运行时包；PSD 与 .stretch 不经过生图步骤。
+            See-Through、轮询下载基础 PSD。标准 PSD 与 .stretch 不生图；Pro PSD 仅为缺失的选定动作生成局部部件，不再拆状态图。
           </p>
           <fieldset className="workflow-mode">
             <button
@@ -1423,9 +1473,9 @@ function WorkbenchApp() {
           {productionMode === 'pro' && (
             <section className="pro-state-picker">
               <b>选择首批状态</b>
-              <small>基础 PSD 完成后，这些状态会按同一 Persona Lock 逐一生成、拆层与合并。</small>
+              <small>基础 PSD 完成后，仅生成完整肩袖手部件并合层；已有 PSD 可直接开始，不再逐张 See-Through。</small>
               <div>
-                <small>仅特殊手势走生图与拆分，逐个串行完成。表情沿用已有模型参数；没有绑定的表情不会自动补齐。</small>
+                <small>psd-pose-variants · 单侧动作复用另一侧原图层，保持基础层顺序和中立像素。表情和嘴部不改动。选定提供方也用于部件生图。</small>
                 {LIVE2D_PRO_STATES.filter(state => state.kind === 'action').map((state) => {
                   const checked = proStateIds.includes(state.id);
                   return (
@@ -1516,7 +1566,7 @@ function WorkbenchApp() {
                   referenceName: sourceFile.name,
                   inputFile: sourceFile.name,
                   inputKind: k,
-                  prepProvider: k === 'image' ? prepProvider : undefined,
+                  prepProvider: k === 'image' || productionMode === 'pro' ? prepProvider : undefined,
                   prepMode: k === 'image' ? prepMode : undefined,
                   psdFile: k === 'psd' ? sourceFile.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
@@ -1610,12 +1660,12 @@ function WorkbenchApp() {
                   下载 Pro 状态清单与提示词约束
                 </button>
                 {task.proStage === 'base_psd_ready' && (
-                  <small>基础 PSD 已完成。服务端逐个生成并拆分状态；收齐后工作台自动合层。关闭网页不会中断队列，合层会在重新打开后继续。</small>
+                  <small>基础 PSD 已完成。服务端生成局部完整手臂并合层，保留原图层；关闭网页不影响部件队列，回来后取回多状态 PSD。</small>
                 )}
-                {task.psdFile && task.remoteJobId && !task.proMergedFile && task.proStage !== 'embedded_states_ready' && (
+                {task.psdFile && !task.proMergedFile && task.proStage !== 'embedded_states_ready' && (
                   <div style={{ display: 'grid', gap: 8 }}>
-                    <button className="ghost-button" disabled={busy} onClick={() => void operate(() => syncPro(task))}>
-                      {task.proRunId ? '恢复／同步多状态队列' : '启动所选状态自动队列'}
+                    <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => { await syncPro(task); })}>
+                      {task.proRunId ? '恢复／同步多状态队列' : '从基础 PSD 生成局部动作（可能计费）'}
                     </button>
                     <small>{task.proRun?.message}</small>
                     {task.proQueueError && <p role="alert">{task.proQueueError}</p>}
@@ -1624,7 +1674,15 @@ function WorkbenchApp() {
                       <div key={state.id} style={{ display: 'grid', gap: 6 }}>
                         <b>{LIVE2D_PRO_STATES.find(s => s.id === state.id)?.label ?? state.id}</b>
                         <small>第 {state.attempt} 次 · {state.message}</small>
-                        {task.proRun?.status === 'needs_attention' && ['failed', 'uncertain'].includes(state.status) && (
+                        {state.preview && task.proRunId && <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
+                          const data = await proRequest<ArrayBuffer>(`/pose-jobs/${task.proRunId}/states/${state.id}/preview`);
+                          downloadBlob(new Blob([data], { type: 'image/png' }), `${task.name}-${state.id}-preview.png`);
+                        })}>下载实际合层预览</button>}
+                        {task.proRun?.status === 'needs_attention' && state.status === 'needs-review' && task.proPipeline === PSD_POSE_PIPELINE && <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => {
+                          const run = await proRequest<ProRun>(`/pose-jobs/${task.proRunId}/states/${state.id}/review`, new FormData());
+                          update(task.id, { proRun: run, proQueueError: undefined });
+                        })}>仅复核已保存部件（不重新生图）</button>}
+                        {task.proRun?.status === 'needs_attention' && ['failed', 'uncertain', 'needs-review'].includes(state.status) && (
                           <button className="ghost-button" disabled={busy} onClick={() => void operate(() => retryProState(task, state.id))}>仅重试此状态（可能计费）</button>
                         )}
                       </div>
@@ -1637,7 +1695,7 @@ function WorkbenchApp() {
                     将以未带状态前缀的图层作为中性基准，直接写入所选差分；不需要额外上传状态 PSD。
                   </small>
                 )}
-                {task.psdFile && task.proStage !== 'embedded_states_ready' && (
+                {task.psdFile && task.proRunId && task.proPipeline !== PSD_POSE_PIPELINE && task.proStage !== 'embedded_states_ready' && (
                   <section className="pro-state-imports">
                     <div>
                       <b>状态 PSD 收集／手动替换</b>
@@ -2017,11 +2075,14 @@ function proFlowState(task: Task, step: 'source' | 'persona' | 'basePsd' | 'stat
   const collectedStates = Object.keys(task.proStateAssets || {}).filter((id) => task.proStateIds?.includes(id)).length;
   if (step === 'source') return task.inputFile ? 'done' : 'queued';
   if (embedded && ['persona', 'basePsd', 'states', 'statePsd', 'merge'].includes(step)) return 'done';
+  if (task.inputKind === 'psd' && ['persona', 'basePsd'].includes(step)) return 'done';
+  if (task.proPipeline === PSD_POSE_PIPELINE && ['states','statePsd'].includes(step))
+    return task.proMergedFile ? 'done' : task.proRunId ? 'working' : 'queued';
   if (step === 'persona') return task.preparedFile ? 'done' : stage === 'persona_lock' || stage === 'base_processing' ? 'working' : 'queued';
   if (step === 'basePsd') return task.psdFile ? 'done' : task.remoteJobId ? 'working' : 'queued';
   if (step === 'states') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : task.psdFile ? 'working' : 'queued';
   if (step === 'statePsd') return expectedStates > 0 && collectedStates === expectedStates ? 'done' : collectedStates ? 'working' : task.psdFile ? 'working' : 'queued';
-  if (step === 'merge') return stage === 'merge_ready' ? 'done' : stage === 'state_decomposition' ? 'working' : 'queued';
+  if (step === 'merge') return stage === 'merge_ready' ? 'done' : stage === 'state_decomposition' || stage === 'state_generation' ? 'working' : 'queued';
   return task.proRigPassed && task.nativeRuntimeFile ? 'done' : task.hasGenerated || stage === 'merge_ready' || embedded ? 'working' : 'queued';
 }
 
@@ -2065,11 +2126,11 @@ function ProProductionLine({ task }: { task: Task }) {
           <ProFlowNode title="See-Through" note="基础图拆分 PSD" state={proFlowState(task, 'basePsd')}><Layers3 size={17} /></ProFlowNode>
         </div>
         <div className="pro-flow-lane state-lane">
-          <div className="pro-lane-label"><span>状态形态</span><small>Persona Lock 差分图</small></div>
+          <div className="pro-lane-label"><span>状态形态</span><small>PSD 局部部件替换</small></div>
           <ArrowRight className="pro-flow-arrow" size={19} />
-          <ProFlowNode title="批量状态图" note="生成或导入每个指定状态" state={proFlowState(task, 'states')}><FileImage size={17} /></ProFlowNode>
+          <ProFlowNode title="PSD 动作部件" note="完整肩袖手，保留另一侧" state={proFlowState(task, 'states')}><FileImage size={17} /></ProFlowNode>
           <ArrowRight className="pro-flow-arrow" size={19} />
-          <ProFlowNode title="逐张 See-Through" note="每个状态独立拆分 PSD" state={proFlowState(task, 'statePsd')}><Layers3 size={17} /></ProFlowNode>
+          <ProFlowNode title="锚点对齐与合层" note="不再拆件，动作组默认隐藏" state={proFlowState(task, 'statePsd')}><Layers3 size={17} /></ProFlowNode>
         </div>
       </div>
       <div className="pro-state-chips" aria-label="本任务选择的状态">

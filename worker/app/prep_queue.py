@@ -249,11 +249,18 @@ class PrepQueue:
         data = (self.root / job["id"] / "source").read_bytes()
         source = f"data:{self.mime(data)};base64,{base64.b64encode(data).decode()}"
         prompt = (self.root / job["id"] / "prompt.txt").read_text()
+        # PSD pose jobs use the same proven transport, not the full-body prep
+        # policy. Options are internal, never accepted from a public request.
+        options = job.get('_options', {})
+        update = job.get('_update') or (lambda **fields: self.update(job['id'], **fields))
+        references = [data, *job.get('_references', [])]
+        size = options.get('size', '1536x2400')
         headers = {"Authorization": f"Bearer {key}"}
         if job["provider"] == "doubao":
             url = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
-            body = {"model": job["model"], "prompt": prompt, "image": [source],
-                    "size": "1536x2400", "sequential_image_generation": "disabled",
+            body = {"model": job["model"], "prompt": prompt,
+                    "image": [f"data:{self.mime(x)};base64,{base64.b64encode(x).decode()}" for x in references],
+                    "size": size, "sequential_image_generation": "disabled",
                     "response_format": "b64_json", "watermark": False}
         else:
             # Match Vercel's official gateway-image-model.ts wire protocol,
@@ -261,21 +268,21 @@ class PrepQueue:
             url = "https://ai-gateway.vercel.sh/v4/ai/image-model"
             headers.update({"ai-model-id": job["model"], "ai-image-model-specification-version": "4",
                             "ai-gateway-protocol-version": "0.0.1", "ai-gateway-auth-method": "api-key"})
-            body = {"prompt": prompt, "n": 1, "size": "1536x2400",
-                    "files": [{"type": "file", "mediaType": self.mime(data), "data": base64.b64encode(data).decode()}],
-                    "providerOptions": {"openai": {"outputFormat": "png"}}}
+            body = {"prompt": prompt, "n": 1, "size": size,
+                    "files": [{"type": "file", "mediaType": self.mime(x), "data": base64.b64encode(x).decode()} for x in references],
+                    "providerOptions": {"openai": {"outputFormat": "png", **options.get('openai', {})}}}
         # No transport retries: reconnecting a paid synchronous call may charge twice.
         proxy = (os.getenv('MORPH_IMAGE_REVIEW_PROXY') or getproxies().get('https')) if job['provider'] == 'image2' else None
         async with httpx.AsyncClient(timeout=httpx.Timeout(570, connect=20), proxy=proxy) as client:
             response = await client.post(url, headers=headers, json=body)
-        self.update(job["id"], request_id=response.headers.get("x-request-id"))
+        update(request_id=response.headers.get("x-request-id"))
         if not response.is_success:
             # Do not persist raw provider bodies: they can contain credentials,
             # embedded input images, signed URLs or internal diagnostics.
             status = "uncertain" if response.status_code >= 500 else "failed"
             labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "额度或余额不足", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
             detail = rejection_detail(response) if response.status_code == 400 else ""
-            self.update(job["id"], status=status, finished_at=time.time(),
+            update(status=status, finished_at=time.time(),
                 message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）"
                         f"{'；' + detail if detail else ''}；未自动重试。")
             return None

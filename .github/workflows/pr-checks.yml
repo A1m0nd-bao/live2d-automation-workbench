@@ -27,6 +27,13 @@ jobs:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Run frontend and rig regression tests
         run: node --test scripts/test-prep-policy.mjs tests/*.test.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test PSD-first pose and durable batch queues (no provider requests)
+        run: |
+          pip install -r worker/requirements.txt fastapi
+          python -m unittest worker/test_psd_pose.py worker/test_pro_queue.py worker/test_prep_queue.py worker/test_batch_queue.py worker/test_batch_recovery.py -q
       # PR code gets no deployment credentials or service secrets.
       - name: Build Pages without deploying
         run: npm run build:pages
