@@ -1,0 +1,37 @@
+import { getDirectServiceConfig } from './serviceBridge';
+
+export type BatchSettings = { resolution: number; seed: number; split_limbs: boolean };
+export const BATCH_DEFAULTS: BatchSettings = { resolution: 1024, seed: 42, split_limbs: true };
+export type SplitBatch = {
+  id: string; name: string; created_at?: number;
+  settings: BatchSettings; state: 'uploading' | 'active' | 'paused' | 'completed';
+  total: number; succeeded: number; failed: number;
+  items: Array<{ id: string; name: string; sha256: string; uploaded: boolean;
+    status: 'uploading' | 'pending' | 'queued' | 'running' | 'succeeded' | 'failed';
+    message: string; filename: string }>;
+};
+export async function batchRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const config = getDirectServiceConfig();
+  if (!config) throw new Error('请先接入本机桥接或配置 Relay。');
+  const response = await fetch(`${config.relayUrl}/batches${path}`, {
+    ...init, headers: { ...init.headers, 'X-Morph-Device-Token': config.deviceToken },
+    signal: AbortSignal.timeout(path.endsWith('/output') ? 120_000 : 30_000), cache: 'no-store',
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({})) as { detail?: unknown };
+    throw new Error(typeof data.detail === 'string' ? data.detail : response.status === 404
+      ? 'Relay 尚未安装批处理接口，请更新本机桥接。' : `批处理服务返回 ${response.status}`);
+  }
+  return (path.endsWith('/output') ? response.blob() : response.json()) as Promise<T>;
+}
+export async function fingerprint(file: File) {
+  const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+  return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, '0')).join('');
+}
+export function validateBatchFiles(files: File[]) {
+  if (!files.length || files.length > 100) throw new Error('每批选择 1–100 张 PNG/JPG。');
+  for (const file of files) {
+    if (!/\.(png|jpe?g)$/i.test(file.name)) throw new Error(`${file.name}：批量拆件仅接受 PNG/JPG。已有 PSD 请使用批量制作入口。`);
+    if (file.size > 20 * 1024 * 1024 || !file.size) throw new Error(`${file.name}：单张图片须为 1 字节至 20 MB。`);
+  }
+}
