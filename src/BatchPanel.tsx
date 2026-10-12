@@ -3,11 +3,13 @@ import { BATCH_DEFAULTS, batchRequest, fingerprint, validateBatchFiles, type Spl
 import { connectLocalRelay, hasDirectServiceConfig } from './serviceBridge';
 import { downloadBlob, readAsset, saveAsset } from './assets';
 import './batch.css';
+import { LIVE2D_PRO_STATES } from './live2dPro';
+import type { Live2dPrepProvider } from './live2dPrep';
 
 const PENDING = 'morph.batch-upload.v1';
 const LABELS = { uploading: '待上传', pending: '排队', queued: '排队', running: '拆件中', succeeded: 'PSD 已保存', failed: '失败' };
 type Props = {
-  onProduce: (batch: SplitBatch, profile: 'standard' | 'pro') => Promise<void>;
+  onProduce: (batch: SplitBatch, profile: 'standard' | 'pro', states: string[], provider: Live2dPrepProvider) => Promise<void>;
   runtimeCounts: Record<string, number>;
   seedFiles: File[];
 };
@@ -24,6 +26,8 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
   const [autoDownload, setAutoDownload] = useState(true);
   const autoDownloadRef = useRef(autoDownload);
   const [profile, setProfile] = useState<'standard' | 'pro'>('standard');
+  const [poseIds, setPoseIds] = useState(['action_02_wave_arms_only']);
+  const [poseProvider, setPoseProvider] = useState<Live2dPrepProvider>('doubao');
   const downloaded = useRef(new Set<string>());
   const actionLock = useRef(false);
   const refreshing = useRef(false);
@@ -152,8 +156,13 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
         {active.state !== 'completed' && <button className="ghost-button" disabled={busy || active.state === 'uploading'} onClick={() => void operate(async () => { await batchRequest(`/${active.id}/${active.state === 'paused' ? 'start' : 'pause'}`, { method: 'POST' }); await load(); })}>{active.state === 'paused' ? '继续拆件' : '暂停后续拆件'}</button>}
         <button className="ghost-button" disabled={busy || !active.succeeded} onClick={() => void operate(async () => { const zip = await batchRequest<Blob>(`/${active.id}/output`); downloadBlob(zip, `${active.name}-${active.id.slice(0, 8)}-psd.zip`); })}>下载{active.state === 'completed' ? '本批' : '已完成'} PSD ZIP</button>
         <select aria-label="批量制作模式" value={profile} onChange={e => setProfile(e.target.value as 'standard' | 'pro')}><option value="standard">标准 CMO3 / MOC3</option><option value="pro">Pro CMO3 / MOC3</option></select>
-        <button className="primary-button" disabled={busy || !active.succeeded} onClick={() => void operate(async () => { setMessage('本地制作队列已开始，请保持此页面打开。'); await onProduce(active, profile); setMessage('本批已完成项的本地制作结束，可在工作台查看文件与失败原因。'); })}>批量制作已完成的 PSD</button>
+        <button className="primary-button" disabled={busy || !active.succeeded || (profile === 'pro' && !poseIds.length)} onClick={() => void operate(async () => { setMessage(profile === 'pro' ? '从基础 PSD 生成局部部件（可能计费），不再逐张状态拆件；本地建模阶段请保持页面打开。' : '本地制作队列已开始，请保持此页面打开。'); await onProduce(active, profile, poseIds, poseProvider); setMessage('本批已完成项的本地制作结束，可在工作台查看文件与失败原因。'); })}>批量制作已完成的 PSD{profile === 'pro' ? '（部件生图可能计费）' : ''}</button>
       </div>
+      {profile === 'pro' && <fieldset className="pro-state-picker"><legend>PSD 局部动作 · 不再逐张 See-Through</legend>
+        <div>{LIVE2D_PRO_STATES.filter(s => s.kind === 'action').map(s => <label key={s.id}><input type="checkbox" disabled={busy} checked={poseIds.includes(s.id)} onChange={e => setPoseIds(ids => e.target.checked ? [...ids,s.id] : ids.filter(id => id !== s.id))} />{s.label}</label>)}</div>
+        <label>部件生图提供方<select value={poseProvider} disabled={busy} onChange={e => setPoseProvider(e.target.value as Live2dPrepProvider)}><option value="doubao">豆包</option><option value="image2">Image-2</option></select></label>
+        <small>整臂替换、另一侧复用、源层不变。嘴部与表情不改动；失败或未知结果不自动重生。</small>
+      </fieldset>}
       <small>暂停仅停止后续提交，当前拆件会继续。拆件由常驻 Relay 跟踪；本地建模时保持此页打开。</small>
       <div className="batch-table"><table><thead><tr><th>顺序</th><th>原图</th><th>状态</th><th>说明</th></tr></thead><tbody>{active.items.map((item, i) => <tr key={item.id}><td>{i + 1}</td><td>{item.name}</td><td>{LABELS[item.status]}</td><td>{item.message}</td></tr>)}</tbody></table></div>
     </>}
