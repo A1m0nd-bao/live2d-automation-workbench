@@ -31,7 +31,7 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.calls.append((job_id, source.read_bytes(), settings))
             self.jobs[job_id] = dict(status='running', message='processing', error=None, output_psd=None)
         self.queue = module.BatchQueue(Path(self.temp.name), auth, create, self.jobs.get)
-        self.data = module.BatchInput(id='b'*32, items=[module.BatchItem(id=str(i)*32, name='same.png', sha256=hashlib.sha256(IMAGE).hexdigest()) for i in (1, 2, 3)])
+        self.data = module.BatchInput(id='b'*32, settings=module.SplitSettings(friendly=False), items=[module.BatchItem(id=str(i)*32, name='same.png', sha256=hashlib.sha256(IMAGE).hexdigest()) for i in (1, 2, 3)])
 
     def tearDown(self):
         self.temp.cleanup()

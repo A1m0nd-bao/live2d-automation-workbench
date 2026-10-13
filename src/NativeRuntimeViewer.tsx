@@ -363,7 +363,7 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
           index,
           file: entry.File,
           label: entry.Name || entry.File.split('/').pop()?.replace('.motion3.json', '') || `${group} ${index + 1}`,
-          isAction: group === 'Action' || group === 'MorphBaseline',
+          isAction: group === 'Action' || group === 'Actions' || group === 'MorphBaseline',
         })),
       );
       let lastRead = 0;
@@ -492,6 +492,7 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     playing.current = motion;
     const version = generation.current;
     const before = core.drawables.vertexPositions.map((points) => Float32Array.from(points));
+    const beforeOpacity = Float32Array.from(core.drawables.opacities);
     const started = await current.model.motion(motion.group, motion.index, window.PIXI.live2d.MotionPriority.FORCE);
     if (!started) {
       setMeasurement(`动作未能启动：${motion.group}[${motion.index}]。`);
@@ -501,7 +502,7 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     // Executed only by the asynchronous play button handler, never during render.
     // oxlint-disable-next-line react/react-compiler
     const began = performance.now();
-    let maxDelta = 0;
+    let maxDelta = 0, maxOpacityDelta = 0;
     const measure = () => {
       if (version !== generation.current || playing.current !== motion) return;
       core.drawables.vertexPositions.forEach((points, drawable) => {
@@ -509,13 +510,14 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
           maxDelta = Math.max(maxDelta, Math.abs(value - before[drawable][vertex]));
         });
       });
+      core.drawables.opacities.forEach((value,index) => { maxOpacityDelta = Math.max(maxOpacityDelta,Math.abs(value-beforeOpacity[index])); });
       if (performance.now() - began < 3500) {
         frame.current = requestAnimationFrame(measure);
         return;
       }
-      setMeasurement(maxDelta > 0.00001
-        ? `播放已启动，观察到最大顶点位移 ${maxDelta.toFixed(5)}（包含自然摆动/物理，不代表该动作已通过验收）。`
-        : `动作文件可以启动，但 ${motion.label} 在 3.5 秒内没有产生网格变化；不能作为有效动作交付。`);
+      setMeasurement(maxDelta > 0.00001 || maxOpacityDelta > .00001
+        ? `播放已启动：最大顶点位移 ${maxDelta.toFixed(5)}，透明度变化 ${maxOpacityDelta.toFixed(3)}（不代表视觉验收通过）。`
+        : `动作文件可以启动，但 ${motion.label} 未观察到网格或透明度变化；不能作为有效动作交付。`);
     };
     cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(measure);
@@ -533,13 +535,14 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     if (coreModel.update) coreModel.update(); else core.update();
     const before = vertices();
     const beforeOpacity = Array.from(core.drawables.opacities);
-    writeParameter(coreModel, wave.id, wave.max);
+    const waveEndpoint = wave.max >= 3 ? 3 : 1;
+    writeParameter(coreModel, wave.id, waveEndpoint);
     if (coreModel.update) coreModel.update(); else core.update();
     const after = vertices();
     const delta = before.reduce((max, point, index) => Math.max(max, Math.abs(point - after[index])), 0);
     const opacityDelta = beforeOpacity.reduce((max, value, index) => Math.max(max, Math.abs(value - core.drawables.opacities[index])), 0);
     pose.current.active = false;
-    setParameter(wave.id, wave.max);
+    setParameter(wave.id, waveEndpoint);
     setMeasurement(delta > 0.00001 || opacityDelta > 0.00001
       ? `Wave 响应检测：顶点差 ${delta.toFixed(5)}，图层透明度差 ${opacityDelta.toFixed(3)}。换图主要可能体现在透明度；最终效果仍需目视验收。`
       : 'Wave 参数存在，但没有检测到顶点或图层透明度响应。请检查工程关键形与参数精度；不会自动修改 MOC。');
@@ -549,7 +552,11 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     playing.current = null;
     values.current.delete('ParamActionWave');
     const p = runtime.current?.model.internalModel.coreModel._model.parameters;
-    const current = p ? p.values[p.ids.indexOf('ParamActionWave')] : pose.current.current;
+    let current = p ? p.values[p.ids.indexOf('ParamActionWave')] : pose.current.current;
+    // A non-wave integer slot must not be interpolated backwards through
+    // other poses. Jump to neutral before the measured 0..1 wave lift.
+    if (current > 3) { current = 0; const facade=runtime.current?.model.internalModel.coreModel;
+      if (facade) writeParameter(facade,'ParamActionWave',0); }
     pose.current = { from: current, current, target, began: performance.now(), active: true };
   };
   const download = (blob: Blob, filename: string) => {
@@ -563,7 +570,7 @@ export function NativeRuntimeViewer({ savedPackageName, loadSavedPackage, savePa
     download(await zip.generateAsync({ type: 'blob' }), 'morph-motion-data-and-code.zip');
   };
 
-  const priority = parameters.filter((item) => /ActionWave|Rotation_(left|right)(Elbow|Knee)|Leg[LR]Bend/.test(item.id));
+  const priority = parameters.filter((item) => /ActionWave|ActionPose|ExpressionPose|Rotation_(left|right)(Elbow|Knee)|Leg[LR]Bend/.test(item.id));
   const mouthParameters = parameters.filter(item => /mouth|lip/i.test(item.id));
   const remaining = parameters.filter((item) => !priority.includes(item) && !mouthParameters.includes(item));
   const hasBaselineGroup = motions.some(motion => motion.group === 'MorphBaseline');

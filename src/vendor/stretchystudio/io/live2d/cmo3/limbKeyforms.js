@@ -52,7 +52,7 @@ export function emitLimbGrid(x, { grid, gridPid, binding, bindingPid, bone, angl
       x.sub(key, 'i', { 'xs.n': 'keyIndex' }).text = String(i === 0 ? b : a);
     });
     x.subRef(cell, 'CFormGuid', pid, { 'xs.n': 'keyformGuid' });
-    forms.push({ pid, angle: angles[b], opacity: opacities[a] });
+    forms.push({ pid, angle: angles[b], opacity: opacities[a], state: a });
   }
   return forms;
 }

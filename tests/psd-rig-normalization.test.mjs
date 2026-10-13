@@ -14,7 +14,7 @@ function layer(name, x, y, width, height, rectangles) {
   return { name, x, y, width, height, opacity: 1, blendMode: 'normal', visible: true, imageData: { data, width, height } };
 }
 
-test('normalization repairs the neck painter order and derives paired legs and shoes', () => {
+test('normalization preserves source painter order and derives paired legs in place', () => {
   const source = [
     layer('topwear', 20, 20, 60, 45, [[0, 0, 60, 45]]),
     layer('neck', 42, 8, 16, 32, [[0, 0, 16, 32]]),
@@ -27,7 +27,11 @@ test('normalization repairs the neck painter order and derives paired legs and s
   ];
   const normalized = normalizePsdRigLayers(source);
   assert.equal(normalized.lowerBodyRigReady, true);
-  assert.deepEqual(normalized.layers.slice(0, 4).map(l => matchTag(l.name)), ['front hair', 'face', 'neck', 'topwear']);
+  assert.deepEqual(normalized.layers.slice(0, 4).map(l => matchTag(l.name)), ['topwear', 'neck', 'face', 'front hair']);
+  assert.equal(normalized.audit.policy, 'source-painter-order');
+  assert.equal(normalized.audit.actions.some(a => a.kind === 'neck-order'), false);
+  const legacy = normalizePsdRigLayers(source, { preserveOrder: false });
+  assert.deepEqual(legacy.layers.slice(0, 4).map(l => matchTag(l.name)), ['front hair', 'face', 'neck', 'topwear']);
   assert.ok(normalized.layers.some(l => matchTag(l.name) === 'legwear-l'));
   assert.ok(normalized.layers.some(l => matchTag(l.name) === 'legwear-r'));
   assert.ok(normalized.layers.some(l => matchTag(l.name) === 'footwear-l'));

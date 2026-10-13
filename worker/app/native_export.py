@@ -7,6 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 import zipfile
+import importlib.util
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 
@@ -42,7 +43,7 @@ class NativeExport:
                     raise HTTPException(413, 'CMO3 超过 200 MB')
             if data[:4] != b'CAFF':
                 raise HTTPException(400, '需要真实 CMO3 文件')
-            job = hashlib.sha256(data if profile == 'standard' else profile.encode() + b'\0' + data).hexdigest()
+            job = hashlib.sha256(b'native-delivery-v3\0' + profile.encode() + b'\0' + data).hexdigest()
             folder = self.root / job
             if not folder.exists():
                 folder.mkdir()
@@ -150,6 +151,24 @@ class NativeExport:
                     if qa.get('status') != 'passed' or qa.get('sampledCombinations') != 2700:
                         raise RuntimeError('Pro 组合检查未通过')
                     extra = ['enhanced.cmo3', 'enhanced.integration.json', 'pro-verification.json']
+                # Delivery metadata is authored by the same CMO3 writer that
+                # binds the keyforms. The compiler itself never reads a PSD.
+                spec = importlib.util.spec_from_file_location('morph_delivery_caff', self.pro_scripts / 'caff.py')
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = module
+                spec.loader.exec_module(module)
+                entries = module.unpack_caff(source.read_bytes())
+                entry = next((e for e in entries if e.path == 'morph-delivery.json'), None)
+                if entry or (self.node and self.core and Path(self.core).is_file()):
+                    if not self.node or not self.core or not Path(self.core).is_file():
+                        raise RuntimeError('带动作表情的交付需要官方 Web Core 验证；未发布未经检查的运行包')
+                    if entry and len(entry.content) > 5 * 1024 * 1024:
+                        raise RuntimeError('动作交付清单过大')
+                    (directory / 'delivery-input.json').write_bytes(entry.content if entry else b'{"version":1,"stateCatalog":[],"meshes":[]}')
+                    self.save(job, 'running', '核查编译后的动作替换、表情参数并生成 motion / expression 文件')
+                    await self.command(directory, self.node, str(self.pro_scripts.parent / 'runtime-delivery.mjs'), self.core,
+                                       str(directory / 'model.moc3'), str(directory / 'delivery-input.json'), str(directory))
+                    extra += json.loads((directory / 'runtime-delivery-files.json').read_text())
                 with zipfile.ZipFile(directory / 'runtime.tmp', 'w', zipfile.ZIP_DEFLATED) as archive:
                     for name in ['model.moc3', 'model.model3.json', 'model.moc3.report.json', *textures, *extra]:
                         if not (directory / name).stat().st_size:
@@ -177,8 +196,8 @@ class NativeExport:
             if process.returncode:
                 # The log is local, includes no provider requests or credentials.
                 lines = (directory / 'pro-pipeline.log').read_text(errors='replace').splitlines()
-                detail = next((line for line in reversed(lines) if line.startswith(('ValueError:', 'AssertionError:'))), '请查看本机 pro-pipeline.log')
-                raise RuntimeError(f'Pro 绑定或检查失败：{detail}')
+                detail = next((line for line in reversed(lines) if line.startswith(('ValueError:', 'AssertionError', 'Error:'))), '请查看本机 pro-pipeline.log')
+                raise RuntimeError(f'本地绑定或检查失败：{detail}')
         finally:
             if process and process.returncode is None:
                 process.kill()

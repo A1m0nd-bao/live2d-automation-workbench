@@ -1,4 +1,5 @@
 import { resolveWaveProfile, WAVE_VARIANT, WAVE_MESH_OPTIONS, trimWaveMesh } from './waveRig.js';
+import { buildStateCatalog } from './stateDelivery.js';
 import JSZip from 'jszip';
 import thirdPartyLicense from './vendor/stretchystudio/LICENSE?raw';
 import { extractVariantManifest, importPsd } from './vendor/stretchystudio/io/psd.js';
@@ -21,7 +22,7 @@ import {
   loadProject,
 } from './vendor/stretchystudio/io/projectFile.js';
 
-export const ENGINE_VERSION = 'stretchy-24a83a2-morph-rig-normalization-v3';
+export const ENGINE_VERSION = 'stretchy-24a83a2-source-order-states-v4';
 const transform = () => ({
   x: 0,
   y: 0,
@@ -175,6 +176,8 @@ export async function generateCubism(
       warnings.push(...psdQuality.issues, ...psdQuality.warnings);
       if (psdQuality.changed.length) onProgress(`PSD 已自动修复 ${psdQuality.changed.length} 项排序关系，保留原始素材。`);
       const sourceVariantManifest = extractVariantManifest(buffer);
+      const unqualified = parsed.layers.find(layer => layer.variantGroup && !layer.name.startsWith(`${layer.variantGroup}__`));
+      if (unqualified) throw Error(`动作/表情组 ${unqualified.variantGroup} 中的 ${unqualified.name} 缺少“组名__部件”命名；不会把它误作基础层生成重复肢体。请先明确其替换部件。`);
       // A Pro PSD can contain a library of action/expression alternates.  A
       // production run must only materialise the states selected for this
       // delivery, otherwise unrequested alternates silently leak into the
@@ -251,9 +254,9 @@ export async function generateCubism(
           );
       }
       // This is the final PSD → CMO3 safety gate.  It never mutates the
-      // uploaded PSD: the working layer stack gains a canonical neck order
-      // and, only when safe, semantic left/right lower-limb layers.
-      const normalization = normalizePsdRigLayers(layers);
+      // uploaded PSD: preserve its painter order, deriving paired lower-limb
+      // layers only in their original slot when pixel-safe.
+      const normalization = normalizePsdRigLayers(layers, { preserveOrder: true });
       layers = normalization.layers;
       warnings.push(...normalization.audit.warnings);
       const variantByPart = new Map();
@@ -342,15 +345,10 @@ export async function generateCubism(
         // than interpolated mesh poses.  Start with the safest useful case:
         // base arms ↔ action_02 wave arms.  Both endpoint states contain a
         // complete pair of arms, so the switch never exposes a no-hand pose.
-        actionSwitches: variantManifest.variants
-          .filter((variant) => variant.id === 'action_02_wave_arms_only')
-          .map((variant) => ({
-            id: 'ParamActionWave',
-            name: 'Action: Wave',
-            min: 0, max: waveRig ? 3 : 1,
-            variantId: variant.id,
-            baseSlots: variant.parts.map((part) => part.slot),
-          })),
+        stateCatalog: buildStateCatalog(variantManifest.variants, waveRig),
+        actionSwitches: buildStateCatalog(variantManifest.variants, waveRig).map(lane => ({
+          id: lane.parameter, name: lane.name, min: 0, max: lane.max,
+        })),
         animations: buildVariantAnimations(variantManifest.variants, layers, ids),
         physics_groups: [],
         nodes: groupDefs.map((group) => ({
@@ -466,17 +464,7 @@ export async function generateCubism(
     }
     onProgress('生成 Cubism 标准参数、变形器与物理数据…');
     await tick();
-    // CMO3 uses a real, discrete ParamActionWave binding. Keep only the wave
-    // alternates plus canonical parts in this first authoring pass; other
-    // alternates remain hidden until their own bindings exist.
-    const cmoProject = {
-      ...project,
-      nodes: project.nodes.map((node) =>
-        node.type === 'part' && node.variant && node.variant !== 'action_02_wave_arms_only'
-          ? { ...node, visible: false }
-          : node,
-      ),
-    };
+    const cmoProject = project;
     const result = await exportLive2DProject(cmoProject, images, {
       modelName: safeName,
       generateRig: true,

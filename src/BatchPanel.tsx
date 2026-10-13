@@ -7,7 +7,7 @@ import { LIVE2D_PRO_STATES } from './live2dPro';
 import type { Live2dPrepProvider } from './live2dPrep';
 
 const PENDING = 'morph.batch-upload.v1';
-const LABELS = { uploading: '待上传', pending: '排队', queued: '排队', running: '拆件中', succeeded: 'PSD 已保存', failed: '失败' };
+const LABELS = { uploading: '待上传', pending: '排队', queued: '排队', running: '拆件中', succeeded: 'PSD 已保存', failed: '失败', 'friendly-queued': '友好图排队', 'friendly-running': '友好化中', uncertain: '结果未知（已停队）' };
 type Props = {
   onProduce: (batch: SplitBatch, profile: 'standard' | 'pro', states: string[], provider: Live2dPrepProvider) => Promise<void>;
   runtimeCounts: Record<string, number>;
@@ -129,7 +129,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
   return <section className="batch-panel" aria-label="批量生产">
     <div className="batch-heading"><div><p className="eyebrow">BATCH PRODUCTION</p><h2>批量生产</h2></div>
       <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => { await connectLocalRelay(); await load(); setMessage('已接入本机批处理队列。'); })}>接入本机桥接</button></div>
-    <p>多张原图一次上传，See-Through 按顺序拆件。完成后打包 PSD，再接入本地 CMO3 / MOC3 制作。</p>
+    <p>多张原图一次上传，默认先生成 Live2D 友好母版，通过检查后逐张 See-Through。基础 PSD 再生成局部动作替换层、本地绑定并交付动作与表情文件。</p>
     <div className="batch-inputs">
       <label>批次名称<input value={title} onChange={e => setTitle(e.target.value)} placeholder="例如：角色母版第二批" /></label>
       <label>原图（PNG/JPG，最多 100 张）<input type="file" multiple accept=".png,.jpg,.jpeg" onChange={e => setFiles(Array.from(e.target.files ?? []))} /></label>
@@ -137,20 +137,22 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
       <label>随机种子<input type="number" min="0" max="9999" value={settings.seed} onChange={e => setSettings(s => ({ ...s, seed: Number(e.target.value) }))} /></label>
     </div>
     <div className="batch-options">
+      <label><input type="checkbox" checked={settings.friendly ?? true} onChange={e => setSettings(s => ({ ...s, friendly: e.target.checked }))} />先生成友好图（会产生生图费用）</label>
+      {settings.friendly && <label>友好图提供方<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value as 'doubao' | 'image2' }))}><option value="doubao">豆包</option><option value="image2">Image-2</option></select></label>}
       <label><input type="checkbox" checked={settings.split_limbs} onChange={e => setSettings(s => ({ ...s, split_limbs: e.target.checked }))} />拆分左右手臂与腿</label>
       <label><input type="checkbox" checked={autoDownload} onChange={e => setAutoDownload(e.target.checked)} />完成后自动下载 ZIP</label>
-      <span>原图直传 · 单张串行 · 失败记录保留</span>
+      <span>{settings.friendly ? '友好化 → 检查 → 串行拆件' : '已是友好母版：原图直传'} · 失败记录保留</span>
     </div>
     {files.length > 0 && <ol className="batch-file-order">{files.map((f, i) => <li key={`${f.name}:${i}`}><span>{f.name}</span><button aria-label={`上移 ${f.name}`} disabled={busy || i === 0} onClick={() => setFiles(all => { const next = [...all]; [next[i - 1], next[i]] = [next[i], next[i - 1]]; return next; })}>↑</button><button aria-label={`移除 ${f.name}`} disabled={busy} onClick={() => setFiles(all => all.filter((_, index) => i !== index))}>×</button></li>)}</ol>}
     <div className="batch-actions">
-      <button className="primary-button" disabled={busy || !files.length} onClick={() => void operate(createBatch)}>开始批量拆件{files.length ? `（${files.length} 张）` : ''}</button>
+      <button className="primary-button" disabled={busy || !files.length} onClick={() => void operate(createBatch)}>开始批量{settings.friendly ? '友好化与' : ''}拆件{files.length ? `（${files.length} 张）` : ''}</button>
       <button className="ghost-button" disabled={busy} onClick={() => void operate(resumeUpload)}>恢复未完成上传</button>
       <button className="ghost-button" disabled={busy} onClick={() => void load()}>同步批次</button>
     </div>
     {message && <p role="status">{message}</p>}{error && <p role="alert" className="batch-error">{error}</p>}
     {batches.length > 0 && <label className="batch-history">历史批次<select value={active?.id ?? ''} onChange={e => setSelected(e.target.value)}>{batches.map(b => <option key={b.id} value={b.id}>{b.name} · {b.succeeded}/{b.total}</option>)}</select></label>}
     {active && <>
-      <div className="batch-summary"><b>拆件 {active.succeeded}/{active.total}</b><span>失败 {active.failed}</span><span>MOC3 {runtimeCounts[active.id] ?? 0}/{active.total}</span><span>{active.state === 'paused' ? '已暂停新提交' : active.state === 'completed' ? '拆件已结束' : active.state === 'uploading' ? '上传待完成' : '串行处理中'}</span></div>
+      <div className="batch-summary">{active.settings.friendly && <b>友好图 {active.friendly_succeeded ?? 0}/{active.total}</b>}<b>拆件 {active.succeeded}/{active.total}</b><span>失败 {active.failed}</span>{!!active.uncertain && <span>结果未知 {active.uncertain}，未重试</span>}<span>MOC3 {runtimeCounts[active.id] ?? 0}/{active.total}</span><span>{active.state === 'paused' ? '已暂停新提交' : active.state === 'completed' ? '拆件已结束' : active.state === 'uploading' ? '上传待完成' : '串行处理中'}</span></div>
       <progress value={active.succeeded + active.failed} max={active.total} />
       <div className="batch-actions">
         {active.state !== 'completed' && <button className="ghost-button" disabled={busy || active.state === 'uploading'} onClick={() => void operate(async () => { await batchRequest(`/${active.id}/${active.state === 'paused' ? 'start' : 'pause'}`, { method: 'POST' }); await load(); })}>{active.state === 'paused' ? '继续拆件' : '暂停后续拆件'}</button>}

@@ -23,11 +23,50 @@ and use `scripts/配置生图服务.command`; stored Gateway keys are read on de
 Readiness only checks configuration; it does not verify budget or permissions.
 
 Sources, prompt snapshots, each candidate and quality reports are stored under
-`MORPH_DATA_ROOT/prep`. New jobs use `image_quality.neutral_prompt()`; Pro states
-share its explicit style and framing locks. Legacy provider templates remain
+`MORPH_DATA_ROOT/prep`. New neutral jobs snapshot `prep_prompt_master.txt`
+(front-view 30-degree A-pose, identity/topology locks and wrist-width gaps),
+an immutable source hash and provider-appropriate background policy. Pro PSD
+parts use their separate pose brief, never the neutral A-pose prompt. Legacy provider templates remain
 unchanged for historical reference. Ship `image_quality.py` alongside
 `prep_queue.py` and `pro_queue.py`. Restart only when no calls are running.
 Existing jobs keep their saved prompt and never silently change providers.
+
+## Batch friendly masters and native state delivery (2026-10-13)
+
+New `/batches` requests explicitly include `settings.friendly` and `provider`.
+The Pages UI defaults to friendly generation; only a consciously confirmed
+existing master may skip it. Legacy manifests keep their raw split policy and
+are never silently regenerated or charged. Stable prep IDs, current-version QA,
+serial splitting and an uncertainty stop prevent raw-image fallback or paid replay.
+The archive includes accepted friendly images and prompt/lock/review records.
+
+PSD-first Pro keeps original layers/order/pixels and appends hidden complete
+replacement parts. Modeling preserves source painter order by default; safe
+derived left/right parts remain in their original slot. Qualified alternates
+inherit the counterpart slot; combined arms use the authored action plane.
+Unqualified raster children in action/expression groups are blocked rather than
+mistaken for additional neutral limbs.
+
+CMO3 carries `morph-delivery.json` alongside its textures/XML. Every selected
+pose is bound through one mutually-exclusive action selector; measured wave
+retains its 0–3 phase lane. Native compilation samples the actual Core opacities
+and geometry, then delivers registered `motion3.json`, `exp3.json`, matching
+expression motions and `runtime-delivery.json`. Parameter presets are not new
+AI face artwork. Ineffective facial parameters are reported, not certified.
+Core validation and ZIP consistency do not imply visual acceptance.
+
+Facial parameter presets reuse `scripts/expression-profiles.mjs` from the
+existing batch system (Smile/Laugh/Shy/Surprised/Angry/Sad), not a second
+independent set. Existing `expression-profile.json` enabled/profiles overrides
+remain supported in the export directory; `enabled: []` explicitly disables
+them. Overrides are facial-only and clamped to compiled parameter ranges.
+Missing/ineffective bindings are listed by parameter in the delivery report;
+the presets never create mouth artwork or affect the action selector.
+
+Install `scripts/runtime-delivery.mjs` and `scripts/expression-profiles.mjs` beside `scripts/pro-rig`, update
+`native_export.py`, and ship `prep_prompt_master.txt` with `prep_queue.py`.
+Keep official Web Core/Node/native compiler configured. Restart only with no
+active image/split/native calls; preserve local quality-policy customizations.
 Both generators require the Gateway key for reference-based visual review.
 The default reviewer is `openai/gpt-5.5` (`MORPH_IMAGE_REVIEW_MODEL` overrides it).
 Review uses `MORPH_IMAGE_REVIEW_PROXY` or the existing OS HTTPS proxy when set.

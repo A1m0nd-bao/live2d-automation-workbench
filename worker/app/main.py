@@ -492,7 +492,7 @@ _batch_spec = importlib.util.spec_from_file_location('morph_batch_queue', Path(_
 _batch_module = importlib.util.module_from_spec(_batch_spec)
 sys.modules[_batch_spec.name] = _batch_module
 _batch_spec.loader.exec_module(_batch_module)
-BATCH = _batch_module.BatchQueue(DATA_ROOT, require_prep_token, batch_split_create, batch_split_get)
+BATCH = _batch_module.BatchQueue(DATA_ROOT, require_prep_token, batch_split_create, batch_split_get, PREP)
 app.include_router(BATCH.router)
 app.add_middleware(
     CORSMiddleware,
