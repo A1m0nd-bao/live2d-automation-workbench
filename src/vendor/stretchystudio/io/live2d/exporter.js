@@ -14,6 +14,7 @@ import { generateMotion3Json } from './motion3json.js';
 import { generateMoc3 } from './moc3writer.js';
 import { packTextureAtlas } from './textureAtlas.js';
 import { generateCmo3 } from './cmo3writer.js';
+import { buildStateAction } from '../../../../stateDelivery.js';
 import { generateCan3 } from './can3writer.js';
 import { matchTag } from '../armatureOrganizer.js';
 import { buildRuntimeExportPlan } from './exportPlan.js';
@@ -291,7 +292,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     // canonical slots it replaces.  The CMO3 writer turns this into two
     // opacity keyforms on a nearest-neighbour Cubism parameter.
     const actionSwitch = (project.actionSwitches ?? []).find((action) =>
-      part.variant === action.variantId || action.baseSlots?.includes(meshName),
+      (action.variantId && part.variant === action.variantId) || action.baseSlots?.includes(meshName),
     ) ?? null;
     const actionState = actionSwitch
       ? (part.variant === actionSwitch.variantId ? 'alternate' : 'base')
@@ -321,7 +322,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
       pngData,
       texWidth: canvasW,
       texHeight: canvasH,
-      actionSwitch: buildWaveAction(vertices, project.waveRig, meshName) ?? (actionSwitch && actionState ? {
+      actionSwitch: buildStateAction(vertices, project, meshName) ?? (actionSwitch && actionState ? {
         id: actionSwitch.id,
         name: actionSwitch.name,
         state: actionState,
@@ -352,6 +353,7 @@ export async function exportLive2DProject(project, images, opts = {}) {
     warpDeformerNodes,
     parameters: project.parameters ?? [],
     actionSwitches: project.actionSwitches ?? [],
+    stateCatalog: project.stateCatalog ?? [],
     animations: project.animations ?? [],
     modelName,
     generateRig,

@@ -32,12 +32,12 @@ export function importPsd(buffer) {
 
   const layers = [];
 
-  function walk(children) {
+  function walk(children, variantGroup = null) {
     if (!children) return;
     for (const layer of children) {
       if (layer.children) {
         // group — recurse, skip as a part for now
-        walk(layer.children);
+        walk(layer.children, /^(action|expression)_/.test(layer.name || '') ? layer.name : variantGroup);
         continue;
       }
       // Only emit layers that have pixel content
@@ -70,6 +70,7 @@ export function importPsd(buffer) {
         blendMode: layer.blendMode ?? 'normal',
         opacity:   layer.opacity !== undefined ? layer.opacity : 1,
         visible:   !layer.hidden,
+        variantGroup,
       });
     }
   }

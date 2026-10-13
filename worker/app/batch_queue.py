@@ -23,6 +23,8 @@ class SplitSettings(BaseModel):
     resolution: int = Field(default=1024, ge=768, le=1536)
     seed: int = Field(default=42, ge=0, le=9999)
     split_limbs: bool = True
+    friendly: bool = True
+    provider: str = Field(default='doubao', pattern='^(doubao|image2)$')
 
 
 class BatchItem(BaseModel):
@@ -39,11 +41,12 @@ class BatchInput(BaseModel):
 
 
 class BatchQueue:
-    def __init__(self, root, authorize, split_create, split_get):
+    def __init__(self, root, authorize, split_create, split_get, prep=None):
         self.root = Path(root) / "batches"
         self.authorize = authorize
         self.split_create = split_create
         self.split_get = split_get
+        self.prep = prep
         self.router = APIRouter(prefix="/batches")
         self.task = None
         self.routes()
@@ -73,9 +76,19 @@ class BatchQueue:
             con.execute("BEGIN IMMEDIATE")
             old = con.execute("SELECT manifest FROM batches WHERE id=?", (data.id,)).fetchone()
             if old:
+                previous = json.loads(old['manifest'])
+                if 'friendly' not in previous['settings'] and 'friendly' not in data.settings.model_fields_set:
+                    legacy = data.model_dump()
+                    legacy['settings'].pop('friendly', None)
+                    legacy['settings'].pop('provider', None)
+                    manifest = json.dumps(legacy, ensure_ascii=False, sort_keys=True)
                 if old["manifest"] != manifest:
                     raise HTTPException(409, "相同批次编号的内容不一致")
             else:
+                if data.settings.friendly and not self.prep:
+                    raise HTTPException(503, '桥接尚未接入批量友好化；不会直接拆原图')
+                if 'friendly' not in data.settings.model_fields_set:
+                    raise HTTPException(409, '旧版工作台未明确友好化选项；请刷新并确认生图费用后创建新批次')
                 if any(self.split_get(item.id) for item in data.items):
                     raise HTTPException(409, "文件编号已用于既有拆件任务")
                 try:
@@ -84,6 +97,20 @@ class BatchQueue:
                 except sqlite3.IntegrityError:
                     raise HTTPException(409, "文件编号已用于其他批次")
         return self.read(data.id)
+
+    @staticmethod
+    def prep_id(item_id):
+        return hashlib.sha256(('batch-neutral-master-v1:' + item_id).encode()).hexdigest()[:32]
+
+    def friendly_job(self, item_id):
+        if not self.prep:
+            return None
+        try:
+            return self.prep.get(self.prep_id(item_id))
+        except HTTPException as error:
+            if error.status_code == 404:
+                return None
+            raise
 
     def read(self, batch_id):
         with self.db() as con:
@@ -96,14 +123,26 @@ class BatchQueue:
         for i, item in enumerate(data["items"]):
             job = self.split_get(item["id"])
             status = job["status"] if job else "pending" if uploaded[item["id"]] else "uploading"
+            friendly = self.friendly_job(item['id']) if data['settings'].get('friendly', False) else None
+            friendly_ok = bool(friendly and friendly['status'] == 'succeeded' and
+                               (friendly.get('quality') or {}).get('status') == 'passed')
+            message = (job.get('error') or job.get('message')) if job else '等待串行拆件' if uploaded[item['id']] else '等待上传'
+            if not job and friendly:
+                message = friendly.get('message') or '友好图未放行'
+                status = ('pending' if friendly_ok else
+                          'friendly-queued' if friendly['status'] == 'queued' else
+                          'friendly-running' if friendly['status'] == 'running' else
+                          'uncertain' if friendly['status'] == 'uncertain' else 'failed')
             safe_name = re.sub(r'[\\/\x00-\x1f:*?"<>|]', '_', item["name"]).rsplit('.', 1)[0]
             items.append({**item, "uploaded": uploaded[item["id"]], "status": status,
-                          "message": job["error"] or job["message"] if job else "等待串行拆件" if uploaded[item["id"]] else "等待上传",
+                          "message": message, 'friendly_ready': friendly_ok,
                           "filename": f"{i+1:03d}-{safe_name}.psd"})
         finished = sum(item["status"] in {"succeeded", "failed"} for item in items)
         data.update(items=items, state="completed" if finished == len(items) else row["state"], created_at=row["created"],
                     total=len(items), succeeded=sum(item["status"] == "succeeded" for item in items),
                     failed=sum(item["status"] == "failed" for item in items))
+        data['friendly_succeeded'] = sum(item['friendly_ready'] for item in items)
+        data['uncertain'] = sum(item['status'] == 'uncertain' for item in items)
         return data
 
     def upload(self, batch_id, item_id, data):
@@ -142,7 +181,7 @@ class BatchQueue:
             ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
             all_ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state!='completed'")]
         # Pausing future submissions does not make an in-flight/unknown job safe to overlap.
-        if any(item["status"] in {"running", "queued"} for batch_id in all_ids for item in self.read(batch_id)["items"]):
+        if any(item["status"] in {"running", "queued", 'friendly-queued', 'friendly-running', 'uncertain'} for batch_id in all_ids for item in self.read(batch_id)["items"]):
             return
         # Never enqueue another batch item while a preceding item is in flight.
         for batch_id in ids:
@@ -151,7 +190,17 @@ class BatchQueue:
                 if item["status"] in {"succeeded", "failed"}:
                     continue
                 if item["status"] == "pending":
-                    self.split_create(item["id"], self.root / batch_id / f"{item['id']}.source", item["filename"], batch["settings"])
+                    source = self.root / batch_id / f"{item['id']}.source"
+                    if batch['settings'].get('friendly', False):
+                        friendly = self.friendly_job(item['id'])
+                        if not friendly:
+                            self.prep.create(self.prep_id(item['id']), item['name'], batch['settings']['provider'], source.read_bytes())
+                            return
+                        if not item['friendly_ready']:
+                            return
+                        source = self.prep.root / self.prep_id(item['id']) / 'output'
+                    split_settings = {k: batch['settings'][k] for k in ('resolution', 'seed', 'split_limbs')}
+                    self.split_create(item["id"], source, item["filename"], split_settings)
                 return
             with self.db() as con:
                 con.execute("UPDATE batches SET state='completed' WHERE id=?", (batch_id,))
@@ -195,6 +244,13 @@ class BatchQueue:
                     if not output.is_file() or output.read_bytes()[:6] != b"8BPS\x00\x01":
                         raise HTTPException(409, "成功记录缺少有效PSD，请检查服务端文件")
                     archive.write(output, item["filename"])
+                    if item.get('friendly_ready'):
+                        friendly_dir = self.prep.root / self.prep_id(item['id'])
+                        suffix = '.png' if (friendly_dir / 'output').read_bytes().startswith(b'\x89PNG') else '.jpg'
+                        archive.write(friendly_dir / 'output', 'friendly/' + item['filename'].replace('.psd', suffix))
+                        for name in ('prompt.txt', 'identity-lock.json', 'quality.json'):
+                            if (friendly_dir / name).is_file():
+                                archive.write(friendly_dir / name, f'friendly/{item["id"]}/{name}')
                     count += 1
             if not count:
                 raise HTTPException(409, "尚无完成的PSD")

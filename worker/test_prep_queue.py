@@ -44,9 +44,11 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
             for provider, job_id in [('doubao', 'd' * 32), ('image2', 'e' * 32)]:
                 self.queue.create(job_id, 'style-check', provider, PNG)
                 saved = (self.queue.root / job_id / 'prompt.txt').read_text()
-                self.assertEqual(saved, prep.neutral_prompt())
+                self.assertIn('Live2D source-art master', saved)
+                self.assertIn('30 degrees', saved)
                 self.assertIn('80%', saved)
-                self.assertIn('三维渲染', saved)
+                self.assertIn('3D rendering', saved)
+                self.assertTrue((self.queue.root / job_id / 'identity-lock.json').is_file())
                 with patch.dict(prep.PROMPTS, {provider: 'future prompt'}):
                     self.queue.create(job_id, 'same-job', provider, PNG)
                     self.assertEqual((self.queue.root / job_id / 'prompt.txt').read_text(), saved)

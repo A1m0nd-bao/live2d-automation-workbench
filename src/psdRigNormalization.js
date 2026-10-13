@@ -158,10 +158,10 @@ function neckVisibility(layers) {
  * Normalize the working PSD layers for a safe lower-body and neck rig.
  * @returns {{layers:Array, lowerBodyRigReady:boolean, audit:Object}}
  */
-export function normalizePsdRigLayers(sourceLayers) {
+export function normalizePsdRigLayers(sourceLayers, { preserveOrder = true } = {}) {
   let layers = [...sourceLayers];
   const actions = [], warnings = [];
-  const neckOrder = stableNeckOrder(layers);
+  const neckOrder = preserveOrder ? { layers } : stableNeckOrder(layers);
   layers = neckOrder.layers;
   if (neckOrder.action) actions.push(neckOrder.action);
 
@@ -211,7 +211,7 @@ export function normalizePsdRigLayers(sourceLayers) {
     lowerBodyRigReady,
     audit: {
       version: 1,
-      policy: 'non-destructive-working-layer-normalization',
+      policy: preserveOrder ? 'source-painter-order' : 'legacy-semantic-neck-order',
       lowerBodyRigReady,
       neckVisibility: visibility,
       actions,

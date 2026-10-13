@@ -105,6 +105,7 @@ export async function generateCmo3(input) {
     // Discrete art swaps, e.g. canonical arms ↔ wave arms. Each is emitted
     // as a normal 0/1 Cubism parameter with nearest-neighbour keyforms.
     actionSwitches = [],
+    stateCatalog = [],
     warpDeformerNodes = [],
     animations = [],
     modelName = 'StretchyStudio Export',
@@ -289,7 +290,7 @@ export async function generateCmo3(input) {
       };
       paramDefs.push(definition);
     }
-    definition.decimalPlaces = Math.max(2, definition.decimalPlaces ?? 2);
+    definition.decimalPlaces = Math.max(stateCatalog.some(lane => lane.parameter === action.id) ? 4 : 2, definition.decimalPlaces ?? 2);
     actionParamPids.set(action.id, definition.pid);
   }
 
@@ -3980,11 +3981,11 @@ export async function generateCmo3(input) {
         pivotLocalY = dfOrigin ? (pivotCanvasY - dfOrigin.y) : pivotCanvasY;
       }
 
-      const computeBakedPositions = (angleDeg) => {
+      const computeBakedPositions = (angleDeg, sourceVerts = verts) => {
         const positions = new Array(verts.length);
         for (let i = 0; i < numVerts; i++) {
-          const localX = verts[i * 2];
-          const localY = verts[i * 2 + 1];
+          const localX = sourceVerts[i * 2];
+          const localY = sourceVerts[i * 2 + 1];
           const w = weights[i] ?? 0;
           const rad = angleDeg * w * Math.PI / 180;
           // Scale radial offset to canvas pixels → rotate → unscale. For
@@ -4004,7 +4005,13 @@ export async function generateCmo3(input) {
       for (const form of pm.bakedFormGuids) {
         const ang = form.angle;
         const pidForm = form.pid;
-        const positions = (ang === 0) ? verts : computeBakedPositions(ang);
+        const canvasState = pm.actionStateVertices?.[form.state];
+        if (canvasState && (canvasState.length !== canvasVerts.length || canvasState.some(v => !Number.isFinite(v))))
+          throw Error('Invalid sampled action vertices');
+        const sourceVerts = canvasState ? canvasState.map((v, i) => rwBox
+          ? (v - (i % 2 === 0 ? rwBox.gridMinX : rwBox.gridMinY)) / (i % 2 === 0 ? rwBox.gridW : rwBox.gridH)
+          : dfOrigin ? v - (i % 2 === 0 ? dfOrigin.x : dfOrigin.y) : v) : verts;
+        const positions = (ang === 0) ? sourceVerts : computeBakedPositions(ang, sourceVerts);
         emitArtMeshForm(kfList, pidForm, positions, form.opacity);
       }
     } else if (pm.hasEyelidClosure) {
@@ -4755,6 +4762,13 @@ export async function generateCmo3(input) {
     obfuscated: true,
     compress: COMPRESS_FAST,
   });
+  caffFiles.push({ path: 'morph-delivery.json', tag: '', obfuscated: true, compress: COMPRESS_FAST,
+    content: new TextEncoder().encode(JSON.stringify({ version: 1, stateCatalog,
+      meshes: perMesh.map(pm => ({ id: pm.meshId, name: pm.meshName, drawOrder: pm.drawOrder,
+        action: meshes[pm.mi]?.actionSwitch ? {
+          id: meshes[pm.mi].actionSwitch.id, keys: meshes[pm.mi].actionSwitch.keys,
+          opacities: meshes[pm.mi].actionSwitch.stateOpacities,
+        } : null })) })) });
 
   const cmo3 = await packCaff(caffFiles, 42);
   return { cmo3, deformerParamMap, rigDebugLog };

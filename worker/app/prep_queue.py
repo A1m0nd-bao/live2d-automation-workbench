@@ -199,7 +199,19 @@ class PrepQueue:
             if count >= 20:
                 raise HTTPException(429, "队列已满，请等待已有任务完成")
             self.persist(job_id, "source", data)
-            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else neutral_prompt()).encode())
+            master = Path(__file__).with_name('prep_prompt_master.txt').read_text()
+            background = ('输出真实 RGBA 透明 PNG，禁止画棋盘格；无法输出 Alpha 时用均匀极浅灰背景。'
+                          if provider == 'image2' else '输出均匀极浅灰纯背景，供后续抠图；不要棋盘格或地面阴影。')
+            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else master + '\n' + background).encode())
+            if prompt is None:
+                self.persist(job_id, 'identity-lock.json', json.dumps({
+                    'version': 'reference-master-v1', 'authority': 'source',
+                    'source_sha256': hashlib.sha256(data).hexdigest(),
+                    'hard_locks': ['face geometry', 'eye design', 'hair silhouette', 'source proportions',
+                                   'wardrobe construction', 'palette', 'signature accessories', 'body topology'],
+                    'unknowns': 'Do not invent lore; missing regions only conservatively completed',
+                    'generation_brief': 'prompt.txt', 'review_required': True,
+                }, ensure_ascii=False, indent=2).encode())
             now = time.time()
             con.execute("""INSERT INTO prep_jobs
                 (id,name,provider,model,fingerprint,status,message,created_at,updated_at)

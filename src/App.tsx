@@ -132,7 +132,7 @@ const stage = (t: Task) =>
         : t.cmoAccepted
     ? '运行时包已验收'
     : t.hasGenerated
-      ? '运行时包已生成 · 待验收'
+      ? t.nativeRuntimeFile ? '原生运行包已生成 · 待验收' : 'CMO3 已保存 · 原生 MOC3 未完成'
       : t.qaPassed
         ? '待生成运行时包'
         : t.psdFile || t.inputKind === 'stretch'
@@ -2015,10 +2015,11 @@ function WorkbenchApp() {
               确认身份、服装、四肢和附件都完整后才进入拆分。
             </li>
             <li>
-              Live2D Pro：先验收基础 PSD，再按同一 Persona Lock 生成所选动作和表情；每张状态图分别拆层，
-              通过语义差分检查后合并为隐藏状态层。
+              Live2D Pro：基础 PSD 生成局部完整部件，再合入隐藏动作层；不再生成整张状态图逐张拆件。
+              保留原始 PSD 顺序与中立像素，动作进入 CMO3 关键形态后由本机原生编译。
             </li>
-            <li>浏览器完成网格和规范化运行时导出，生成期间不要关闭页面。</li>
+            <li>批量原图默认先友好化；已分层 PSD 直接制作。浏览器建模期间保持页面打开，拆件与原生编译由 Relay 跟踪。</li>
+            <li>最终原生 ZIP 包含 MOC3、纹理、model3、已绑定动作 motion3、有效表情 exp3 与表情 motion3，以及检查清单；无效参数不冒充可用预设。</li>
             <li>
               实验性 CMO3 仅供研究；运行时 MOC3 包用于
               SDK/播放器联调，生成文件仍需实际验收。
@@ -2206,7 +2207,7 @@ function PsdVariantPreview({ task }: VariantPreviewProps) {
     return () => {
       alive = false;
     };
-  }, [task.id]);
+  }, [task.id, task.inputFile, task.psdFile]);
 
   useEffect(() => {
     if (!model || !canvas.current) return;

@@ -1,13 +1,14 @@
 import { getDirectServiceConfig } from './serviceBridge';
 
-export type BatchSettings = { resolution: number; seed: number; split_limbs: boolean };
-export const BATCH_DEFAULTS: BatchSettings = { resolution: 1024, seed: 42, split_limbs: true };
+export type BatchSettings = { resolution: number; seed: number; split_limbs: boolean; friendly?: boolean; provider?: 'doubao' | 'image2' };
+export const BATCH_DEFAULTS: BatchSettings = { resolution: 1024, seed: 42, split_limbs: true, friendly: true, provider: 'doubao' };
 export type SplitBatch = {
   id: string; name: string; created_at?: number;
   settings: BatchSettings; state: 'uploading' | 'active' | 'paused' | 'completed';
   total: number; succeeded: number; failed: number;
+  friendly_succeeded?: number; uncertain?: number;
   items: Array<{ id: string; name: string; sha256: string; uploaded: boolean;
-    status: 'uploading' | 'pending' | 'queued' | 'running' | 'succeeded' | 'failed';
+    status: 'uploading' | 'pending' | 'queued' | 'running' | 'succeeded' | 'failed' | 'friendly-queued' | 'friendly-running' | 'uncertain';
     message: string; filename: string }>;
 };
 export async function batchRequest<T>(path: string, init: RequestInit = {}): Promise<T> {

@@ -65,7 +65,10 @@ export async function compileNative(cmo: Blob, progress: (text: string) => void,
     return r;
   };
   progress('提交 CMO3 到本机无界面导出器…');
-  let job = await (await request(`/jobs?profile=${profile}`, {method:'POST', body:cmo})).json() as NativeJob;
+  // Hydrate the ZIP-extracted Blob before crossing origins. Some WebKit
+  // sessions fail to stream that lazy Blob after source object URLs expire.
+  const cmoBytes = await cmo.arrayBuffer();
+  let job = await (await request(`/jobs?profile=${profile}`, {method:'POST', body:cmoBytes})).json() as NativeJob;
   if (profile === 'pro-rig-v1' && job.profile !== profile)
     throw new Error('本机桥接尚未接入 Pro 嘴部与九向流程，请升级桥接后重试；不会将普通编译误报为 Pro 完成。');
   for (let i = 0; i < 600; i++) {

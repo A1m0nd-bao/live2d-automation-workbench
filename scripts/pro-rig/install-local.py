@@ -11,6 +11,9 @@ if not (dest/'worker/app/native_export.py').is_file():raise SystemExit('Existing
 backup=dest/f'backup-before-pro-rig-{int(time.time())}';backup.mkdir()
 shutil.copy2(dest/'worker/app/native_export.py',backup/'native_export.py');shutil.copy2(dest/'run.sh',backup/'run.sh')
 shutil.copy2(root/'worker/app/native_export.py',dest/'worker/app/native_export.py')
+(dest/'scripts').mkdir(parents=True,exist_ok=True)
+shutil.copy2(root/'scripts/runtime-delivery.mjs',dest/'scripts/runtime-delivery.mjs')
+shutil.copy2(root/'scripts/expression-profiles.mjs',dest/'scripts/expression-profiles.mjs')
 for source in (root/'scripts/pro-rig').glob('*'):
  if source.is_file():
   target=dest/source.relative_to(root);target.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(source,target)
