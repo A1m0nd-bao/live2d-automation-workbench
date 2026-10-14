@@ -60,7 +60,7 @@ ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.environ.get(
         "MORPH_ALLOWED_ORIGINS",
-        "https://a1m0nd-bao.github.io,http://localhost:4173,http://127.0.0.1:4173",
+        "https://a1m0nd-bao.github.io,https://morph-live2d-workbench.shehaoli.chatgpt.site,http://localhost:4173,http://127.0.0.1:4173",
     ).split(",")
     if origin.strip()
 ]
@@ -525,7 +525,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Content-Type", "X-Relay-Token", "X-Morph-Device-Token"],
     expose_headers=["Content-Disposition"],
 )
