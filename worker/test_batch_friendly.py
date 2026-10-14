@@ -2,6 +2,7 @@
 from worker.test_batch_queue import BatchTests, module, IMAGE
 from fastapi import HTTPException
 from pathlib import Path
+import hashlib
 import unittest
 
 class FriendlyTests(BatchTests):
@@ -84,6 +85,51 @@ class FriendlyTests(BatchTests):
         self.assertEqual(self.queue.read(self.data.id)['items'][0]['status'], 'failed')
         await self.queue.advance()
         self.assertEqual(self.calls, [])
-        self.assertEqual(len(self.prep_calls), 2)  # Failed item skipped, next source only.
+        self.assertEqual(len(self.prep_calls), 1)
+        self.assertEqual(self.queue.read(self.data.id)['state'], 'paused')
+
+    async def test_split_ready_reuses_only_hash_matched_output_without_more_generation(self):
+        self.friendly_ready()
+        await self.queue.advance()
+        pid = self.queue.prep_id('1'*32)
+        self.preps[pid].update(status='succeeded', quality={
+            'status':'passed', 'sourceSha256':hashlib.sha256(IMAGE).hexdigest(),
+            'candidateSha256':hashlib.sha256(IMAGE+b'friendly').hexdigest()})
+        self.queue.control(self.data.id, 'pause')
+        self.queue.change_route(self.data.id, 'yangzxo')
+        batch = self.queue.split_ready(self.data.id)
+        self.assertEqual(batch['state'], 'paused')
+        self.assertEqual(len(self.prep_calls), 1)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][1], IMAGE+b'friendly')
+        self.assertEqual(self.calls[0][2]['upstream_route'], 'yangzxo')
+        with self.assertRaises(HTTPException):
+            self.queue.split_ready(self.data.id)
+        self.assertEqual(len(self.calls), 1)
+
+    async def test_split_ready_rejects_unreviewed_or_changed_bytes(self):
+        self.friendly_ready()
+        await self.queue.advance()
+        pid = self.queue.prep_id('1'*32)
+        self.preps[pid].update(status='needs-review', quality={'status':'rejected'})
+        self.queue.control(self.data.id, 'pause')
+        with self.assertRaises(HTTPException):
+            self.queue.split_ready(self.data.id)
+        self.preps[pid].update(status='succeeded', quality={'status':'passed'})
+        with self.assertRaises(HTTPException):
+            self.queue.split_ready(self.data.id)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.prep_calls), 1)
+
+    async def test_rejected_or_failed_friendly_pauses_without_spending_on_next_item(self):
+        for status in ('needs-review', 'failed'):
+            self.friendly_ready()
+            await self.queue.advance()
+            self.preps[self.queue.prep_id('1'*32)].update(status=status, quality={'status':'rejected'})
+            for _ in range(3):
+                await self.queue.advance()
+            self.assertEqual(self.queue.read(self.data.id)['state'], 'paused')
+            self.assertEqual(len(self.prep_calls), 1)
+            self.assertEqual(self.calls, [])
 
 if __name__ == '__main__': unittest.main()

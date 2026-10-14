@@ -402,9 +402,9 @@ class PrepQueue:
         if not key:
             self.update(job_id, status="failed", finished_at=time.time(), message="服务端生图凭据未配置；未提交上游")
             return
-        # Bound cost to two confirmed generations. Never retry uncertain calls.
-        original_prompt = (self.root / job_id / 'prompt.txt').read_text()
-        for attempt in range(1, 3):
+        # One paid generation per explicit job. A rejected candidate is retained
+        # for review, never silently replaced by another paid generation.
+        for attempt in range(1, 2):
             try:
                 self.persist(job_id, 'generation-state.json', json.dumps({'attempt': attempt, 'pending': True}).encode())
                 self.persist(job_id, f'prompt-{attempt}.txt', (self.root / job_id / 'prompt.txt').read_bytes())
@@ -418,13 +418,8 @@ class PrepQueue:
                 result = await self.normalize_candidate(job_id, result, attempt)
                 data = (self.root / job_id / 'output').read_bytes()
                 self.persist(job_id, f'quality-{attempt}.json', json.dumps(result, ensure_ascii=False).encode())
-                if result['status'] != 'rejected' or attempt == 2:
-                    self.finish_review(job_id, result, data)
-                    return
-                correction = '\n本次必须修正：' + '；'.join(result.get('reasons') or [])
-                # Always regenerate from the canonical source, never a drifted candidate.
-                self.persist(job_id, 'prompt.txt', (original_prompt + correction).encode())
-                self.update(job_id, status='running', message='首次结果质检未通过，正在按原因修正（最多两次，不提交拆层）')
+                self.finish_review(job_id, result, data)
+                return
             except (TimeoutError, httpx.TransportError):
                 self.update(job_id, status="uncertain", finished_at=time.time(),
                     message="生图请求超时或连接中断；上游结果及扣费状态未知，未自动重试。")
