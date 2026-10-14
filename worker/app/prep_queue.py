@@ -137,6 +137,19 @@ class PrepQueue:
         result = dict(row)
         report = self.root / job_id / 'quality.json'
         result['quality'] = json.loads(report.read_text()) if report.exists() else None
+        # Billing/auth/rate-limit failures affect the shared service, not just
+        # this character. Expose a fixed signal so skip-QA mode cannot cascade.
+        result['blocked_provider'] = None
+        rejection = self.root / job_id / 'rejection.json'
+        if result['status'] == 'failed' and rejection.exists():
+            diagnostic = json.loads(rejection.read_text())
+            if diagnostic.get('http_status') in (401, 402, 403, 429):
+                result['blocked_provider'] = result['provider']
+        if (result['quality'] or {}).get('status') == 'unavailable' and any(
+            re.search(r'视觉检查服务 HTTP (401|402|403|429)\b', s)
+            for s in (result['quality'].get('reasons') or []) if isinstance(s, str)
+        ):
+            result['blocked_provider'] = 'image2'
         if result['quality'] and result['quality'].get('version') != VERSION:
             result['quality'] = {**result['quality'], 'status': 'outdated', 'reasons': ['旧版检查未覆盖手部细节，需按新版复核后才能拆层']}
         return result

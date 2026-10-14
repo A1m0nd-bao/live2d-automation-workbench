@@ -159,6 +159,43 @@ class FriendlyTests(BatchTests):
         self.assertEqual(len(self.prep_calls), 3)
         self.assertEqual(self.calls, [])
 
+    async def test_billing_failure_pauses_skip_batch_until_explicit_resume(self):
+        self.friendly_ready()
+        await self.queue.advance()
+        self.queue.control(self.data.id,'pause')
+        self.queue.set_policy(self.data.id,'skip')
+        self.queue.control(self.data.id,'start')
+        first=self.queue.prep_id('1'*32)
+        self.preps[first].update(status='failed',blocked_provider='image2')
+        for _ in range(3): await self.queue.advance()
+        self.assertEqual(self.queue.read(self.data.id)['state'],'paused')
+        self.assertEqual(len(self.prep_calls),1)
+        # User replenishes credits then explicitly starts: acknowledge only
+        # existing failures, never replay their paid calls.
+        self.queue.control(self.data.id,'start')
+        await self.queue.advance()
+        self.assertEqual(len(self.prep_calls),2)
+        self.assertEqual(self.calls,[])
+
+    async def test_last_item_billing_failure_also_stops_other_active_batches(self):
+        self.data.items=self.data.items[:1]
+        self.friendly_ready()
+        await self.queue.advance()
+        second=module.BatchInput(id='c'*32,settings=self.data.settings,
+            items=[module.BatchItem(id='4'*32,name='second.png',sha256=hashlib.sha256(IMAGE).hexdigest())])
+        self.queue.create(second)
+        self.queue.upload(second.id,'4'*32,IMAGE)
+        self.queue.control(second.id,'start')
+        self.preps[self.queue.prep_id('1'*32)].update(status='failed',blocked_provider='image2')
+        await self.queue.advance()
+        self.assertEqual(self.queue.read(second.id)['state'],'paused')
+        self.assertEqual(len(self.prep_calls),1)
+        with self.queue.db() as con:
+            self.assertEqual(con.execute('SELECT state FROM batches WHERE id=?',(self.data.id,)).fetchone()[0],'paused')
+        self.queue.control(second.id,'start')
+        await self.queue.advance()
+        self.assertEqual(len(self.prep_calls),2)
+
     async def test_skip_policy_survives_restart_but_uncertain_still_blocks(self):
         self.friendly_ready()
         self.queue.control(self.data.id, 'pause')

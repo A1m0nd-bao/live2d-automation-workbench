@@ -85,6 +85,17 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException):
             self.queue.create('b'*32, 'repair', 'image2', PNG, prompt='action', reference_notes='notes')
 
+    async def test_shared_provider_failures_are_not_character_failures(self):
+        self.create()
+        self.queue.update(JOB,status='failed')
+        for code in (401,402,403,429):
+            self.queue.persist(JOB,'rejection.json',json.dumps({'http_status':code}).encode())
+            self.assertEqual(self.queue.get(JOB)['blocked_provider'],'image2')
+        self.queue.persist(JOB,'rejection.json',b'{"http_status":400}')
+        self.assertIsNone(self.queue.get(JOB)['blocked_provider'])
+        self.queue.persist(JOB,'quality.json',json.dumps({'version':prep.VERSION,'status':'unavailable','reasons':['视觉检查服务 HTTP 402，结果保留，未放行拆层']}).encode())
+        self.assertEqual(self.queue.get(JOB)['blocked_provider'],'image2')
+
     async def test_review_unavailable_does_not_regenerate_or_pass(self):
         self.create()
         self.review_mock.side_effect = RuntimeError('Review unavailable')

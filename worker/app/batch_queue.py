@@ -72,6 +72,7 @@ class BatchQueue:
                 con.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, position INTEGER NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
                 con.execute("CREATE TABLE IF NOT EXISTS route_changes (batch_id TEXT NOT NULL, before_route TEXT NOT NULL, after_route TEXT NOT NULL, changed REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS batch_policies (batch_id TEXT PRIMARY KEY, on_confirmed_failure TEXT NOT NULL, changed REAL NOT NULL)")
+                con.execute("CREATE TABLE IF NOT EXISTS service_failure_acks (batch_id TEXT NOT NULL, job_id TEXT NOT NULL, PRIMARY KEY(batch_id,job_id))")
                 yield con
         finally:
             con.close()
@@ -191,8 +192,12 @@ class BatchQueue:
             return batch
         if action == "start" and any(not item["uploaded"] for item in batch["items"]):
             raise HTTPException(409, "请先完成所有图片上传")
+        acknowledged = [self.prep_id(item['id']) for item in batch['items']
+                        if action == 'start' and (job := self.friendly_job(item['id']))
+                        and job.get('blocked_provider')]
         with self.db() as con:
             con.execute("UPDATE batches SET state=? WHERE id=?", ("active" if action == "start" else "paused", batch_id))
+            con.executemany('INSERT OR IGNORE INTO service_failure_acks VALUES (?,?)', [(batch_id, jid) for jid in acknowledged])
         return self.read(batch_id)
 
     def change_route(self, batch_id, route):
@@ -260,6 +265,20 @@ class BatchQueue:
         with self.db() as con:
             ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
             all_ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state!='completed'")]
+            acknowledged = {(row['batch_id'], row['job_id']) for row in con.execute('SELECT * FROM service_failure_acks')}
+        active = {bid:self.read(bid) for bid in ids}
+        blocked = {job['blocked_provider'] for bid,batch in active.items() for item in batch['items']
+                   if (bid,self.prep_id(item['id'])) not in acknowledged
+                   and (job := self.friendly_job(item['id'])) and job.get('blocked_provider')}
+        if blocked:
+            # All friendly generation uses Image2 for review, even when its
+            # image generator is Doubao. Never reinterpret a service outage as
+            # a skippable character QA failure. Running work is not cancelled.
+            paused = [bid for bid,batch in active.items() if batch['settings'].get('friendly',False)
+                      and ('image2' in blocked or batch['settings']['provider'] in blocked)]
+            with self.db() as con:
+                con.executemany("UPDATE batches SET state='paused' WHERE id=?",[(bid,) for bid in paused])
+            return
         # Pausing future submissions does not make an in-flight/unknown job safe to overlap.
         if any(item["status"] in {"running", "queued", 'friendly-queued', 'friendly-running', 'uncertain'} for batch_id in all_ids for item in self.read(batch_id)["items"]):
             return
