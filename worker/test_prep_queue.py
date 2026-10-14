@@ -52,6 +52,8 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('双手空手', saved)
                 self.assertIn('不能保留旧持物手再新增下垂手', saved)
                 self.assertIn('Removable handheld props and scenery are explicitly excluded', saved)
+                self.assertIn('输出均匀极浅灰纯背景', saved)
+                self.assertNotIn('输出真实 RGBA 透明 PNG', saved)
                 self.assertTrue((self.queue.root / job_id / 'identity-lock.json').is_file())
                 with patch.dict(prep.PROMPTS, {provider: 'future prompt'}):
                     self.queue.create(job_id, 'same-job', provider, PNG)

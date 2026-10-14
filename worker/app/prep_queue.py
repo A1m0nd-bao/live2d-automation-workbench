@@ -219,8 +219,9 @@ class PrepQueue:
                 raise HTTPException(429, "队列已满，请等待已有任务完成")
             self.persist(job_id, "source", data)
             master = Path(__file__).with_name('prep_prompt_master.txt').read_text()
-            background = ('输出真实 RGBA 透明 PNG，禁止画棋盘格；无法输出 Alpha 时用均匀极浅灰背景。'
-                          if provider == 'image2' else '输出均匀极浅灰纯背景，供后续抠图；不要棋盘格或地面阴影。')
+            # Image-2's gateway route cannot request transparent output. Keep
+            # generation opaque; any cutout is a separate reviewed local step.
+            background = '输出均匀极浅灰纯背景，供后续抠图；不要透明通道、棋盘格或地面阴影。'
             self.persist(job_id, "prompt.txt", (prompt if prompt is not None else master + '\n' + background).encode())
             if prompt is None:
                 self.persist(job_id, 'identity-lock.json', json.dumps({
