@@ -209,6 +209,30 @@ class BatchQueue:
         # Do not start the batch, clear quality gates or alter source/job IDs.
         return self.read(batch_id)
 
+    def split_ready(self, batch_id):
+        """Submit one already-approved output while paid generation stays paused."""
+        batch = self.read(batch_id)
+        if batch['state'] != 'paused' or not batch['settings'].get('friendly', False):
+            raise HTTPException(409, '仅暂停中的友好化批次可单独拆分已通过结果')
+        with self.db() as con:
+            ids = [row['id'] for row in con.execute('SELECT id FROM batches')]
+        if any(item['status'] in {'running', 'queued', 'friendly-running', 'friendly-queued', 'uncertain'}
+               for other in ids for item in self.read(other)['items']):
+            raise HTTPException(409, '已有运行中或结果未知的任务，不能重叠提交')
+        item = next((i for i in batch['items'] if i['status'] == 'pending' and i['friendly_ready']), None)
+        if not item:
+            raise HTTPException(409, '没有尚未提交拆层且已通过质检的友好图')
+        friendly = self.friendly_job(item['id'])
+        source = self.prep.root / self.prep_id(item['id']) / 'output'
+        if (not source.is_file() or
+            hashlib.sha256(source.read_bytes()).hexdigest() != friendly['quality'].get('candidateSha256') or
+            item['sha256'] != friendly['quality'].get('sourceSha256')):
+            raise HTTPException(409, '质检记录与当前图片不一致，未提交拆层')
+        settings = {key: batch['settings'][key] for key in ('resolution', 'seed', 'split_limbs')}
+        settings['upstream_route'] = batch['settings'].get('upstream_route', 'default')
+        self.split_create(item['id'], source, item['filename'], settings)
+        return self.read(batch_id)
+
     async def advance(self):
         with self.db() as con:
             ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
@@ -340,6 +364,11 @@ class BatchQueue:
         async def change_route(batch_id: str, data: BatchRouteInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
             auth(x_relay_token, x_morph_device_token)
             return self.change_route(batch_id, data.upstream_route)
+
+        @router.post("/{batch_id}/split-ready")
+        async def split_ready(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.split_ready(batch_id)
 
         @router.post("/{batch_id}/{action}")
         async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
