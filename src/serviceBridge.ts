@@ -3,6 +3,25 @@ export const SERVICE_ORIGIN =
 const CHANNEL = 'morph-service-v1';
 const DIRECT_SERVICE_STORAGE = 'morph.direct-relay.v1';
 export type DirectServiceConfig = { relayUrl: string; deviceToken: string };
+export type SplitRoute = 'default' | 'yangzxo';
+const SPLIT_ROUTE_STORAGE = 'morph.split-route.v1';
+export function getSplitRoute(): SplitRoute {
+  try { return localStorage.getItem(SPLIT_ROUTE_STORAGE) === 'yangzxo' ? 'yangzxo' : 'default'; }
+  catch { return 'default'; }
+}
+export function saveSplitRoute(route: SplitRoute) {
+  if (!['default', 'yangzxo'].includes(route)) throw new Error('未知拆图线路');
+  localStorage.setItem(SPLIT_ROUTE_STORAGE, route);
+}
+export async function assertSplitRouteSupported(route: SplitRoute = 'default') {
+  if (route === 'default') return;
+  const config = getDirectServiceConfig();
+  if (!config) throw new Error('备用拆图线路需要接入已升级的本机桥接。');
+  const response = await fetch(`${config.relayUrl}/health`, {headers:{'X-Morph-Device-Token':config.deviceToken},signal:AbortSignal.timeout(5000)});
+  const capabilities = response.ok ? await response.json() as {split_routes?: string[]} : {};
+  if (!capabilities.split_routes?.includes(route))
+    throw new Error('桥接尚未接入备用拆图线路；未上传图片，请更新桥接。');
+}
 type Pending = {
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
@@ -94,7 +113,7 @@ export async function serviceDiagnostics(jobId: string): Promise<string> {
 async function directServiceRequest<T>(
   config: DirectServiceConfig,
   command: Parameters<typeof serviceRequest>[0],
-  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' },
+  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2'; route?: SplitRoute; retryId?: string },
 ): Promise<T> {
   if (command === 'prepare')
     throw new Error('同步生图已停用，请使用常驻生图队列。');
@@ -103,12 +122,21 @@ async function directServiceRequest<T>(
     headers: { 'X-Morph-Device-Token': config.deviceToken },
   };
   if (command === 'history') path = '/jobs?limit=40';
+  if (command === 'retryUpload') {
+    if (!/^[a-f0-9]{32}$/.test(payload.jobId || '') || !/^[a-f0-9]{32}$/.test(payload.retryId || '')) throw new Error('任务 ID 无效。');
+    await assertSplitRouteSupported(payload.route);
+    path = `/jobs/${payload.jobId}/retry-upload?route=${payload.route ?? 'default'}&retry_id=${payload.retryId}`;
+    init = {method:'POST',headers:{'X-Morph-Device-Token':config.deviceToken}};
+  }
   if (command === 'prepHealth') path = '/prep/health';
   if (command === 'submit') {
     if (!payload.image) throw new Error('缺少参考图。');
+    const route = payload.route ?? getSplitRoute();
+    await assertSplitRouteSupported(route);
     const form = new FormData();
     form.append('image', payload.image, payload.name || 'reference.png');
     path = `/jobs?name=${encodeURIComponent((payload.name || 'character').replace(/\.[^.]+$/, ''))}`;
+    if (route !== 'default') path += `&route=${route}`;
     init = { method: 'POST', body: form, headers: { 'X-Morph-Device-Token': config.deviceToken } };
   }
   if (command === 'status' || command === 'output') {
@@ -125,7 +153,7 @@ async function directServiceRequest<T>(
   }
   if (command === 'output') return response.arrayBuffer() as Promise<T>;
   const result = await response.json() as { id?: string; [key: string]: unknown };
-  if (command === 'submit')
+  if (command === 'submit' || command === 'retryUpload')
     return { jobId: result.id, status: result.status, message: result.message } as T;
   if (command === 'health')
     return { ready: Boolean(result.ok), message: result.ok ? '直连常驻队列已就绪。' : '直连 Relay 缺少上游凭据。' } as T;
@@ -174,11 +202,15 @@ export async function serviceRequest<T>(
     | 'prepare'
     | 'prepHealth'
     | 'submit'
+    | 'retryUpload'
     | 'status'
     | 'output',
-  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2' } = {},
+  payload: { image?: Blob; name?: string; jobId?: string; provider?: 'doubao' | 'image2'; route?: SplitRoute; retryId?: string } = {},
 ): Promise<T> {
   const direct = getDirectServiceConfig();
+  if (command === 'retryUpload' && !direct) throw new Error('恢复上传需要接入本机桥接。');
+  if (command === 'submit' && (payload.route ?? getSplitRoute()) === 'yangzxo' && !direct)
+    throw new Error('备用拆图线路需要接入已升级的本机桥接，未提交图片。');
   if (command === 'prepare') throw new Error('同步生图已停用，请使用常驻生图队列。');
   if (command === 'prepHealth' && !direct)
     throw new Error('请接入本机桥接或配置常驻 Relay；生图不再依赖旧网站登录。');

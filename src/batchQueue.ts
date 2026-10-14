@@ -1,6 +1,6 @@
-import { getDirectServiceConfig } from './serviceBridge';
+import { getDirectServiceConfig, type SplitRoute } from './serviceBridge';
 
-export type BatchSettings = { resolution: number; seed: number; split_limbs: boolean; friendly?: boolean; provider?: 'doubao' | 'image2' };
+export type BatchSettings = { resolution: number; seed: number; split_limbs: boolean; friendly?: boolean; provider?: 'doubao' | 'image2'; upstream_route?: SplitRoute };
 export const BATCH_DEFAULTS: BatchSettings = { resolution: 1024, seed: 42, split_limbs: true, friendly: true, provider: 'doubao' };
 export type SplitBatch = {
   id: string; name: string; created_at?: number;

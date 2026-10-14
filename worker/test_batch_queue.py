@@ -59,6 +59,13 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call[0] for call in self.calls], ['1'*32, '2'*32])
         self.assertEqual(restarted.read(self.data.id)['failed'], 1)
 
+    async def test_backup_route_is_saved_and_passed_to_serial_splitter(self):
+        self.data.settings.upstream_route='yangzxo'
+        self.ready()
+        await self.queue.advance()
+        self.assertEqual(self.calls[0][2]['upstream_route'],'yangzxo')
+        self.assertEqual(self.queue.read(self.data.id)['settings']['upstream_route'],'yangzxo')
+
     async def test_manifest_and_upload_are_idempotent(self):
         self.queue.create(self.data)
         self.queue.create(self.data)

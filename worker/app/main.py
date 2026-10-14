@@ -30,6 +30,25 @@ from pydantic import BaseModel
 DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/workspace/morph-live2d")).resolve()
 DB_PATH = DATA_ROOT / "jobs.sqlite3"
 UPSTREAM = os.environ.get("SEE_THROUGH_URL", "https://studio-ljsabc-see-through.api-inference.modelscope.net").rstrip("/")
+BACKUP_UPSTREAM = 'https://studio-yangzxo-see-through.api-inference.modelscope.net'
+SPLIT_ROUTES = ('default', 'yangzxo')
+
+def pin_split_route(directory: Path, route: str = 'default') -> None:
+    if route not in SPLIT_ROUTES:
+        raise HTTPException(422, '未知拆图线路')
+    target = directory / 'upstream-route.json'
+    if target.exists():
+        return  # Existing tasks never move when defaults/settings change.
+    target.write_text(json.dumps({'route': route, 'upstream': BACKUP_UPSTREAM if route == 'yangzxo' else UPSTREAM}))
+
+def job_upstream(job_id: str) -> str:
+    target = DATA_ROOT / job_id / 'upstream-route.json'
+    if not target.exists():
+        return UPSTREAM  # Historical jobs retain their previous behavior.
+    value = json.loads(target.read_text())['upstream']
+    if value != BACKUP_UPSTREAM and value != UPSTREAM:
+        raise RuntimeError('Saved split route no longer matches configured trusted upstreams')
+    return value
 # Use an explicit, relay-specific secret for outbound inference.
 MODELSCOPE_TOKEN = os.environ.get("SEE_THROUGH_API_TOKEN", "")
 RELAY_TOKEN = os.environ.get("MORPH_RELAY_TOKEN", "")
@@ -217,16 +236,18 @@ def find_psd_output(value: Any) -> str | None:
     return None
 
 
-def upstream_file_url(value: str) -> str:
+def upstream_file_url(value: str, upstream: str | None = None) -> str:
     """Turn a FileData path into Gradio's authenticated download URL."""
+    upstream = upstream or UPSTREAM
+    browser_host = 'yangzxo-see-through.ms.show' if upstream == BACKUP_UPSTREAM else 'ljsabc-see-through.ms.show'
     if value.startswith(("http://", "https://")):
         parsed = urlsplit(value)
-        if parsed.scheme == "https" and parsed.netloc == urlsplit(UPSTREAM).netloc:
+        if parsed.scheme == "https" and parsed.netloc == urlsplit(upstream).netloc:
             return value
         # Gradio may advertise a browser-facing Studio URL. Only translate
         # file routes belonging to this specific upstream; never send tokens
         # to an arbitrary URL in an inference response.
-        if parsed.scheme == "https" and parsed.netloc == "ljsabc-see-through.ms.show":
+        if parsed.scheme == "https" and parsed.netloc == browser_host:
             if parsed.path.startswith(("/gradio_api/file=", "/file=")):
                 value = unquote(parsed.path.split("file=", 1)[1])
             else:
@@ -235,7 +256,7 @@ def upstream_file_url(value: str) -> str:
             raise RuntimeError("Untrusted upstream download origin")
     elif value.startswith(("/gradio_api/file=", "/file=")):
         value = unquote(value.split("file=", 1)[1])
-    return f"{UPSTREAM}/gradio_api/file={quote(value, safe='/')}"
+    return f"{upstream}/gradio_api/file={quote(value, safe='/')}"
 
 
 def record_event(job_id: str, stage: str, **data: Any) -> None:
@@ -281,6 +302,11 @@ async def monitor(job_id: str) -> None:
             return
         batch_options_path = DATA_ROOT / job_id / 'batch-options.json'
         batch_options = json.loads(batch_options_path.read_text()) if batch_options_path.exists() else None
+        upstream = job_upstream(job_id)
+        record_event(job_id, 'route', upstream=upstream)
+        if batch_options is None and (DATA_ROOT / job_id / 'upstream-route.json').exists():
+            batch_options = {}  # New single jobs also use durable no-replay checkpoints.
+        durable = batch_options is not None
         checkpoint = DATA_ROOT / job_id / 'batch-inference.json'
         for attempt in range(1, MAX_ATTEMPTS + 1):
             stage = "upload"
@@ -290,7 +316,7 @@ async def monitor(job_id: str) -> None:
             timeout = httpx.Timeout(connect=30, read=90, write=60, pool=30)
             try:
                 async with httpx.AsyncClient(timeout=timeout) as client:
-                    saved = json.loads(checkpoint.read_text()) if batch_options and checkpoint.exists() else None
+                    saved = json.loads(checkpoint.read_text()) if durable and checkpoint.exists() else None
                     if saved:
                         if not saved.get('event_id'):
                             update_job(job_id, status='running', message='上游提交结果未知，批次已等待人工确认；不会重复提交', error='uncertain submission')
@@ -301,7 +327,7 @@ async def monitor(job_id: str) -> None:
                         source_name = f"source{source_suffix}"
                         with source.open("rb") as handle:
                             upload = await client.post(
-                                f"{UPSTREAM}/gradio_api/upload", headers=headers,
+                                f"{upstream}/gradio_api/upload", headers=headers,
                                 files={"files": (source_name, handle, source_mime)},
                             )
                         if not upload.is_success:
@@ -315,22 +341,22 @@ async def monitor(job_id: str) -> None:
                             raise RuntimeError("See-Through did not return an uploaded file reference")
                         input_file = file_data(uploaded, source_name, source_mime) if isinstance(uploaded, str) else uploaded
                         stage = "submit"
-                        if batch_options:
+                        if durable:
                             checkpoint.write_text(json.dumps({'event_id': None}))
                         call = await client.post(
-                            f"{UPSTREAM}/gradio_api/call/inference",
+                            f"{upstream}/gradio_api/call/inference",
                             headers={**headers, "Content-Type": "application/json"},
                             json={"data": [input_file, (batch_options or {}).get('resolution', INFERENCE_RESOLUTION),
                                            (batch_options or {}).get('seed', 42), (batch_options or {}).get('split_limbs', SPLIT_LIMBS)]},
                         )
                         if not call.is_success:
-                            if batch_options and call.status_code < 500:
+                            if durable and call.status_code < 500:
                                 checkpoint.unlink(missing_ok=True)
                             raise RuntimeError(await upstream_error(call))
                         event_id = (call.json() or {}).get("event_id")
                         if not isinstance(event_id, str) or not event_id:
                             raise RuntimeError("See-Through did not return a Gradio event id")
-                        if batch_options:
+                        if durable:
                             checkpoint.write_text(json.dumps({'event_id': event_id}))
                         record_event(job_id, "submitted", attempt=attempt, event_id=event_id)
                     update_job(job_id, status="running", message="上游已接收，等待处理结果（可能仍在排队）", queue_rank=None, queue_eta_seconds=None)
@@ -338,7 +364,7 @@ async def monitor(job_id: str) -> None:
                     deadline = asyncio.get_running_loop().time() + 1200
                     async with client.stream(
                         "GET",
-                        f"{UPSTREAM}/gradio_api/call/inference/{event_id}",
+                        f"{upstream}/gradio_api/call/inference/{event_id}",
                         headers={**headers, "Accept": "text/event-stream"},
                     ) as stream:
                         if not stream.is_success:
@@ -360,7 +386,7 @@ async def monitor(job_id: str) -> None:
                                 terminal_error = True
                                 raise RuntimeError(f"See-Through emitted error: {raw}")
                             if event_type == "complete":
-                                terminal_error = bool(batch_options)
+                                terminal_error = durable
                                 output = json.loads(raw)
                                 output_url = find_psd_output(output)
                                 if not output_url:
@@ -368,7 +394,7 @@ async def monitor(job_id: str) -> None:
                                     raise RuntimeError(f"See-Through completed without a PSD output: {snapshot}")
                                 output_file = DATA_ROOT / job_id / "output.psd"
                                 stage = "download"
-                                download_url = upstream_file_url(output_url)
+                                download_url = upstream_file_url(output_url, upstream)
                                 record_event(job_id, "download", url=download_url)
                                 response = await client.get(download_url, headers=headers, timeout=120)
                                 if not response.is_success:
@@ -382,11 +408,11 @@ async def monitor(job_id: str) -> None:
             except Exception as error:
                 detail = f"{stage}: {error}"
                 record_event(job_id, "failure", attempt=attempt, error=detail)
-                if batch_options and terminal_error:
+                if durable and terminal_error:
                     update_job(job_id, status='failed', message='See-Through 已明确返回失败，批次继续下一张', error=detail)
                     return
                 if attempt == MAX_ATTEMPTS:
-                    if batch_options and checkpoint.exists():
+                    if durable and checkpoint.exists():
                         update_job(job_id, status='running', message='已提交任务连接中断，保留任务等待恢复；不会重复推理', error=detail)
                     else:
                         update_job(job_id, status="failed", message="See-Through 任务失败", error=detail)
@@ -476,6 +502,7 @@ def batch_split_create(job_id, source, name, settings):
             directory.mkdir(exist_ok=True)
             (directory / 'source').write_bytes(source.read_bytes())
             (directory / 'batch-options.json').write_text(json.dumps(settings))
+            pin_split_route(directory, settings.get('upstream_route', 'default'))
             connection.execute("INSERT INTO jobs (id,name,status,message) VALUES (?,?,'queued','批次等待串行拆件')", (job_id, name))
     if job_id not in ACTIVE and get_job(job_id).status in {'queued', 'running'}:
         asyncio.create_task(monitor(job_id))
@@ -512,6 +539,7 @@ async def health() -> dict[str, bool | str | int]:
         "resolution": INFERENCE_RESOLUTION,
         "split_limbs": SPLIT_LIMBS,
         "version": "stage-diagnostics-v1",
+        "split_routes": list(SPLIT_ROUTES),
     }
 
 
@@ -535,13 +563,14 @@ async def local_dwpose(x_morph_device_token: str | None = Header(default=None)):
 
 
 @app.post("/jobs", response_model=JobStatus, status_code=202)
-async def create_job(image: UploadFile = File(...), name: str = "character", foreground: bool = False, x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
+async def create_job(image: UploadFile = File(...), name: str = "character", foreground: bool = False, route: Literal['default', 'yangzxo'] = 'default', x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)) -> JobStatus:
     require_relay_token(x_relay_token, x_morph_device_token)
     if image.content_type not in {"image/jpeg", "image/png"}:
         raise HTTPException(status_code=415, detail="Only PNG and JPEG input is supported")
     job_id = uuid.uuid4().hex
     job_dir = DATA_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=False)
+    pin_split_route(job_dir, route)
     source = job_dir / "source"
     source.write_bytes(await image.read())
     if foreground:
@@ -563,6 +592,41 @@ async def list_jobs(limit: int = 40, x_relay_token: str | None = Header(default=
             (safe_limit,),
         ).fetchall()
     return [row_to_history(row) for row in rows]
+
+
+@app.post('/jobs/{job_id}/retry-upload', response_model=JobStatus, status_code=202)
+async def retry_upload(job_id: str, retry_id: str, route: Literal['default','yangzxo'] = 'default', x_relay_token: str | None = Header(default=None), x_morph_device_token: str | None = Header(default=None)):
+    require_relay_token(x_relay_token, x_morph_device_token)
+    if not all(len(value)==32 and all(c in '0123456789abcdef' for c in value) for value in [job_id,retry_id]):
+        raise HTTPException(422,'无效任务编号')
+    old = get_job(job_id)
+    previous = DATA_ROOT / job_id
+    # An upload-stage failure is safe to resubmit: inference was never called.
+    # Never move a queued/running/ambiguous/completed inference to another route.
+    if old.status != 'failed' or not (old.error or '').startswith('upload:') or (previous / 'batch-inference.json').exists():
+        raise HTTPException(409,'只允许恢复明确在上传阶段失败的任务；已提交或结果未知的推理不会重跑。')
+    events = previous / 'events.jsonl'
+    if events.exists() and any(json.loads(line).get('stage')=='submitted' for line in events.read_text().splitlines() if line.strip()):
+        raise HTTPException(409,'此任务已有推理提交记录，不能切线重跑。')
+    target = DATA_ROOT / retry_id
+    with db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        existing=connection.execute('SELECT id FROM jobs WHERE id=?',(retry_id,)).fetchone()
+        marker={'parent':job_id,'route':route}
+        if existing:
+            if not (target / 'retry-parent.json').exists() or json.loads((target / 'retry-parent.json').read_text())!=marker:
+                raise HTTPException(409,'恢复编号已用于其他任务')
+        else:
+            target.mkdir(exist_ok=False)
+            (target / 'source').write_bytes((previous / 'source').read_bytes())
+            (target / 'retry-parent.json').write_text(json.dumps(marker))
+            for name in ['foreground-request.json','batch-options.json']:
+                if (previous / name).exists(): (target / name).write_bytes((previous / name).read_bytes())
+            pin_split_route(target,route)
+            connection.execute("INSERT INTO jobs (id,name,status,message) VALUES (?,?,'queued','已复用保存图片，等待备用线路上传')",(retry_id,old.name))
+    if get_job(retry_id).status in ('queued','running') and retry_id not in ACTIVE:
+        asyncio.create_task(monitor(retry_id))
+    return get_job(retry_id)
 
 
 @app.get("/jobs/{job_id}", response_model=JobStatus)

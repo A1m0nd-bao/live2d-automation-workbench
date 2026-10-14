@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { BATCH_DEFAULTS, batchRequest, fingerprint, validateBatchFiles, type SplitBatch } from './batchQueue';
-import { connectLocalRelay, hasDirectServiceConfig } from './serviceBridge';
+import { connectLocalRelay, hasDirectServiceConfig, assertSplitRouteSupported, type SplitRoute } from './serviceBridge';
 import { downloadBlob, readAsset, saveAsset } from './assets';
 import './batch.css';
 import { LIVE2D_PRO_STATES } from './live2dPro';
@@ -78,6 +78,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
   }
 
   async function upload(batch: SplitBatch) {
+    await assertSplitRouteSupported(batch.settings.upstream_route);
     setSelected(batch.id);
     // The manifest is already persisted before the first remote mutation.
     const remote = await batchRequest<SplitBatch>('', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -137,6 +138,8 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
       <label>随机种子<input type="number" min="0" max="9999" value={settings.seed} onChange={e => setSettings(s => ({ ...s, seed: Number(e.target.value) }))} /></label>
     </div>
     <div className="batch-options">
+      <label>拆图线路<select aria-label="批量拆图线路" value={settings.upstream_route ?? 'default'} onChange={e=>setSettings(s=>({...s,upstream_route:e.target.value as SplitRoute}))}><option value="default">默认线路（现有配置）</option><option value="yangzxo">备用：yangzxo / See-Through</option></select></label>
+      <small>备用线路会上传到 yangzxo 空间；仅新批次生效，不自动切换已有任务。</small>
       <label><input type="checkbox" checked={settings.friendly ?? true} onChange={e => setSettings(s => ({ ...s, friendly: e.target.checked }))} />先生成友好图（会产生生图费用）</label>
       {settings.friendly && <label>友好图提供方<select value={settings.provider} onChange={e => setSettings(s => ({ ...s, provider: e.target.value as 'doubao' | 'image2' }))}><option value="doubao">豆包</option><option value="image2">Image-2</option></select></label>}
       <label><input type="checkbox" checked={settings.split_limbs} onChange={e => setSettings(s => ({ ...s, split_limbs: e.target.checked }))} />拆分左右手臂与腿</label>
