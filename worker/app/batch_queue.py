@@ -45,6 +45,10 @@ class BatchRouteInput(BaseModel):
     upstream_route: str = Field(pattern='^(default|yangzxo)$')
 
 
+class BatchPolicyInput(BaseModel):
+    on_confirmed_failure: str = Field(pattern='^(pause|skip)$')
+
+
 class BatchQueue:
     def __init__(self, root, authorize, split_create, split_get, prep=None):
         self.root = Path(root) / "batches"
@@ -66,6 +70,7 @@ class BatchQueue:
                 con.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, manifest TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, position INTEGER NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
                 con.execute("CREATE TABLE IF NOT EXISTS route_changes (batch_id TEXT NOT NULL, before_route TEXT NOT NULL, after_route TEXT NOT NULL, changed REAL NOT NULL)")
+                con.execute("CREATE TABLE IF NOT EXISTS batch_policies (batch_id TEXT PRIMARY KEY, on_confirmed_failure TEXT NOT NULL, changed REAL NOT NULL)")
                 yield con
         finally:
             con.close()
@@ -129,6 +134,7 @@ class BatchQueue:
             if not row:
                 raise HTTPException(404, "批次不存在")
             uploaded = {item["id"]: bool(item["uploaded"]) for item in con.execute("SELECT * FROM items WHERE batch_id=?", (batch_id,))}
+            policy = con.execute('SELECT on_confirmed_failure FROM batch_policies WHERE batch_id=?', (batch_id,)).fetchone()
         data = json.loads(row["manifest"])
         items = []
         for i, item in enumerate(data["items"]):
@@ -154,6 +160,7 @@ class BatchQueue:
                     failed=sum(item["status"] == "failed" for item in items))
         data['friendly_succeeded'] = sum(item['friendly_ready'] for item in items)
         data['uncertain'] = sum(item['status'] == 'uncertain' for item in items)
+        data['on_confirmed_failure'] = policy['on_confirmed_failure'] if policy else 'pause'
         return data
 
     def upload(self, batch_id, item_id, data):
@@ -209,6 +216,21 @@ class BatchQueue:
         # Do not start the batch, clear quality gates or alter source/job IDs.
         return self.read(batch_id)
 
+    def set_policy(self, batch_id, on_confirmed_failure):
+        if on_confirmed_failure not in {'pause', 'skip'}:
+            raise HTTPException(422, '未知失败策略')
+        with self.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT state FROM batches WHERE id=?', (batch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, '批次不存在')
+            if row['state'] != 'paused':
+                raise HTTPException(409, '请先暂停批次再确认失败处理方式')
+            con.execute('INSERT INTO batch_policies VALUES (?,?,?) ON CONFLICT(batch_id) DO UPDATE SET on_confirmed_failure=excluded.on_confirmed_failure,changed=excluded.changed',
+                        (batch_id, on_confirmed_failure, time.time()))
+        # This is an explicit per-batch choice, not a global QA bypass or retry.
+        return self.read(batch_id)
+
     def split_ready(self, batch_id):
         """Submit one already-approved output while paid generation stays paused."""
         batch = self.read(batch_id)
@@ -245,7 +267,7 @@ class BatchQueue:
             batch = self.read(batch_id)
             # A systematic prompt/review failure must not burn through the rest
             # of the paid batch. Keep candidates and await an explicit decision.
-            if batch['settings'].get('friendly', False) and any(
+            if batch['on_confirmed_failure'] != 'skip' and batch['settings'].get('friendly', False) and any(
                 not self.split_get(item['id']) and
                 (friendly := self.friendly_job(item['id'])) and
                 (friendly['status'] in {'needs-review', 'failed', 'uncertain'} or
@@ -369,6 +391,11 @@ class BatchQueue:
         async def split_ready(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
             auth(x_relay_token, x_morph_device_token)
             return self.split_ready(batch_id)
+
+        @router.post("/{batch_id}/policy")
+        async def policy(batch_id: str, data: BatchPolicyInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.set_policy(batch_id, data.on_confirmed_failure)
 
         @router.post("/{batch_id}/{action}")
         async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
