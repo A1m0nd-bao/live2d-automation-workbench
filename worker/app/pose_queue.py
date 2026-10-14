@@ -134,9 +134,23 @@ class PoseQueue:
         state.update(status='generating', message='正在生成完整肩袖手部件')
         self.save(run)
         gid = state['generation_id']
-        prompt = pose.pose_prompt(state['id'], info)
+        # Gateway transparency availability is provider-specific. Request a
+        # plain-background asset, then use the existing CPU cutout + visual QA.
+        # Never resubmit a rejected/unknown call with changed options silently.
+        solid_background = run['provider'] == 'image2'
+        prompt = pose.pose_prompt(state['id'], info, solid_background=solid_background)
+        if state.get('correction_reasons'):
+            prompt += '\nThis is an explicitly requested correction of an unsuccessful part. Fix the following proportion/attachment defects while preserving the reference outfit: '
+            prompt += json.dumps(state['correction_reasons'], ensure_ascii=False)
+            prompt += '\nMatch hand-to-forearm size and sleeve width-to-arm length from reference 2, not the previous generated part. Do not enlarge hands or lengthen forearms.'
         self.prep.persist(gid, 'source', (self.root/run['id']/'neutral.png').read_bytes())
         self.prep.persist(gid, 'prompt.txt', prompt.encode())
+        self.prep.persist(gid, 'request-settings.json', json.dumps({
+            'version':'pose-image-compat-v1', 'model':model, 'provider':run['provider'],
+            'size':'1536x2400' if run['provider']=='doubao' else '1024x1536',
+            'reference_count':2, 'background_strategy':'local_cutout' if solid_background else 'transparent_prompt',
+            'automatic_retry':False,
+        }).encode())
         def update(**fields):
             for field in ('status','message','request_id'):
                 if field in fields:
@@ -145,8 +159,7 @@ class PoseQueue:
         try:
             data = await self.prep.generate({'id':gid, 'provider':run['provider'], 'model':model, '_update':update,
                 '_references':[(self.root/run['id']/'arms.png').read_bytes()],
-                '_options':{'size':'1536x2400' if run['provider']=='doubao' else '1024x1536',
-                            'openai':{'background':'transparent'}}}, key)
+                '_options':{'size':'1536x2400' if run['provider']=='doubao' else '1024x1536'}}, key)
             if data is None:
                 return
             self.persist(directory/'candidate.png', data)
@@ -198,7 +211,9 @@ class PoseQueue:
                    '肩是肩袖与躯干连接的中心，不是抬高的手掌、不是整张图的最高点。')
                 + '\n源层检查信息：'+json.dumps(info['arms'])+'\n要求：'+pose.pose_prompt(state['id'], info))
             geometry = pose.validate_checks(await pose.vision(key, instruction,
-                [(self.root/run['id']/'neutral.png').read_bytes(), (self.root/run['id']/'arms.png').read_bytes(),data]), pose.PART_CHECKS)
+                [(self.root/run['id']/'neutral.png').read_bytes(), (self.root/run['id']/'arms.png').read_bytes(),data],
+                checks=pose.PART_CHECKS, geometry_fields=('shoulder','other_shoulder') if both else
+                ('shoulder','elbow','wrist','source_shoulder','source_elbow','source_wrist')), pose.PART_CHECKS)
             self.persist(geometry_file, json.dumps(geometry, ensure_ascii=False).encode())
         if geometry['status'] != 'passed':
             state.update(status='needs-review', message='；'.join(geometry['reasons']) or '部件视觉检查未通过')
@@ -213,7 +228,8 @@ class PoseQueue:
             'checks 必须恰好为 '+','.join(pose.PREVIEW_CHECKS)+'，值 pass/fail/uncertain；reasons 中文问题数组。'
             '本轮不修改嘴、表情或身体。要求：'+pose.POSES[state['id']])
         review = pose.validate_checks(await pose.vision(key, instruction, [(self.root/run['id']/'neutral.png').read_bytes(),preview,
-            (directory/'shoulder-closeup.png').read_bytes(),(directory/'hand-closeup.png').read_bytes()]), pose.PREVIEW_CHECKS)
+            (directory/'shoulder-closeup.png').read_bytes(),(directory/'hand-closeup.png').read_bytes()],
+            checks=pose.PREVIEW_CHECKS), pose.PREVIEW_CHECKS)
         self.persist(directory/'review.json', json.dumps({**review, 'assembly':report}, ensure_ascii=False).encode())
         state.update(status='succeeded' if review['status']=='passed' else 'needs-review',
                      message='实际合层检查通过，仍需人工验收' if review['status']=='passed' else '；'.join(review['reasons']) or '实际合层待复核',
@@ -264,6 +280,21 @@ class PoseQueue:
             (directory/'geometry.json').unlink(missing_ok=True)
             state.update(status='reviewing', message='仅复核现有素材，不发起生图')
         else:
+            # Only visual part/assembly feedback can guide an explicit retry.
+            # Never rewrite a prompt to get around a provider safety rejection.
+            reasons = []
+            for filename in ('geometry.json','review.json'):
+                report_file = directory/filename
+                if report_file.exists():
+                    try:
+                        report = json.loads(report_file.read_text())
+                        if report.get('status') == 'rejected':
+                            reasons += [r[:300] for r in report.get('reasons',[]) if isinstance(r,str)][:6]
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+            state.pop('correction_reasons', None)
+            if reasons:
+                state['correction_reasons'] = reasons[:6]
             state.setdefault('history', []).append({k:state[k] for k in ('generation_id','status','attempt')})
             state.update(generation_id=uuid.uuid4().hex, status='queued', message='用户明确请求重新生成该部件', attempt=state['attempt']+1, preview=False)
         run['status']='running'

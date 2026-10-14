@@ -195,6 +195,36 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.queue.get(JOB)['status'], 'succeeded')
         self.assertEqual((self.queue.root / JOB / 'output').read_bytes(), PNG)
 
+    def test_transparency_diagnostic_is_fixed_label_not_raw_message(self):
+        import json
+        response=httpx.Response(400,headers={'x-request-id':'req_test_123'},json={'error':{
+            'message':'Transparent backgrounds are not supported with this model. secret-key data:image/png;base64,private'}})
+        diagnostic=prep.rejection_diagnostic(response)
+        self.assertEqual(diagnostic['param'],'background')
+        self.assertEqual(diagnostic['category'],'unsupported_parameter')
+        self.assertEqual(diagnostic['request_id'],'req_test_123')
+        self.assertNotIn('secret-key',json.dumps(diagnostic))
+        self.assertNotIn('base64',json.dumps(diagnostic))
+
+    async def test_pose_wire_options_two_rgba_inputs_without_forced_alpha_output(self):
+        import json
+        self.create()
+        calls=[]
+        def handler(request):
+            body=json.loads(request.content);calls.append(body)
+            self.assertEqual(len(body['files']),2)
+            self.assertEqual(body['size'],'1024x1536')
+            self.assertEqual(body['providerOptions'],{'openai':{'outputFormat':'png'}})
+            return httpx.Response(400,json={'error':{'param':'background','message':'private input'}})
+        client=httpx.AsyncClient
+        with patch.object(prep.httpx,'AsyncClient',side_effect=lambda **kw:client(transport=httpx.MockTransport(handler),**kw)):
+            result=await self.queue.generate({**self.queue.get(JOB),'_references':[PNG],'_options':{'size':'1024x1536'}},'test-key-not-real')
+        self.assertIsNone(result)
+        self.assertEqual(len(calls),1)
+        diagnostic=json.loads((self.queue.root/JOB/'rejection.json').read_text())
+        self.assertEqual(diagnostic['param'],'background')
+        self.assertNotIn('private input',json.dumps(diagnostic))
+
     async def test_auth_input_validation_and_missing_key(self):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url='http://test') as client:
             for path in ['/prep/health', '/prep/jobs', '/prep/jobs/' + JOB, '/prep/jobs/' + JOB + '/output']:

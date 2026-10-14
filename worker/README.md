@@ -8,6 +8,26 @@ license: apache-2.0
 
 # Morph See-Through Relay
 
+## PSD pose image compatibility (2026-10-14)
+
+Image-2 pose jobs request a uniform gray background without forcing the
+provider-specific transparent-output option. CPU foreground extraction then
+produces the Alpha part; the same connected-part, geometry and actual assembled
+preview checks remain mandatory. Inputs may retain their PNG Alpha channels.
+This changes neither the source PSD nor its layer order and never calls the
+decomposition service. Doubao and neutral friendly-image policies are unchanged.
+
+Pose review uses a strict JSON schema for named checks and normalized landmarks;
+missing fields, refusal, uncertain geometry and visual failures still block
+delivery. An explicit generation retry includes saved visual feedback, but
+provider safety rejection is never rewritten into a corrective prompt. There is
+no automatic paid retry or model switch. Saved `request-settings.json` records
+the generation policy; `rejection.json` contains only allowlisted error labels,
+parameters and validated request IDs, never raw provider bodies or images.
+Upgrade `prep_queue.py`, `pose_queue.py` and `psd_pose.py` together only when no
+calls are active; preserve local `image_quality.py` customizations. Pages uses
+this Relay backend, so a Pages-only deployment cannot update its transport.
+
 ## Backup split route (2026-10-14)
 
 New single tasks and batches may explicitly choose `yangzxo`; default still
