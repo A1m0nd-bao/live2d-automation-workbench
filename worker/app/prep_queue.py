@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+from contextlib import contextmanager
 import time
 import subprocess
 import getpass
@@ -42,12 +43,12 @@ PROMPTS = {
 }
 
 
-def rejection_detail(response):
+def rejection_diagnostic(response):
     """Publish only fixed labels, never provider messages or arbitrary fields."""
     try:
         payload = response.json()
     except (ValueError, UnicodeError):
-        return ""
+        payload = {}
     labels = {
         "size": "输出尺寸", "image": "输入图片", "images": "输入图片",
         "files": "输入图片", "model": "模型", "prompt": "提示词",
@@ -57,6 +58,10 @@ def rejection_detail(response):
     }
     # Gateway may wrap the provider error under error/cause. Do not traverse
     # arbitrary input fields, copy messages, or retain raw response bodies.
+    diagnostic = {"http_status": response.status_code, "category": "unknown_rejection"}
+    request_id = response.headers.get("x-request-id")
+    if request_id and re.fullmatch(r"[A-Za-z0-9_-]{1,160}", request_id):
+        diagnostic["request_id"] = request_id
     pending = [(payload, 0)]
     while pending:
         error, depth = pending.pop(0)
@@ -64,21 +69,30 @@ def rejection_detail(response):
             continue
         code = error.get("code")
         if isinstance(code, str) and code in {"content_policy_violation", "moderation_blocked", "safety_violations"}:
-            return "上游内容安全检查拒绝了本次请求"
+            return {**diagnostic, "category": "content_safety", "code": code,
+                    "detail": "上游内容安全检查拒绝了本次请求"}
         # Gateway can wrap OpenAI's rejection as AI_APICallError with no code
         # and an object-valued param. Recognize its message without publishing it.
         message = error.get("message")
         if isinstance(message, str) and "request was rejected by the safety system" in message.lower():
             if "safety_violations=[sexual]" in message.lower():
-                return "上游内容安全检查拒绝了本次请求（性内容标记）"
-            return "上游内容安全检查拒绝了本次请求"
+                return {**diagnostic, "category": "content_safety", "detail": "上游内容安全检查拒绝了本次请求（性内容标记）"}
+            return {**diagnostic, "category": "content_safety", "detail": "上游内容安全检查拒绝了本次请求"}
+        if isinstance(message, str) and re.search(r"transparent backgrounds?.{0,60}(?:not supported|unsupported)|(?:not support|unsupported).{0,60}transparent backgrounds?", message.lower()):
+            return {**diagnostic, "category": "unsupported_parameter", "param": "background",
+                    "detail": "当前上游线路不支持所请求的透明背景输出"}
         param = error.get("param")
         if isinstance(param, str) and param in labels:
-            return f"上游指出需检查：{labels[param]}"
+            return {**diagnostic, "category": "invalid_parameter", "param": param,
+                    "detail": f"上游指出需检查：{labels[param]}"}
         if depth < 3:
             for field in ("error", "cause", "param"):
                 pending.append((error.get(field), depth + 1))
-    return ""
+    return diagnostic
+
+
+def rejection_detail(response):
+    return rejection_diagnostic(response).get("detail", "")
 
 
 class PrepQueue:
@@ -90,11 +104,16 @@ class PrepQueue:
         self.router = APIRouter(prefix="/prep")
         self.routes()
 
+    @contextmanager
     def db(self):
         self.root.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(self.root / "jobs.sqlite3", timeout=10)
         con.row_factory = sqlite3.Row
-        return con
+        try:
+            with con:
+                yield con
+        finally:
+            con.close()
 
     def init(self):
         with self.db() as con:
@@ -293,7 +312,9 @@ class PrepQueue:
             # embedded input images, signed URLs or internal diagnostics.
             status = "uncertain" if response.status_code >= 500 else "failed"
             labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "额度或余额不足", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
-            detail = rejection_detail(response) if response.status_code == 400 else ""
+            diagnostic = rejection_diagnostic(response)
+            self.persist(job['id'], 'rejection.json', json.dumps(diagnostic, ensure_ascii=False).encode())
+            detail = diagnostic.get('detail', '') if response.status_code == 400 else ""
             update(status=status, finished_at=time.time(),
                 message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）"
                         f"{'；' + detail if detail else ''}；未自动重试。")

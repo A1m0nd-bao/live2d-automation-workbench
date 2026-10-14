@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -69,7 +69,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
     def auth(relay,device):
         if device!='test': raise HTTPException(401,'Unauthorized')
     def create(self,states=None): return self.queue.create('a'*32,states or [WAVE],'image2',self.data)
-    async def vision(self,key,instruction,images):
+    async def vision(self,key,instruction,images,**kwargs):
         checks=pose.PART_CHECKS if len(images)==3 else pose.PREVIEW_CHECKS
         return {'checks':{x:'pass' for x in checks},'reasons':[],'geometry':geometry()}
 
@@ -78,7 +78,12 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(pose,'vision',self.vision): await self.queue.advance(run)
         self.assertEqual(run['status'],'ready',run)
         self.assertEqual(len(self.prep.calls),1)
-        self.assertEqual(self.prep.calls[0]['_options']['openai']['background'],'transparent')
+        self.assertNotIn('openai', self.prep.calls[0]['_options'])
+        prompt=(self.prep.root/run['states'][0]['generation_id']/'prompt.txt').read_text()
+        self.assertIn('uniform flat neutral gray',prompt)
+        self.assertNotIn('Output actual RGBA transparency',prompt)
+        settings=json.loads((self.prep.root/run['states'][0]['generation_id']/'request-settings.json').read_text())
+        self.assertEqual(settings['background_strategy'],'local_cutout')
         before=PSDImage.open(io.BytesIO(self.data))
         after=PSDImage.open(self.queue.root/run['id']/'merged.psd')
         self.assertEqual(pose.signature(list(before)),pose.signature(list(after)[:3]))
@@ -101,7 +106,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.prep.calls),1)
 
     async def test_rejected_actual_preview_blocks_export(self):
-        async def rejected(key,instruction,images):
+        async def rejected(key,instruction,images,**kwargs):
             result=await self.vision(key,instruction,images)
             if len(images)!=3:
                 result['checks']['no_duplicate_limbs']='fail';result['reasons']=['躯干层有残留旧袖']
@@ -116,6 +121,117 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resumed['states'][0]['generation_id'],old)
         with patch.object(pose,'vision',self.vision): await self.queue.advance(resumed)
         self.assertEqual(len(self.prep.calls),1)
+
+    async def test_opaque_part_is_cut_out_locally_then_reviewed_and_exported(self):
+        async def opaque(job,key):
+            self.prep.calls.append(job)
+            arm=Image.open(io.BytesIO(candidate())).convert('RGBA')
+            return pose.png(Image.alpha_composite(Image.new('RGBA',arm.size,'#d0d0d0'),arm).convert('RGB'))
+        async def cutout(*args,**kwargs):
+            self.assertTrue(args[1].endswith('foreground.py'))
+            self.assertEqual(args[-2:],('--padding-ratio','0'))
+            target=Path(args[3]);target.mkdir()
+            (target/'foreground.png').write_bytes(candidate())
+            process=AsyncMock();process.returncode=0
+            return process
+        async def checked(key,instruction,images,**kwargs):
+            if len(images)==3:
+                self.assertIn('A',Image.open(io.BytesIO(images[-1])).getbands())
+            return await self.vision(key,instruction,images)
+        run=self.create()
+        with patch.object(self.prep,'generate',opaque), patch.object(module.asyncio,'create_subprocess_exec',cutout), patch.object(pose,'vision',checked):
+            await self.queue.advance(run)
+            await self.queue.advance(run)
+        self.assertEqual(run['status'],'ready',run)
+        self.assertEqual(len(self.prep.calls),1)
+
+    async def test_provider_rejection_keeps_diagnostics_and_never_retries(self):
+        async def rejected(job,key):
+            self.prep.calls.append(job)
+            job['_update'](status='failed',message='HTTP 400；上游指出需检查：背景设置；未自动重试。')
+            return None
+        run=self.create()
+        with patch.object(self.prep,'generate',rejected):
+            await self.queue.advance(run)
+            await self.queue.advance(run)
+        self.assertEqual(run['status'],'needs_attention')
+        self.assertIn('背景设置',run['states'][0]['message'])
+        self.assertEqual(len(self.prep.calls),1)
+        self.assertFalse((self.queue.root/run['id']/'merged.psd').exists())
+
+    async def test_visual_review_requires_strict_schema_and_rejects_refusal(self):
+        import httpx
+        calls=[]
+        def handler(request):
+            body=json.loads(request.content);calls.append(body)
+            schema=body['response_format']['json_schema']
+            self.assertTrue(schema['strict'])
+            self.assertEqual(set(schema['schema']['properties']['checks']['required']),set(pose.PART_CHECKS))
+            return httpx.Response(200,json={'choices':[{'finish_reason':'stop','message':{'refusal':'private text'}}]})
+        client=httpx.AsyncClient
+        with patch.object(pose,'getproxies',return_value={}), patch.object(pose.httpx,'AsyncClient',side_effect=lambda **kw:client(transport=httpx.MockTransport(handler),**kw)):
+            with self.assertRaisesRegex(RuntimeError,'拒绝'):
+                await pose.vision('test','test',[candidate()],checks=pose.PART_CHECKS,geometry_fields=('shoulder',))
+        self.assertEqual(len(calls),1)
+        with self.assertRaises(ValueError): pose.validate_checks({'checks':{x:'pass' for x in pose.PART_CHECKS[:-1]},'reasons':[]},pose.PART_CHECKS)
+
+    async def test_only_explicit_retry_uses_saved_visual_feedback(self):
+        async def rejected(key,instruction,images,**kwargs):
+            result=await self.vision(key,instruction,images)
+            result['checks']['anatomy']='fail';result['reasons']=['手掌过大']
+            return result
+        run=self.create()
+        with patch.object(pose,'vision',rejected): await self.queue.advance(run)
+        self.assertEqual(len(self.prep.calls),1)
+        retry=self.queue.retry(run['id'],WAVE)
+        self.assertEqual(retry['states'][0]['correction_reasons'],['手掌过大'])
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(retry)
+        self.assertEqual(len(self.prep.calls),2)
+        prompt=(self.prep.root/retry['states'][0]['generation_id']/'prompt.txt').read_text()
+        self.assertIn('手掌过大',prompt)
+        self.assertIn('explicitly requested correction',prompt)
+
+    def test_mirrored_wave_is_corrected_without_swapping_semantic_arm(self):
+        info=pose.inspect(self.root/'source.psd',self.root)
+        canonical=pose.assemble(self.root/'source.psd',self.root/'canonical',WAVE,candidate(),geometry(),info)
+        raw=Image.open(io.BytesIO(candidate()))
+        mirrored=raw.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        points=geometry()
+        for name in ('shoulder','elbow','wrist'):
+            points[name][0]=(raw.width-1)/raw.width-points[name][0]
+        report=pose.assemble(self.root/'source.psd',self.root/'mirrored',WAVE,pose.png(mirrored),points,info)
+        self.assertTrue(report['orientationCorrected'])
+        self.assertFalse(canonical['orientationCorrected'])
+        self.assertEqual(canonical['scale'],report['scale'])
+        self.assertTrue(np.array_equal(np.asarray(Image.open(self.root/'canonical/replacement.png')),np.asarray(Image.open(self.root/'mirrored/replacement.png'))))
+
+    async def test_alignment_does_not_convert_rejected_normalized_part_into_success(self):
+        async def reject_aligned(key,instruction,images,**kwargs):
+            result=await self.vision(key,instruction,images)
+            if len(images)==3 and not kwargs.get('geometry_fields'):
+                self.assertEqual(Image.open(io.BytesIO(images[1])).size,Image.open(io.BytesIO(images[2])).size)
+                result['checks']['anatomy']='fail';result['reasons']=['对齐后仍不合格']
+            return result
+        run=self.create()
+        with patch.object(pose,'vision',reject_aligned): await self.queue.advance(run)
+        self.assertEqual(run['status'],'needs_attention')
+        self.assertIn('对齐后仍不合格',run['states'][0]['message'])
+        self.assertFalse((self.queue.root/run['id']/'merged.psd').exists())
+
+    async def test_select_saved_first_candidate_never_regenerates(self):
+        run=self.create()
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(run)
+        state=run['states'][0];first=state['generation_id']
+        run['status']='needs_attention';state['status']='needs-review';self.queue.save(run)
+        retry=self.queue.retry(run['id'],WAVE)
+        retry['status']='needs_attention';retry['states'][0]['status']='failed';self.queue.save(retry)
+        selected=self.queue.select_candidate(run['id'],WAVE,first)
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(selected)
+        self.assertEqual(selected['status'],'ready')
+        self.assertEqual(selected['states'][0]['generation_id'],first)
+        self.assertEqual(len(self.prep.calls),1)
+        selected['status']='needs_attention';self.queue.save(selected)
+        with self.assertRaises(HTTPException): self.queue.select_candidate(run['id'],WAVE,'b'*32)
 
     async def test_restart_unknown_does_not_replay(self):
         run=self.create();run['states'][0]['status']='generating';self.queue.save(run)
@@ -154,6 +270,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             body={'job_id':'a'*32,'states':json.dumps([WAVE]),'provider':'image2'}
             self.assertEqual(client.post('/pro/pose-jobs',data=body,files={'psd':('source.psd',self.data)}).status_code,401)
+            self.assertEqual(client.post('/pro/pose-jobs/'+'a'*32+'/states/'+WAVE+'/select/'+'b'*32).status_code,401)
             kwargs={'data':body,'files':{'psd':('source.psd',self.data)},'headers':{'X-Morph-Device-Token':'test'}}
             self.assertEqual(client.post('/pro/pose-jobs',**kwargs).status_code,202)
             self.assertEqual(client.post('/pro/pose-jobs',**kwargs).status_code,202)
