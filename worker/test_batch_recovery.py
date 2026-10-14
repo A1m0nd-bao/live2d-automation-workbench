@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
+from worker.psd_test_fixture import layered_psd
 
 _import_root = tempfile.TemporaryDirectory()
 with patch.dict(os.environ, {'MORPH_DATA_ROOT': _import_root.name}):
@@ -34,7 +35,7 @@ class BatchRecoveryTests(unittest.TestCase):
                     raise httpx.ReadTimeout('lost SSE', request=request)
                 return httpx.Response(200, text='event: complete\ndata: [{"path":"/tmp/output.psd"}]\n\n')
             if '/file=' in request.url.path:
-                return httpx.Response(200, content=b'8BPS\x00\x01' + bytes(32))
+                return httpx.Response(200, content=layered_psd())
             raise AssertionError(str(request.url))
         client_type = httpx.AsyncClient
         with tempfile.TemporaryDirectory() as directory:

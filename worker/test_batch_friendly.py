@@ -17,8 +17,9 @@ class FriendlyTests(BatchTests):
                 if job_id not in owner.preps:
                     raise HTTPException(404, 'missing')
                 return owner.preps[job_id]
-            def create(self, job_id, name, provider, data):
+            def create(self, job_id, name, provider, data, **kwargs):
                 owner.prep_calls.append((job_id, provider, data))
+                owner.prep_notes = kwargs.get('reference_notes')
                 owner.preps[job_id] = dict(status='queued', message='friendly queued', quality=None)
                 directory = self.root / job_id
                 directory.mkdir(parents=True)
@@ -37,6 +38,13 @@ class FriendlyTests(BatchTests):
         with self.assertRaises(HTTPException) as caught:
             self.queue.create(self.data)
         self.assertEqual(caught.exception.status_code, 503)
+        self.assertEqual(self.calls, [])
+
+    async def test_reviewed_design_notes_reach_prep_without_bypassing_quality(self):
+        self.data.items[0].reference_notes = '保留裸手黑色长指甲，不新增手套'
+        self.friendly_ready()
+        await self.queue.advance()
+        self.assertEqual(self.prep_notes, self.data.items[0].reference_notes)
         self.assertEqual(self.calls, [])
 
     async def test_gate_uses_generated_image_and_stable_id_across_restart(self):

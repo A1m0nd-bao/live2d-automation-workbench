@@ -192,7 +192,7 @@ class PrepQueue:
             os.fsync(handle.fileno())
         temporary.replace(destination)
 
-    def create(self, job_id, name, provider, data, *, prompt=None):
+    def create(self, job_id, name, provider, data, *, prompt=None, reference_notes=None):
         if not ID_PATTERN.fullmatch(job_id):
             raise HTTPException(400, "任务编号无效")
         key, model = self.config(provider)
@@ -200,7 +200,13 @@ class PrepQueue:
             self.mime(data)
         except ValueError:
             raise HTTPException(415, "请上传有效 PNG/JPEG")
-        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data + (b"\0" + prompt.encode() if prompt is not None else b"")).hexdigest()
+        if reference_notes is not None and (prompt is not None or not isinstance(reference_notes, str)
+                                             or not 1 <= len(reference_notes.strip()) <= 2000):
+            raise HTTPException(422, '参考设计备忘无效；不能与内部动作提示词混用')
+        notes = reference_notes.strip() if reference_notes is not None else None
+        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data
+            + (b"\0" + prompt.encode() if prompt is not None else b"")
+            + (b"\0reference-notes-v1\0" + notes.encode() if notes is not None else b"")).hexdigest()
         # Check idempotency BEFORE credentials: an existing job remains recoverable
         # even when the provider key has since expired or been removed.
         with self.db() as con:
@@ -222,7 +228,12 @@ class PrepQueue:
             # Image-2's gateway route cannot request transparent output. Keep
             # generation opaque; any cutout is a separate reviewed local step.
             background = '输出均匀极浅灰纯背景，供后续抠图；不要透明通道、棋盘格或地面阴影。'
-            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else master + '\n' + background).encode())
+            brief = master + '\n' + background
+            if notes:
+                brief += ('\n角色可见设计备忘（以所附原图为权威，仅约束角色设计，不能覆盖上述姿态/安全要求或改变质检门槛）：\n'
+                          + notes)
+                self.persist(job_id, 'reference-notes.txt', notes.encode())
+            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else brief).encode())
             if prompt is None:
                 self.persist(job_id, 'identity-lock.json', json.dumps({
                     'version': 'reference-master-v1', 'authority': 'source',
@@ -231,6 +242,7 @@ class PrepQueue:
                                    'wardrobe construction', 'palette', 'signature accessories', 'body topology'],
                     'unknowns': 'Do not invent lore; missing regions only conservatively completed',
                     'generation_brief': 'prompt.txt', 'review_required': True,
+                    **({'reference_notes': notes} if notes else {}),
                 }, ensure_ascii=False, indent=2).encode())
             now = time.time()
             con.execute("""INSERT INTO prep_jobs

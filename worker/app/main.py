@@ -25,6 +25,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+_delivery_spec = importlib.util.spec_from_file_location('morph_psd_delivery', Path(__file__).with_name('psd_delivery.py'))
+_delivery = importlib.util.module_from_spec(_delivery_spec)
+_delivery_spec.loader.exec_module(_delivery)
+
 # ModelScope preserves /mnt/workspace across normal restarts and redeployments.
 # Keep the queue database and PSDs there rather than on the ephemeral /mnt/data.
 DATA_ROOT = Path(os.environ.get("MORPH_DATA_ROOT", "/mnt/workspace/morph-live2d")).resolve()
@@ -401,13 +405,17 @@ async def monitor(job_id: str) -> None:
                                     raise RuntimeError(await upstream_error(response))
                                 if len(response.content) < 26 or response.content[:6] != b"8BPS\x00\x01":
                                     raise RuntimeError("Downloaded response is not a PSD file")
-                                output_file.write_bytes(response.content)
-                                update_job(job_id, status="succeeded", message="PSD 已生成", output_psd=str(output_file), queue_rank=None, queue_eta_seconds=None)
+                                stage = 'validate-psd'
+                                output_file = await asyncio.to_thread(_delivery.finalize_download, response.content, DATA_ROOT / job_id)
+                                update_job(job_id, status="succeeded", message="PSD 已生成；透明合成与原图层保持校验通过，待视觉验收", output_psd=str(output_file), queue_rank=None, queue_eta_seconds=None)
                                 return
                 raise RuntimeError("See-Through closed the event stream before completion")
             except Exception as error:
                 detail = f"{stage}: {error}"
                 record_event(job_id, "failure", attempt=attempt, error=detail)
+                if stage == 'validate-psd':
+                    update_job(job_id, status='failed', message='PSD 本地导出校验失败；上游原件已保留，未重复拆层', error=detail)
+                    return
                 if durable and terminal_error:
                     update_job(job_id, status='failed', message='See-Through 已明确返回失败，批次继续下一张', error=detail)
                     return

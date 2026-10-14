@@ -32,6 +32,7 @@ class BatchItem(BaseModel):
     id: str
     name: str = Field(min_length=1, max_length=200)
     sha256: str
+    reference_notes: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
 class BatchInput(BaseModel):
@@ -82,7 +83,7 @@ class BatchQueue:
         for item in data.items:
             if not re.fullmatch(r"[a-f0-9]{64}", item.sha256) or not re.search(r"\.(png|jpe?g)$", item.name, re.I):
                 raise HTTPException(422, "仅接受 PNG/JPEG，且必须提供原图校验值")
-        manifest = json.dumps(data.model_dump(), ensure_ascii=False, sort_keys=True)
+        manifest = json.dumps(data.model_dump(exclude_none=True), ensure_ascii=False, sort_keys=True)
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             old = con.execute("SELECT manifest FROM batches WHERE id=?", (data.id,)).fetchone()
@@ -93,7 +94,7 @@ class BatchQueue:
                     current['settings'].pop('upstream_route', None)
                     manifest = json.dumps(current, ensure_ascii=False, sort_keys=True)
                 if 'friendly' not in previous['settings'] and 'friendly' not in data.settings.model_fields_set:
-                    legacy = data.model_dump()
+                    legacy = data.model_dump(exclude_none=True)
                     legacy['settings'].pop('friendly', None)
                     legacy['settings'].pop('provider', None)
                     legacy['settings'].pop('upstream_route', None)
@@ -284,7 +285,8 @@ class BatchQueue:
                     if batch['settings'].get('friendly', False):
                         friendly = self.friendly_job(item['id'])
                         if not friendly:
-                            self.prep.create(self.prep_id(item['id']), item['name'], batch['settings']['provider'], source.read_bytes())
+                            notes = {'reference_notes': item['reference_notes']} if item.get('reference_notes') else {}
+                            self.prep.create(self.prep_id(item['id']), item['name'], batch['settings']['provider'], source.read_bytes(), **notes)
                             return
                         if not item['friendly_ready']:
                             return
@@ -336,6 +338,9 @@ class BatchQueue:
                     if not output.is_file() or output.read_bytes()[:6] != b"8BPS\x00\x01":
                         raise HTTPException(409, "成功记录缺少有效PSD，请检查服务端文件")
                     archive.write(output, item["filename"])
+                    for report in ('psd-delivery.json', 'psd-delivery-upgrade.json'):
+                        if (output.parent / report).is_file():
+                            archive.write(output.parent / report, f'quality/{item["id"]}/{report}')
                     if item.get('friendly_ready'):
                         friendly_dir = self.prep.root / self.prep_id(item['id'])
                         suffix = '.png' if (friendly_dir / 'output').read_bytes().startswith(b'\x89PNG') else '.jpg'

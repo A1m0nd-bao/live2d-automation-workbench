@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -71,6 +72,18 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.queue.root / JOB / 'candidate-2').exists())
         self.assertEqual((self.queue.root / JOB / 'prompt.txt').read_bytes(), (self.queue.root / JOB / 'prompt-1.txt').read_bytes())
         self.assertEqual((self.queue.root / JOB / 'source').read_bytes(), PNG)
+
+    async def test_reference_notes_are_snapshot_and_idempotency_bound(self):
+        self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='保留半指手套及戒指；短外套不能变长大衣。')
+        directory = self.queue.root / JOB
+        self.assertIn('保留半指手套及戒指', (directory / 'prompt.txt').read_text())
+        self.assertTrue((directory / 'prompt.txt').read_text().startswith('最高优先级：'))
+        self.assertTrue(json.loads((directory / 'identity-lock.json').read_text())['review_required'])
+        self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='保留半指手套及戒指；短外套不能变长大衣。')
+        with self.assertRaises(HTTPException):
+            self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='换一套衣服')
+        with self.assertRaises(HTTPException):
+            self.queue.create('b'*32, 'repair', 'image2', PNG, prompt='action', reference_notes='notes')
 
     async def test_review_unavailable_does_not_regenerate_or_pass(self):
         self.create()
