@@ -139,6 +139,23 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.json()['settings']['upstream_route'], 'yangzxo')
             self.assertEqual(self.calls, [])
 
+    async def test_policy_api_requires_auth_paused_batch_and_valid_policy(self):
+        self.queue.create(self.data)
+        app = FastAPI()
+        app.include_router(self.queue.router)
+        path = f'/batches/{self.data.id}/policy'
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            self.assertEqual((await client.post(path, json={'on_confirmed_failure':'skip'})).status_code, 401)
+            headers = {'X-Morph-Device-Token':'test-device'}
+            self.assertEqual((await client.post(path, json={'on_confirmed_failure':'skip'}, headers=headers)).status_code, 409)
+            self.queue.control(self.data.id, 'pause')
+            self.assertEqual((await client.post(path, json={'on_confirmed_failure':'ignore'}, headers=headers)).status_code, 422)
+            response = await client.post(path, json={'on_confirmed_failure':'skip'}, headers=headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['state'], 'paused')
+            self.assertEqual(response.json()['on_confirmed_failure'], 'skip')
+            self.assertEqual(self.calls, [])
+
     async def test_failed_item_does_not_reenter_queue(self):
         self.ready()
         self.jobs['1'*32] = dict(status='failed', message='done', error='failure')

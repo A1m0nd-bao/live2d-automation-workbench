@@ -132,4 +132,37 @@ class FriendlyTests(BatchTests):
             self.assertEqual(len(self.prep_calls), 1)
             self.assertEqual(self.calls, [])
 
+    async def test_explicit_skip_finishes_all_known_results_without_retry_or_raw_split(self):
+        self.friendly_ready()
+        await self.queue.advance()
+        first = self.queue.prep_id('1'*32)
+        self.preps[first].update(status='needs-review', quality={'status':'rejected'})
+        await self.queue.advance()
+        self.assertEqual(self.queue.read(self.data.id)['state'], 'paused')
+        self.queue.set_policy(self.data.id, 'skip')
+        self.queue.control(self.data.id, 'start')
+        for index, status in [(2, 'failed'), (3, 'needs-review')]:
+            await self.queue.advance()
+            self.preps[self.queue.prep_id(str(index)*32)].update(status=status, quality={'status':'rejected'})
+        await self.queue.advance()
+        result = self.queue.read(self.data.id)
+        self.assertEqual(result['state'], 'completed')
+        self.assertEqual(result['failed'], 3)
+        self.assertEqual(len(self.prep_calls), 3)
+        self.assertEqual(self.calls, [])
+
+    async def test_skip_policy_survives_restart_but_uncertain_still_blocks(self):
+        self.friendly_ready()
+        self.queue.control(self.data.id, 'pause')
+        self.queue.set_policy(self.data.id, 'skip')
+        self.queue.control(self.data.id, 'start')
+        await self.queue.advance()
+        self.preps[self.queue.prep_id('1'*32)].update(status='uncertain')
+        restarted = module.BatchQueue(Path(self.temp.name), self.queue.authorize, self.queue.split_create, self.jobs.get, self.prep)
+        self.assertEqual(restarted.read(self.data.id)['on_confirmed_failure'], 'skip')
+        for _ in range(3):
+            await restarted.advance()
+        self.assertEqual(len(self.prep_calls), 1)
+        self.assertEqual(self.calls, [])
+
 if __name__ == '__main__': unittest.main()
