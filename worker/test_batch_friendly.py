@@ -84,6 +84,18 @@ class FriendlyTests(BatchTests):
         self.assertEqual(self.queue.read(self.data.id)['items'][0]['status'], 'failed')
         await self.queue.advance()
         self.assertEqual(self.calls, [])
-        self.assertEqual(len(self.prep_calls), 2)  # Failed item skipped, next source only.
+        self.assertEqual(len(self.prep_calls), 1)
+        self.assertEqual(self.queue.read(self.data.id)['state'], 'paused')
+
+    async def test_rejected_or_failed_friendly_pauses_without_spending_on_next_item(self):
+        for status in ('needs-review', 'failed'):
+            self.friendly_ready()
+            await self.queue.advance()
+            self.preps[self.queue.prep_id('1'*32)].update(status=status, quality={'status':'rejected'})
+            for _ in range(3):
+                await self.queue.advance()
+            self.assertEqual(self.queue.read(self.data.id)['state'], 'paused')
+            self.assertEqual(len(self.prep_calls), 1)
+            self.assertEqual(self.calls, [])
 
 if __name__ == '__main__': unittest.main()

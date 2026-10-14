@@ -48,21 +48,26 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('30 degrees', saved)
                 self.assertIn('80%', saved)
                 self.assertIn('3D rendering', saved)
+                self.assertTrue(saved.startswith('最高优先级：'))
+                self.assertIn('双手空手', saved)
+                self.assertIn('不能保留旧持物手再新增下垂手', saved)
+                self.assertIn('Removable handheld props and scenery are explicitly excluded', saved)
                 self.assertTrue((self.queue.root / job_id / 'identity-lock.json').is_file())
                 with patch.dict(prep.PROMPTS, {provider: 'future prompt'}):
                     self.queue.create(job_id, 'same-job', provider, PNG)
                     self.assertEqual((self.queue.root / job_id / 'prompt.txt').read_text(), saved)
 
 
-    async def test_failed_quality_retries_once_then_stops(self):
+    async def test_failed_quality_never_spends_on_an_automatic_retry(self):
         self.create()
         self.review_mock.return_value = {'version': prep.VERSION, 'status':'rejected', 'reasons':['脚被截断']}
         with patch.object(self.queue, 'generate', new=AsyncMock(return_value=PNG)) as generate:
             await self.queue.run(JOB)
-            self.assertEqual(generate.await_count, 2)
+            self.assertEqual(generate.await_count, 1)
         self.assertEqual(self.queue.get(JOB)['status'], 'needs-review')
         self.assertTrue((self.queue.root / JOB / 'candidate-1').exists())
-        self.assertTrue((self.queue.root / JOB / 'candidate-2').exists())
+        self.assertFalse((self.queue.root / JOB / 'candidate-2').exists())
+        self.assertEqual((self.queue.root / JOB / 'prompt.txt').read_bytes(), (self.queue.root / JOB / 'prompt-1.txt').read_bytes())
         self.assertEqual((self.queue.root / JOB / 'source').read_bytes(), PNG)
 
     async def test_review_unavailable_does_not_regenerate_or_pass(self):

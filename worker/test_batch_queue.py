@@ -66,6 +66,25 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[0][2]['upstream_route'],'yangzxo')
         self.assertEqual(self.queue.read(self.data.id)['settings']['upstream_route'],'yangzxo')
 
+    async def test_switch_route_only_before_split_and_never_starts_or_reuploads(self):
+        self.ready()
+        with self.assertRaises(HTTPException):
+            self.queue.change_route(self.data.id, 'yangzxo')
+        self.queue.control(self.data.id, 'pause')
+        changed = self.queue.change_route(self.data.id, 'yangzxo')
+        self.assertEqual(changed['state'], 'paused')
+        self.assertEqual(changed['settings']['upstream_route'], 'yangzxo')
+        self.assertTrue(all(item['uploaded'] for item in changed['items']))
+        self.assertEqual(self.calls, [])
+        with self.queue.db() as con:
+            self.assertEqual(con.execute('SELECT before_route,after_route FROM route_changes').fetchone()[:], ('default', 'yangzxo'))
+        self.queue.control(self.data.id, 'start')
+        await self.queue.advance()
+        self.assertEqual(self.calls[0][2]['upstream_route'], 'yangzxo')
+        self.queue.control(self.data.id, 'pause')
+        with self.assertRaises(HTTPException):
+            self.queue.change_route(self.data.id, 'default')
+
     async def test_manifest_and_upload_are_idempotent(self):
         self.queue.create(self.data)
         self.queue.create(self.data)
@@ -104,6 +123,21 @@ class BatchTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await client.post('/batches', json=self.data.model_dump(), headers=headers)).status_code, 200)
             self.assertEqual((await client.put('/batches/' + self.data.id + '/items/' + '1'*32, content=IMAGE, headers=headers)).status_code, 200)
             self.assertEqual((await client.get('/batches', headers=headers)).json()[0]['items'][0]['uploaded'], True)
+
+    async def test_route_api_auth_validation_and_no_implicit_start(self):
+        self.queue.create(self.data)
+        app = FastAPI()
+        app.include_router(self.queue.router)
+        path = f'/batches/{self.data.id}/route'
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            self.assertEqual((await client.post(path, json={'upstream_route':'yangzxo'})).status_code, 401)
+            headers = {'X-Morph-Device-Token':'test-device'}
+            self.assertEqual((await client.post(path, json={'upstream_route':'untrusted'}, headers=headers)).status_code, 422)
+            response = await client.post(path, json={'upstream_route':'yangzxo'}, headers=headers)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['state'], 'uploading')
+            self.assertEqual(response.json()['settings']['upstream_route'], 'yangzxo')
+            self.assertEqual(self.calls, [])
 
     async def test_failed_item_does_not_reenter_queue(self):
         self.ready()

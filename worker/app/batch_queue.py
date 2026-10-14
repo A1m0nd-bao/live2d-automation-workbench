@@ -41,6 +41,10 @@ class BatchInput(BaseModel):
     items: list[BatchItem] = Field(min_length=1, max_length=100)
 
 
+class BatchRouteInput(BaseModel):
+    upstream_route: str = Field(pattern='^(default|yangzxo)$')
+
+
 class BatchQueue:
     def __init__(self, root, authorize, split_create, split_get, prep=None):
         self.root = Path(root) / "batches"
@@ -61,6 +65,7 @@ class BatchQueue:
             with con:
                 con.execute("CREATE TABLE IF NOT EXISTS batches (id TEXT PRIMARY KEY, manifest TEXT NOT NULL, state TEXT NOT NULL, created REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, position INTEGER NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
+                con.execute("CREATE TABLE IF NOT EXISTS route_changes (batch_id TEXT NOT NULL, before_route TEXT NOT NULL, after_route TEXT NOT NULL, changed REAL NOT NULL)")
                 yield con
         finally:
             con.close()
@@ -182,6 +187,28 @@ class BatchQueue:
             con.execute("UPDATE batches SET state=? WHERE id=?", ("active" if action == "start" else "paused", batch_id))
         return self.read(batch_id)
 
+    def change_route(self, batch_id, route):
+        if route not in {'default', 'yangzxo'}:
+            raise HTTPException(422, '未知拆图线路')
+        with self.db() as con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT manifest,state FROM batches WHERE id=?', (batch_id,)).fetchone()
+            if not row:
+                raise HTTPException(404, '批次不存在')
+            if row['state'] not in {'paused', 'uploading'}:
+                raise HTTPException(409, '请先暂停批次再切换线路')
+            manifest = json.loads(row['manifest'])
+            if any(self.split_get(item['id']) for item in manifest['items']):
+                raise HTTPException(409, '已有拆层任务的批次不可改线，避免重复提交或丢失原任务')
+            before = manifest['settings'].get('upstream_route', 'default')
+            if before != route:
+                manifest['settings']['upstream_route'] = route
+                con.execute('UPDATE batches SET manifest=? WHERE id=?',
+                            (json.dumps(manifest, ensure_ascii=False, sort_keys=True), batch_id))
+                con.execute('INSERT INTO route_changes VALUES (?,?,?,?)', (batch_id, before, route, time.time()))
+        # Do not start the batch, clear quality gates or alter source/job IDs.
+        return self.read(batch_id)
+
     async def advance(self):
         with self.db() as con:
             ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
@@ -192,6 +219,17 @@ class BatchQueue:
         # Never enqueue another batch item while a preceding item is in flight.
         for batch_id in ids:
             batch = self.read(batch_id)
+            # A systematic prompt/review failure must not burn through the rest
+            # of the paid batch. Keep candidates and await an explicit decision.
+            if batch['settings'].get('friendly', False) and any(
+                not self.split_get(item['id']) and
+                (friendly := self.friendly_job(item['id'])) and
+                (friendly['status'] in {'needs-review', 'failed', 'uncertain'} or
+                 (friendly['status'] == 'succeeded' and not item['friendly_ready']))
+                for item in batch['items']
+            ):
+                self.control(batch_id, 'pause')
+                return
             for item in batch["items"]:
                 if item["status"] in {"succeeded", "failed"}:
                     continue
@@ -297,6 +335,11 @@ class BatchQueue:
                 if len(data) > MAX_IMAGE:
                     raise HTTPException(413, "单张图片最大20 MB")
             return self.upload(batch_id, item_id, bytes(data))
+
+        @router.post("/{batch_id}/route")
+        async def change_route(batch_id: str, data: BatchRouteInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.change_route(batch_id, data.upstream_route)
 
         @router.post("/{batch_id}/{action}")
         async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
