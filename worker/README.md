@@ -17,6 +17,21 @@ preview checks remain mandatory. Inputs may retain their PNG Alpha channels.
 This changes neither the source PSD nor its layer order and never calls the
 decomposition service. Doubao and neutral friendly-image policies are unchanged.
 
+Wave alignment uses the original named arm and the two source shoulder positions;
+only a clearly inward-facing generated wave is mirrored together with all of
+its landmarks. Already outward-facing artwork is unchanged. One uniform scale
+preserves the part's internal proportions. Projected bone ratios are diagnostics,
+not acceptance: the aligned part must pass all four visual checks on the same
+source canvas, then the actual assembly must pass all eight checks. Raw large-
+canvas reviews remain historical localization diagnostics, never a substitute
+for normalized acceptance. No rejection is rewritten to `passed`.
+
+Authenticated `POST /pro/pose-jobs/{id}/states/{state}/select/{generation_id}`
+selects only a previously saved candidate belonging to that same action. It
+re-aligns/reviews existing bytes without generating an image. Another task's
+candidate and running-task mutation are blocked. Sources, prior candidates and
+review history are preserved.
+
 Pose review uses a strict JSON schema for named checks and normalized landmarks;
 missing fields, refusal, uncertain geometry and visual failures still block
 delivery. An explicit generation retry includes saved visual feedback, but

@@ -191,6 +191,48 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('手掌过大',prompt)
         self.assertIn('explicitly requested correction',prompt)
 
+    def test_mirrored_wave_is_corrected_without_swapping_semantic_arm(self):
+        info=pose.inspect(self.root/'source.psd',self.root)
+        canonical=pose.assemble(self.root/'source.psd',self.root/'canonical',WAVE,candidate(),geometry(),info)
+        raw=Image.open(io.BytesIO(candidate()))
+        mirrored=raw.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        points=geometry()
+        for name in ('shoulder','elbow','wrist'):
+            points[name][0]=(raw.width-1)/raw.width-points[name][0]
+        report=pose.assemble(self.root/'source.psd',self.root/'mirrored',WAVE,pose.png(mirrored),points,info)
+        self.assertTrue(report['orientationCorrected'])
+        self.assertFalse(canonical['orientationCorrected'])
+        self.assertEqual(canonical['scale'],report['scale'])
+        self.assertTrue(np.array_equal(np.asarray(Image.open(self.root/'canonical/replacement.png')),np.asarray(Image.open(self.root/'mirrored/replacement.png'))))
+
+    async def test_alignment_does_not_convert_rejected_normalized_part_into_success(self):
+        async def reject_aligned(key,instruction,images,**kwargs):
+            result=await self.vision(key,instruction,images)
+            if len(images)==3 and not kwargs.get('geometry_fields'):
+                self.assertEqual(Image.open(io.BytesIO(images[1])).size,Image.open(io.BytesIO(images[2])).size)
+                result['checks']['anatomy']='fail';result['reasons']=['对齐后仍不合格']
+            return result
+        run=self.create()
+        with patch.object(pose,'vision',reject_aligned): await self.queue.advance(run)
+        self.assertEqual(run['status'],'needs_attention')
+        self.assertIn('对齐后仍不合格',run['states'][0]['message'])
+        self.assertFalse((self.queue.root/run['id']/'merged.psd').exists())
+
+    async def test_select_saved_first_candidate_never_regenerates(self):
+        run=self.create()
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(run)
+        state=run['states'][0];first=state['generation_id']
+        run['status']='needs_attention';state['status']='needs-review';self.queue.save(run)
+        retry=self.queue.retry(run['id'],WAVE)
+        retry['status']='needs_attention';retry['states'][0]['status']='failed';self.queue.save(retry)
+        selected=self.queue.select_candidate(run['id'],WAVE,first)
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(selected)
+        self.assertEqual(selected['status'],'ready')
+        self.assertEqual(selected['states'][0]['generation_id'],first)
+        self.assertEqual(len(self.prep.calls),1)
+        selected['status']='needs_attention';self.queue.save(selected)
+        with self.assertRaises(HTTPException): self.queue.select_candidate(run['id'],WAVE,'b'*32)
+
     async def test_restart_unknown_does_not_replay(self):
         run=self.create();run['states'][0]['status']='generating';self.queue.save(run)
         await self.queue.start()
@@ -228,6 +270,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         with TestClient(app) as client:
             body={'job_id':'a'*32,'states':json.dumps([WAVE]),'provider':'image2'}
             self.assertEqual(client.post('/pro/pose-jobs',data=body,files={'psd':('source.psd',self.data)}).status_code,401)
+            self.assertEqual(client.post('/pro/pose-jobs/'+'a'*32+'/states/'+WAVE+'/select/'+'b'*32).status_code,401)
             kwargs={'data':body,'files':{'psd':('source.psd',self.data)},'headers':{'X-Morph-Device-Token':'test'}}
             self.assertEqual(client.post('/pro/pose-jobs',**kwargs).status_code,202)
             self.assertEqual(client.post('/pro/pose-jobs',**kwargs).status_code,202)

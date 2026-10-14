@@ -202,6 +202,8 @@ def assemble(source, directory, state, raw, geometry, info):
     before = signature(list(psd))
     neutral = psd.composite(force=True, apply_icc=False).convert('RGBA')
     candidate = candidate_image(raw)
+    orientation_corrected = False
+    segment_ratios = []
     target = np.array(info['arms']['handwear-r']['shoulder'])
     shoulder = point(geometry.get('shoulder'), candidate.size)
     if 'crossed_arms' in state:
@@ -213,6 +215,20 @@ def assemble(source, directory, state, raw, geometry, info):
         scale = np.linalg.norm(target_other-target) / max(1, np.linalg.norm(other-shoulder))
     else:
         elbow, wrist = point(geometry.get('elbow'), candidate.size), point(geometry.get('wrist'), candidate.size)
+        # The semantic PSD name owns the arm. A generated wave can face the
+        # opposite way even when named correctly; do not swap source L/R layers.
+        # Correct only an unambiguous inward wave, never crossed/thinking poses.
+        if state == 'action_02_wave_arms_only':
+            opposite = np.array(info['arms']['handwear-l']['shoulder'])
+            outward = np.sign(target[0] - opposite[0])
+            margin = max(2, candidate.width * .01)
+            if outward == 0:
+                raise ValueError('左右肩位无法区分；未猜测挥手朝向')
+            if all((p[0]-shoulder[0])*outward < -margin for p in (elbow,wrist)):
+                candidate = candidate.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                for p in (shoulder,elbow,wrist):
+                    p[0] = candidate.width - 1 - p[0]
+                orientation_corrected = True
         source_points = [point(geometry.get('source_'+key), psd.size) for key in ('shoulder','elbow','wrist')]
         bounds = info['arms']['handwear-r']['bounds']
         for p in source_points:
@@ -223,8 +239,10 @@ def assemble(source, directory, state, raw, geometry, info):
         if min(*source_lengths, *lengths) <= 2:
             raise ValueError('肩肘腕长度无效')
         scale = sum(source_lengths) / sum(lengths)
-        if any(not .72 <= scale*b/a <= 1.28 for a,b in zip(source_lengths, lengths)):
-            raise ValueError('生成手臂上下段比例不符；不会强拉伸素材')
+        # Sleeve folds/foreshortening make a single 2D elbow estimate noisy.
+        # Keep one uniform scale (never stretch separate bones), record these
+        # ratios, and require anatomy/proportions QA on the ALIGNED artwork.
+        segment_ratios = [float(scale*b/a) for a,b in zip(source_lengths, lengths)]
     if not .15 <= scale <= 5:
         raise ValueError('部件缩放比例异常')
     bbox = candidate.getbbox()
@@ -269,7 +287,9 @@ def assemble(source, directory, state, raw, geometry, info):
     for layer in arms.values():
         layer.visible = True
     return {'scale': float(scale), 'offset': [left,top], 'neutralSha256': hashlib.sha256(png(neutral)).hexdigest(),
-            'sourceLayers': before, 'oppositeArmReused': not both, 'torsoRepairApplied': False}
+            'sourceLayers': before, 'oppositeArmReused': not both, 'torsoRepairApplied': False,
+            'orientationCorrected': orientation_corrected, 'alignmentPolicy':'semantic-wave-facing-v1',
+            'projectedSegmentRatios': segment_ratios}
 
 
 def add_state(psd, arms, name, replacement):

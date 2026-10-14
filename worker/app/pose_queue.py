@@ -215,13 +215,26 @@ class PoseQueue:
                 checks=pose.PART_CHECKS, geometry_fields=('shoulder','other_shoulder') if both else
                 ('shoulder','elbow','wrist','source_shoulder','source_elbow','source_wrist')), pose.PART_CHECKS)
             self.persist(geometry_file, json.dumps(geometry, ensure_ascii=False).encode())
-        if geometry['status'] != 'passed':
-            state.update(status='needs-review', message='；'.join(geometry['reasons']) or '部件视觉检查未通过')
-            return
+        # Raw canvases differ in scale and facing. Geometry is a localization
+        # record, not acceptance of unaligned pixel sizes. Preserve its result,
+        # then review the normalized part and actual assembly before export.
         state.update(status='assembling', message='按此 PSD 的肩位与骨段长度对齐；另一侧复用原层')
         self.save(run)
         report = await asyncio.to_thread(pose.assemble, source, directory, state['id'], data, geometry.get('geometry',{}), info)
         preview = (directory/'preview.png').read_bytes()
+        replacement = (directory/'replacement.png').read_bytes()
+        instruction = ('第一张是源角色中立图，第二张是原 PSD 的双臂层，第三张是待替换部件，已按原 PSD 骨长等比例缩放、校正朝向并固定到肩位，'
+            '三张画布尺寸相同。请在这个相同像素尺度下检查 part_only/outfit/anatomy/pose，不能按原始生图画布的放大倍数判手大或袖粗。'
+            '第三张单臂时不应出现另一条臂；袖型、针织、配饰和手/前臂比例仍需真实匹配。实际缺陷必须 fail，不确定为 uncertain。'
+            'reasons 只列失败或不确定原因。要求：'+pose.POSES[state['id']])
+        normalized = pose.validate_checks(await pose.vision(key, instruction,
+            [(self.root/run['id']/'neutral.png').read_bytes(),(self.root/run['id']/'arms.png').read_bytes(),replacement],
+            checks=pose.PART_CHECKS),pose.PART_CHECKS)
+        self.persist(directory/'aligned-part-review.json',json.dumps({**normalized,'assembly':report,
+            'replacementSha256':hashlib.sha256(replacement).hexdigest()},ensure_ascii=False).encode())
+        if normalized['status'] != 'passed':
+            state.update(status='needs-review',message='；'.join(normalized['reasons']) or '对齐后的部件检查未通过',preview=True)
+            return
         # Verify the ACTUAL assembled preview, not just the generated asset.
         instruction = ('第一张中立原图，第二张为实际 PSD 合层预览，第三张肩部近景、第四张手腕手掌近景。检查指定姿势、肩袖腕手连续、手臂长度与手掌比例正确，'
             '数清恰好两条臂/两只手。躯干上残留的旧袖、双臂叠影、肩部断口或另一只手缺失均失败。头脸腿服装与源图保持不变。'
@@ -277,13 +290,15 @@ class PoseQueue:
         if review_only:
             if not (directory/'candidate.png').exists():
                 raise HTTPException(409, '没有已保存素材可以复核')
-            (directory/'geometry.json').unlink(missing_ok=True)
+            # Reuse saved landmarks for deterministic re-alignment; keep the
+            # original review record rather than deleting diagnostic history.
             state.update(status='reviewing', message='仅复核现有素材，不发起生图')
         else:
             # Only visual part/assembly feedback can guide an explicit retry.
             # Never rewrite a prompt to get around a provider safety rejection.
             reasons = []
-            for filename in ('geometry.json','review.json'):
+            feedback_files = ('aligned-part-review.json','review.json') if (directory/'aligned-part-review.json').exists() else ('geometry.json','review.json')
+            for filename in feedback_files:
                 report_file = directory/filename
                 if report_file.exists():
                     try:
@@ -297,6 +312,25 @@ class PoseQueue:
                 state['correction_reasons'] = reasons[:6]
             state.setdefault('history', []).append({k:state[k] for k in ('generation_id','status','attempt')})
             state.update(generation_id=uuid.uuid4().hex, status='queued', message='用户明确请求重新生成该部件', attempt=state['attempt']+1, preview=False)
+        run['status']='running'
+        self.save(run)
+        return run
+
+    def select_candidate(self, jid, sid, generation_id):
+        run = self.get(jid)
+        state = next((s for s in run['states'] if s['id']==sid),None)
+        if run['status'] != 'needs_attention' or not state:
+            raise HTTPException(409,'仅可在本轮结束后选择已有候选')
+        allowed = {state['generation_id'],*(s['generation_id'] for s in state.get('history',[]))}
+        if len(generation_id)!=32 or any(c not in '0123456789abcdef' for c in generation_id) or generation_id not in allowed:
+            raise HTTPException(404,'候选不属于这个动作；不会读取其他任务素材')
+        if not (self.root/jid/generation_id/'candidate.png').is_file():
+            raise HTTPException(409,'候选没有已保存的图片，不能复用')
+        if generation_id != state['generation_id']:
+            state.setdefault('history',[]).append({k:state[k] for k in ('generation_id','status','attempt')})
+        state.update(generation_id=generation_id,status='reviewing',preview=False,
+                     message='用户选择已有候选；仅重新对齐和复核，不发起生图')
+        state.pop('correction_reasons',None)
         run['status']='running'
         self.save(run)
         return run
@@ -361,6 +395,11 @@ class PoseQueue:
             if not state or not state.get('preview'):
                 raise HTTPException(409,'合层预览尚未就绪')
             return FileResponse(self.root/jid/state['generation_id']/'preview.png', media_type='image/png')
+
+        @self.router.post('/{jid}/states/{sid}/select/{generation_id}')
+        async def select(jid: str, sid: str, generation_id: str, x_relay_token: str|None=Header(None), x_morph_device_token: str|None=Header(None)):
+            self.authorize(x_relay_token,x_morph_device_token)
+            return self.select_candidate(jid,sid,generation_id)
 
         @self.router.get('/{jid}/{kind}')
         async def output(jid: str, kind: str, x_relay_token: str|None=Header(None), x_morph_device_token: str|None=Header(None)):
