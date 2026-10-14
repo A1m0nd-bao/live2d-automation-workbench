@@ -22,7 +22,7 @@ import {
   GitBranch,
   WandSparkles,
 } from 'lucide-react';
-import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
+import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest, getSplitRoute, saveSplitRoute, type SplitRoute } from './serviceBridge';
 import { prepRequest, submitPrep, recoverPrepState, prepReviewBlockReason, type PrepJob } from './prepQueue';
 import { proRequest, proRunPath, PSD_POSE_PIPELINE, type ProRun } from './proQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
@@ -51,6 +51,8 @@ type Task = {
   referenceName: string;
   createdAt: string;
   remoteJobId?: string;
+  splitRoute?: SplitRoute;
+  splitRetryId?: string;
   remoteState?: string;
   remoteMessage?: string;
   psdFile?: string;
@@ -317,6 +319,7 @@ function WorkbenchApp() {
   const [productionMode, setProductionMode] = useState<'standard' | 'pro'>('standard');
   const [prepProvider, setPrepProvider] = useState<Live2dPrepProvider>('doubao');
   const [prepMode, setPrepMode] = useState<PrepMode>('generate');
+  const [splitRoute, setSplitRoute] = useState<SplitRoute>(getSplitRoute);
   const [proStateIds, setProStateIds] = useState<string[]>([
     'action_02_wave_arms_only',
   ]);
@@ -989,6 +992,7 @@ function WorkbenchApp() {
     const r = await serviceRequest<Job>('submit', {
       image: splitterInput,
       name: splitterInput.name,
+      route: t.splitRoute ?? 'default',
     });
     if (!r.jobId)
       throw new Error(r.error || '服务未返回任务编号，请检查服务端后再重试。');
@@ -1472,6 +1476,13 @@ function WorkbenchApp() {
             <small>默认调用上方选中的一个生图服务。勾选只代表用户确认，不代表 AI 验收；直连设置不会跳过生图。</small>
           </label>
           <button type="button" className="ghost-button" onClick={() => void operate(async () => { await connectLocalRelay(); setToast('本机常驻服务已接入，无需登录弹窗。'); })}>接入本机桥接（免登录）</button>
+          <label className="field-label">拆图线路（仅新提交生效）
+            <select aria-label="拆图线路" value={splitRoute} onChange={event => { const route=event.target.value as SplitRoute; saveSplitRoute(route); setSplitRoute(route); }}>
+              <option value="default">默认线路（保持现有配置）</option>
+              <option value="yangzxo">备用：yangzxo / See-Through</option>
+            </select>
+            <small>备用线路会把拆图输入提交到 yangzxo 的空间；速度取决于排队。不切换运行中任务，不自动切线重试。</small>
+          </label>
           {productionMode === 'pro' && (
             <section className="pro-state-picker">
               <b>选择首批状态</b>
@@ -1570,6 +1581,7 @@ function WorkbenchApp() {
                   inputKind: k,
                   prepProvider: k === 'image' || productionMode === 'pro' ? prepProvider : undefined,
                   prepMode: k === 'image' ? prepMode : undefined,
+                  splitRoute: k === 'image' ? splitRoute : undefined,
                   psdFile: k === 'psd' ? sourceFile.name : undefined,
                   createdAt: new Date().toLocaleString('zh-CN'),
                   mode: productionMode,
@@ -1771,6 +1783,7 @@ function WorkbenchApp() {
               )}
             {task.prepJobId && (
               <section>
+                {!task.remoteJobId && <label>拆图线路<select aria-label="本任务拆图线路" value={task.splitRoute ?? 'default'} onChange={event=>update(task.id,{splitRoute:event.target.value as SplitRoute})}><option value="default">默认线路（现有配置）</option><option value="yangzxo">备用：yangzxo / See-Through</option></select><small>仅本任务首次拆图提交生效；不会重新生图或自动切线重试。</small></label>}
                 <p>生图任务：{task.prepJobId.slice(0, 12)} · {task.prepMessage}</p>
                 <button className="ghost-button" disabled={busy} onClick={() => void operate(() => refreshPrep(task))}>查询／恢复生图任务</button>
                 {!task.remoteJobId && task.prepState === 'needs-review' && (
@@ -1825,6 +1838,13 @@ function WorkbenchApp() {
               )}
             {task.remoteJobId && !task.psdFile && (
               <>
+                {task.remoteState === 'failed' && <button className="primary-button" disabled={busy} onClick={()=>void operate(async()=>{
+                  const retryId=task.splitRetryId || crypto.randomUUID().replaceAll('-','');
+                  rememberPrep(task,{splitRetryId:retryId});
+                  const result=await serviceRequest<Job>('retryUpload',{jobId:task.remoteJobId,route:'yangzxo',retryId});
+                  if(!result.jobId)throw new Error('未确认恢复任务，请查询拆图历史，不要重复提交。');
+                  update(task.id,{remoteJobId:result.jobId,remoteState:result.status,remoteMessage:result.message,splitRoute:'yangzxo',splitRetryId:undefined});
+                })}>改用备用线路重试上传（不重新生图）</button>}
                 <button
                   className="ghost-button"
                   disabled={busy}

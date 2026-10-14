@@ -8,6 +8,20 @@ license: apache-2.0
 
 # Morph See-Through Relay
 
+## Backup split route (2026-10-14)
+
+New single tasks and batches may explicitly choose `yangzxo`; default still
+uses `SEE_THROUGH_URL`. The fixed backup endpoint was discovered from the
+Studio's own response: `https://studio-yangzxo-see-through.api-inference.modelscope.net`.
+Each new job snapshots its selected origin. Upload, inference, SSE and PSD
+download stay on that origin; no automatic failover or cross-origin token
+forwarding is allowed. The UI refuses a legacy bridge before uploading.
+Fresh single tasks now share durable inference checkpoints with batch tasks.
+An explicit upload-only recovery uses an idempotent retry ID and saved input;
+it rejects any existing inference submission, pending checkpoint or ambiguous
+job. It never regenerates an image. Shared-space throughput has not been
+benchmarked; a live Gradio config is not a successful PSD inference test.
+
 ## Durable image preparation (2026-09-10)
 
 The same service now exposes authenticated `/prep/health`, `POST /prep/jobs`,

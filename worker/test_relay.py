@@ -12,10 +12,17 @@ import httpx
 spec = importlib.util.spec_from_file_location('relay_test_module', Path(__file__).parent / 'app/main.py')
 relay = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = relay
-spec.loader.exec_module(relay)
+with tempfile.TemporaryDirectory() as initial_root, patch.dict('os.environ', {'MORPH_DATA_ROOT': initial_root}):
+    spec.loader.exec_module(relay)
 
 
 class RelayTests(unittest.TestCase):
+    def test_health_publishes_backup_capability_over_http(self):
+        from fastapi.testclient import TestClient
+        response=TestClient(relay.app).get('/health')
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['split_routes'],['default','yangzxo'])
+
     def test_foreground_failure_never_submits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -65,7 +72,7 @@ class RelayTests(unittest.TestCase):
                 self.assertEqual(asyncio.run(relay.prepare_foreground('test')), target)
                 spawn.assert_not_called()
 
-    def exercise(self, event, download=b'8BPS\x00\x01' + bytes(30)):
+    def exercise(self, event, download=b'8BPS\x00\x01' + bytes(30), route=None):
         requests = []
         def handler(request):
             requests.append(request)
@@ -88,6 +95,8 @@ class RelayTests(unittest.TestCase):
                 # Exercise the SSE/download paths with a genuine PNG signature;
                 # plain text is correctly rejected before any upstream request.
                 (root / 'test/source').write_bytes(b'\x89PNG\r\n\x1a\n' + bytes(32))
+                if route:
+                    relay.pin_split_route(root / 'test', route)
                 with relay.db() as db:
                     db.execute("INSERT INTO jobs (id,name,status,message) VALUES ('test','test','queued','new')")
                 with patch.object(relay.httpx, 'AsyncClient', side_effect=lambda **kw: client_type(transport=httpx.MockTransport(handler), **kw)), patch.object(relay.asyncio, 'sleep', new=AsyncMock()):
@@ -123,6 +132,48 @@ class RelayTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             relay.upstream_file_url('https://untrusted.example/test.psd')
         self.assertEqual(relay.upstream_file_url('https://ljsabc-see-through.ms.show/gradio_api/file=/tmp/a%20b.psd'), relay.UPSTREAM + '/gradio_api/file=/tmp/a%20b.psd')
+
+    def test_backup_route_upload_submit_listen_and_download_stay_on_one_origin(self):
+        event='event: complete\ndata: [{"url":"https://yangzxo-see-through.ms.show/gradio_api/file=/tmp/backup.psd"}]\n\n'
+        job, _, requests=self.exercise(event, route='yangzxo')
+        self.assertEqual(job.status,'succeeded')
+        self.assertTrue(all(r.url.host=='studio-yangzxo-see-through.api-inference.modelscope.net' for r in requests))
+        self.assertEqual(sum(r.method=='POST' and '/call/inference' in r.url.path for r in requests),1)
+
+    def test_backup_cannot_download_from_the_default_or_an_untrusted_origin(self):
+        for value in ['https://ljsabc-see-through.ms.show/gradio_api/file=/tmp/a.psd','https://evil.example/file.psd']:
+            with self.assertRaises(RuntimeError):relay.upstream_file_url(value,relay.BACKUP_UPSTREAM)
+
+    def test_route_is_pinned_and_legacy_tasks_keep_default(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(relay,'DATA_ROOT',Path(directory)):
+            target=Path(directory)/'new';target.mkdir()
+            self.assertEqual(relay.job_upstream('legacy'),relay.UPSTREAM)
+            relay.pin_split_route(target,'yangzxo')
+            relay.pin_split_route(target,'default')
+            self.assertEqual(relay.job_upstream('new'),relay.BACKUP_UPSTREAM)
+            with self.assertRaises(Exception):relay.pin_split_route(target,'arbitrary-host')
+
+    def test_backup_terminal_error_is_not_resubmitted_or_failed_over(self):
+        job,_,requests=self.exercise('event: error\ndata: null\n\n',route='yangzxo')
+        self.assertEqual(job.status,'failed')
+        self.assertEqual(sum('/call/inference'==r.url.path.removeprefix('/gradio_api') for r in requests),1)
+
+    def test_upload_only_recovery_is_idempotent_and_preserves_source(self):
+        async def exercise():
+            with tempfile.TemporaryDirectory() as directory, patch.object(relay,'DATA_ROOT',Path(directory)), patch.object(relay,'DB_PATH',Path(directory)/'jobs.db'), patch.object(relay,'require_relay_token'), patch.object(relay,'monitor',new=AsyncMock()):
+                relay.init_db();old='a'*32;new='b'*32
+                source=Path(directory)/old;source.mkdir();(source/'source').write_bytes(b'unchanged image')
+                with relay.db() as con:con.execute("INSERT INTO jobs(id,name,status,message,error) VALUES (?,?,'failed','failed','upload: Not Found')",(old,'test'))
+                for _ in range(2):
+                    result=await relay.retry_upload(old,new,'yangzxo',None,None)
+                    self.assertEqual(result.id,new)
+                    await asyncio.sleep(0)
+                self.assertEqual((Path(directory)/new/'source').read_bytes(),b'unchanged image')
+                self.assertEqual(relay.job_upstream(new),relay.BACKUP_UPSTREAM)
+                with relay.db() as con:self.assertEqual(con.execute('SELECT count(*) FROM jobs').fetchone()[0],2)
+                (source/'batch-inference.json').write_text('{"event_id":"already-submitted"}')
+                with self.assertRaises(relay.HTTPException):await relay.retry_upload(old,'c'*32,'yangzxo',None,None)
+        asyncio.run(exercise())
 
 
 if __name__ == '__main__':

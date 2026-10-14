@@ -25,6 +25,7 @@ class SplitSettings(BaseModel):
     split_limbs: bool = True
     friendly: bool = True
     provider: str = Field(default='doubao', pattern='^(doubao|image2)$')
+    upstream_route: str = Field(default='default', pattern='^(default|yangzxo)$')
 
 
 class BatchItem(BaseModel):
@@ -77,10 +78,15 @@ class BatchQueue:
             old = con.execute("SELECT manifest FROM batches WHERE id=?", (data.id,)).fetchone()
             if old:
                 previous = json.loads(old['manifest'])
+                if 'upstream_route' not in previous['settings'] and data.settings.upstream_route == 'default':
+                    current = json.loads(manifest)
+                    current['settings'].pop('upstream_route', None)
+                    manifest = json.dumps(current, ensure_ascii=False, sort_keys=True)
                 if 'friendly' not in previous['settings'] and 'friendly' not in data.settings.model_fields_set:
                     legacy = data.model_dump()
                     legacy['settings'].pop('friendly', None)
                     legacy['settings'].pop('provider', None)
+                    legacy['settings'].pop('upstream_route', None)
                     manifest = json.dumps(legacy, ensure_ascii=False, sort_keys=True)
                 if old["manifest"] != manifest:
                     raise HTTPException(409, "相同批次编号的内容不一致")
@@ -200,6 +206,8 @@ class BatchQueue:
                             return
                         source = self.prep.root / self.prep_id(item['id']) / 'output'
                     split_settings = {k: batch['settings'][k] for k in ('resolution', 'seed', 'split_limbs')}
+                    if batch['settings'].get('upstream_route', 'default') != 'default':
+                        split_settings['upstream_route'] = batch['settings']['upstream_route']
                     self.split_create(item["id"], source, item["filename"], split_settings)
                 return
             with self.db() as con:
