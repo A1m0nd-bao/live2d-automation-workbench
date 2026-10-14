@@ -532,7 +532,7 @@ app.add_middleware(
 
 
 @app.get("/health")
-async def health() -> dict[str, bool | str | int]:
+async def health() -> dict[str, Any]:
     return {
         "ok": bool(MODELSCOPE_TOKEN),
         "upstream": UPSTREAM,

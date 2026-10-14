@@ -17,6 +17,12 @@ with tempfile.TemporaryDirectory() as initial_root, patch.dict('os.environ', {'M
 
 
 class RelayTests(unittest.TestCase):
+    def test_health_publishes_backup_capability_over_http(self):
+        from fastapi.testclient import TestClient
+        response=TestClient(relay.app).get('/health')
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json()['split_routes'],['default','yangzxo'])
+
     def test_foreground_failure_never_submits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
