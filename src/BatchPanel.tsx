@@ -23,6 +23,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [syncError, setSyncError] = useState('');
   const [autoDownload, setAutoDownload] = useState(true);
   const autoDownloadRef = useRef(autoDownload);
   const [profile, setProfile] = useState<'standard' | 'pro'>('standard');
@@ -41,7 +42,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
     try {
       const list = await batchRequest<SplitBatch[]>('');
       setBatches(list);
-      setError('');
+      setSyncError('');
       for (const batch of list) {
         const key = `morph.batch-downloaded.${batch.id}`;
         // Partial archives remain manually available; auto-download once only at terminal state.
@@ -59,7 +60,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
         }
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '无法同步批次');
+      setSyncError(reason instanceof Error ? reason.message : '无法同步批次');
     } finally { refreshing.current = false; }
   }
   useEffect(() => {
@@ -84,12 +85,21 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
     const remote = await batchRequest<SplitBatch>('', { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: batch.id, name: batch.name, settings: batch.settings,
         items: batch.items.map(({ id, name, sha256 }) => ({ id, name, sha256 })) }) });
-    for (const [i, item] of remote.items.entries()) {
+    let uploaded = remote.items.filter(item => item.uploaded).length;
+    for (const item of remote.items) {
       if (item.uploaded) continue;
       const source = await readAsset(`batch-source:${item.id}`);
       if (!source) throw new Error(`${item.name} 不在当前浏览器，请重新选择原图以恢复上传。`);
-      setMessage(`上传 ${i + 1}/${remote.total} · ${item.name}`);
-      await batchRequest(`/${batch.id}/items/${item.id}`, { method: 'PUT', body: source });
+      setMessage(`已上传 ${uploaded}/${remote.total} · 正在上传 ${item.name}`);
+      try {
+        await batchRequest(`/${batch.id}/items/${item.id}`, { method: 'PUT', body: source });
+      } catch (reason) {
+        setMessage(`上传中断 · 已确认 ${uploaded}/${remote.total}，尚未启动处理。`);
+        const detail = reason instanceof Error ? reason.message : '网络请求失败';
+        throw new Error(`${item.name} 上传失败：${detail}。请检查本机桥接版本与连接，再点击「恢复未完成上传」；恢复完成后会按原设置开始处理。`);
+      }
+      uploaded += 1;
+      setMessage(`已上传 ${uploaded}/${remote.total}`);
     }
     await batchRequest(`/${batch.id}/start`, { method: 'POST' });
     localStorage.removeItem(PENDING);
@@ -152,7 +162,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
       <button className="ghost-button" disabled={busy} onClick={() => void operate(resumeUpload)}>恢复未完成上传</button>
       <button className="ghost-button" disabled={busy} onClick={() => void load()}>同步批次</button>
     </div>
-    {message && <p role="status">{message}</p>}{error && <p role="alert" className="batch-error">{error}</p>}
+    {message && <p role="status">{message}</p>}{(error || syncError) && <p role="alert" className="batch-error">{error || syncError}</p>}
     {batches.length > 0 && <label className="batch-history">历史批次<select value={active?.id ?? ''} onChange={e => setSelected(e.target.value)}>{batches.map(b => <option key={b.id} value={b.id}>{b.name} · {b.succeeded}/{b.total}</option>)}</select></label>}
     {active && <>
       <div className="batch-summary">{active.settings.friendly && <b>友好图 {active.friendly_succeeded ?? 0}/{active.total}</b>}<b>拆件 {active.succeeded}/{active.total}</b><span>失败 {active.failed}</span>{!!active.uncertain && <span>结果未知 {active.uncertain}，未重试</span>}<span>MOC3 {runtimeCounts[active.id] ?? 0}/{active.total}</span><span>{active.state === 'paused' ? '已暂停新提交' : active.state === 'completed' ? '拆件已结束' : active.state === 'uploading' ? '上传待完成' : '串行处理中'}</span></div>

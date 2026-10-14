@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -17,6 +18,44 @@ with tempfile.TemporaryDirectory() as initial_root, patch.dict('os.environ', {'M
 
 
 class RelayTests(unittest.TestCase):
+    def test_batch_put_preflight_accepts_only_trusted_origins_and_methods(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(relay.app)
+        for origin in ('https://a1m0nd-bao.github.io', 'https://morph-live2d-workbench.shehaoli.chatgpt.site'):
+            response = client.options('/batches/test/items/test', headers={
+                'Origin': origin, 'Access-Control-Request-Method': 'PUT',
+                'Access-Control-Request-Headers': 'content-type,x-morph-device-token',
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers['access-control-allow-origin'], origin)
+        for origin, method in [('https://untrusted.example', 'PUT'), ('https://a1m0nd-bao.github.io', 'DELETE')]:
+            response = client.options('/batches/test/items/test', headers={
+                'Origin': origin, 'Access-Control-Request-Method': method,
+            })
+            self.assertEqual(response.status_code, 400)
+
+    def test_seven_authenticated_batch_uploads_do_not_start_processing(self):
+        from fastapi.testclient import TestClient
+        image = b'\x89PNG\r\n\x1a\n' + bytes(32)
+        batch_id = 'b' * 32
+        items = [dict(id=f'{index:032x}', name=f'{index}.png', sha256=hashlib.sha256(image).hexdigest()) for index in range(1, 8)]
+        headers = {'Origin': 'https://a1m0nd-bao.github.io', 'X-Morph-Device-Token': 'test-device'}
+        with tempfile.TemporaryDirectory() as root, patch.object(relay.BATCH, 'root', Path(root)), patch.object(relay, 'DEVICE_TOKEN', 'test-device'), patch.object(relay.BATCH, 'split_get', return_value=None), patch.object(relay.BATCH, 'split_create') as split, patch.object(relay.PREP, 'create') as prep:
+            client = TestClient(relay.app)
+            response = client.post('/batches', headers=headers, json=dict(id=batch_id, items=items, settings={'friendly': False}))
+            self.assertEqual(response.status_code, 200)
+            path = f'/batches/{batch_id}/items/{items[0]["id"]}'
+            self.assertEqual(client.put(path, content=image).status_code, 401)
+            for item in items:
+                response = client.put(f'/batches/{batch_id}/items/{item["id"]}', headers=headers, content=image)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers['access-control-allow-origin'], headers['Origin'])
+            batch = client.get('/batches', headers=headers).json()[0]
+            self.assertEqual(sum(item['uploaded'] for item in batch['items']), 7)
+            self.assertEqual(batch['state'], 'uploading')
+            split.assert_not_called()
+            prep.assert_not_called()
+
     def test_health_publishes_backup_capability_over_http(self):
         from fastapi.testclient import TestClient
         response=TestClient(relay.app).get('/health')

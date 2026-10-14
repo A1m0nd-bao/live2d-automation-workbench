@@ -17,7 +17,7 @@ export MORPH_DEVICE_TOKEN="$(security find-generic-password -a "$USER" -s 'morph
 export MORPH_DATA_ROOT="$WORKER_ROOT/.local-state"
 export MORPH_USE_KEYCHAIN=1
 export MORPH_LOCAL_BOOTSTRAP=1
-export MORPH_ALLOWED_ORIGINS="https://a1m0nd-bao.github.io,http://localhost:4173,http://127.0.0.1:4173"
+export MORPH_ALLOWED_ORIGINS="https://a1m0nd-bao.github.io,https://morph-live2d-workbench.shehaoli.chatgpt.site,http://localhost:4173,http://127.0.0.1:4173"
 
 cd "$WORKER_ROOT"
 exec "$VENV/bin/uvicorn" app.main:app --host 127.0.0.1 --port 7861
