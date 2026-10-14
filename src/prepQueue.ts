@@ -4,9 +4,28 @@ import type { Live2dPrepProvider } from './live2dPrep';
 export type PrepJob = {
   id: string; name: string; provider: Live2dPrepProvider;
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'uncertain' | 'needs-review';
-  quality?: {version?: string; status: string; reasons?: string[]};
+  quality?: {version?: string; status: string; reasons?: string[]; checks?: Record<string, string>};
   message: string; created_at: number; updated_at: number;
 };
+
+const BASE_REVIEW_CHECKS = ['full_body', 'frame_margin', 'identity', 'outfit', 'style', 'anatomy', 'pose', 'background'];
+const REVIEW_SCHEMAS: Record<string, readonly string[]> = {
+  'image-quality-v4': BASE_REVIEW_CHECKS,
+  'image-quality-v5': [...BASE_REVIEW_CHECKS, 'face_front'],
+};
+
+/** Shared by candidate recovery and the final split submission guard. */
+export function prepReviewBlockReason(job: Pick<PrepJob, 'status' | 'quality'>): string | undefined {
+  const report = job.quality;
+  if (job.status !== 'succeeded' || report?.status !== 'passed')
+    return report?.reasons?.join('；') || '生成图尚未通过服务端视觉检查，已阻止自动拆层。';
+  const checks = REVIEW_SCHEMAS[report.version ?? ''];
+  if (!checks)
+    return `无法识别服务端质检版本（${report.version || '缺失'}），已阻止拆层；请更新工作台，不必重新生图。`;
+  if (!report.checks || checks.some(check => report.checks?.[check] !== 'pass') || Object.values(report.checks).some(value => value !== 'pass'))
+    return '服务端质检项目不完整或含未通过项，已阻止拆层；请复核现有图片，不必重新生图。';
+  return undefined;
+}
 
 export async function prepRequest<T>(path: string, body?: FormData): Promise<T> {
   const config = getDirectServiceConfig();
@@ -39,7 +58,7 @@ export async function submitPrep(jobId: string, image: File, provider: Live2dPre
 }
 
 export function recoverPrepState<T extends { prepJobId?: string; prepState?: string; prepMessage?: string; remoteJobId?: string }>(task: T): T {
-  if (task.prepJobId && task.prepState === 'succeeded' && !task.remoteJobId) {
+  if (task.prepJobId && ['succeeded', 'needs-review'].includes(task.prepState ?? '') && !task.remoteJobId) {
     return { ...task, prepState: 'queued', prepMessage: '正在核对当前版本的生图检查结果；不会重新生成。' };
   }
   if (!['queued', 'running', 'connecting'].includes(task.prepState ?? '')) return task;

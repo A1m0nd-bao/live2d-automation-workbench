@@ -23,7 +23,7 @@ import {
   WandSparkles,
 } from 'lucide-react';
 import { connectLocalRelay, hasDirectServiceConfig, saveDirectServiceConfig, serviceDiagnostics, serviceRequest } from './serviceBridge';
-import { prepRequest, submitPrep, recoverPrepState, type PrepJob } from './prepQueue';
+import { prepRequest, submitPrep, recoverPrepState, prepReviewBlockReason, type PrepJob } from './prepQueue';
 import { proRequest, proRunPath, PSD_POSE_PIPELINE, type ProRun } from './proQueue';
 import { selectPreparation, type PrepMode } from './prepPolicy';
 import { saveAsset, saveAssets, readAsset, downloadBlob } from './assets';
@@ -940,9 +940,10 @@ function WorkbenchApp() {
       // Persist and expose the candidate BEFORE the heuristic can reject it.
       await saveAsset(`${t.id}:prepared`, png);
       update(t.id, { preparedFile: filename, prepState: 'needs-review', prepAccepted: false });
-      if (job.status !== 'succeeded' || (job.quality?.status !== 'passed' || job.quality?.version !== 'image-quality-v4')) {
+      const reviewBlocked = prepReviewBlockReason(job);
+      if (reviewBlocked) {
         update(t.id, { prepState: 'needs-review', prepAccepted: false,
-          prepMessage: job.quality?.reasons?.join('；') || '生成图尚未通过服务端视觉检查，已阻止自动拆层。' });
+          prepMessage: reviewBlocked });
         return;
       }
       try {
@@ -974,9 +975,10 @@ function WorkbenchApp() {
   async function submitToSeeThrough(t: Task, preparedImage?: File) {
     if (t.inputKind === 'image' && t.prepState !== 'user-confirmed' && t.prepJobId) {
       const job = await prepRequest<PrepJob>(`/jobs/${t.prepJobId}`);
-      if (job.status !== 'succeeded' || job.quality?.status !== 'passed' || job.quality.version !== 'image-quality-v4') {
-        update(t.id, { prepAccepted: false, prepState: 'needs-review', prepMessage: '当前生图检查未通过，已阻止提交拆层。' });
-        throw new Error('当前生图检查未通过，已阻止提交拆层。请先复核现有图片。');
+      const reviewBlocked = prepReviewBlockReason(job);
+      if (reviewBlocked) {
+        update(t.id, { prepAccepted: false, prepState: 'needs-review', prepMessage: reviewBlocked });
+        throw new Error(reviewBlocked);
       }
     }
     const f =

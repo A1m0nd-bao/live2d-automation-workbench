@@ -68,3 +68,35 @@ test('candidate persistence precedes QA; normal and recovered tasks cannot silen
   assert.match(complete, /!t.remoteJobId && t.prepAutoSplit/);
   assert.match(source, /prepProvider: job.provider, prepAutoSplit: false/);
 });
+
+test('v4 and v5 passed reports share one strict gate; missing or unknown checks stay blocked', () => {
+  const { api } = setup();
+  const base = Object.fromEntries(['full_body','frame_margin','identity','outfit','style','anatomy','pose','background'].map(key=>[key,'pass']));
+  const v4={status:'succeeded',quality:{version:'image-quality-v4',status:'passed',checks:base}};
+  const v5={status:'succeeded',quality:{version:'image-quality-v5',status:'passed',checks:{...base,face_front:'pass'}}};
+  assert.equal(api.prepReviewBlockReason(v4),undefined);
+  assert.equal(api.prepReviewBlockReason(v5),undefined);
+  for(const blocked of [
+    {...v5,status:'needs-review'},
+    {...v5,quality:{...v5.quality,status:'outdated'}},
+    {...v5,quality:{...v5.quality,status:'rejected'}},
+    {...v5,quality:{...v5.quality,version:'image-quality-v6'}},
+    {...v5,quality:{...v5.quality,checks:base}},
+    {...v5,quality:{...v5.quality,checks:{...base,face_front:'uncertain'}}},
+    {...v5,quality:{...v5.quality,checks:{...base,face_front:'fail'}}},
+    {...v5,quality:{...v5.quality,checks:undefined}},
+    {status:'succeeded'},
+  ]) assert.equal(typeof api.prepReviewBlockReason(blocked),'string');
+  const source=readFileSync(new URL('../src/App.tsx',import.meta.url),'utf8');
+  assert.equal(source.match(/const reviewBlocked = prepReviewBlockReason\(job\)/g).length,2);
+  assert.doesNotMatch(source,/quality\??\.version !== 'image-quality-v4'/);
+});
+
+test('reload rechecks a previously blocked saved task without resubmitting image generation', () => {
+  const {api,requests}=setup();
+  const task={prepState:'needs-review',prepJobId:'7e7491c85d674420897d031e6303b641'};
+  assert.equal(api.recoverPrepState(task).prepState,'queued');
+  assert.match(api.recoverPrepState(task).prepMessage,/不会重新生成/);
+  assert.equal(api.recoverPrepState({...task,remoteJobId:'already-submitted'}).prepState,'needs-review');
+  assert.equal(requests.length,0);
+});
