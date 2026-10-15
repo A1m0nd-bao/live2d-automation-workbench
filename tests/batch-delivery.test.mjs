@@ -35,7 +35,7 @@ test('batch delivery endpoints use device auth, one request and distinct ZIP res
 test('rendered component separates base and multistate delivery, including blocked state', () => {
   const batch = { id: 'batch', name: 'fixture', state: 'completed', settings: { friendly: false },
     succeeded: 28, failed: 8, total: 36, items: [],
-    delivery: { state: 'blocked', ready: 0, resolved_base_count: 28, needs_attention: 0, running: 0, items: [], message: 'HTTP 402' } };
+    delivery: { state: 'blocked', states: ['action_02_wave_arms_only'], provider: 'image2', ready: 0, resolved_base_count: 28, needs_attention: 0, running: 0, items: [], message: 'HTTP 402' } };
   let stateIndex = 0;
   const panel = compile('../src/BatchPanel.tsx', name => {
     if (name === 'react/jsx-runtime') return jsx;

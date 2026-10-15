@@ -303,6 +303,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
     def test_api_auth_idempotence_and_validation(self):
         app=FastAPI();app.include_router(self.queue.router)
         with TestClient(app) as client:
+            self.assertEqual(client.post('/pro/pose-jobs/provider/resume').status_code,401)
             body={'job_id':'a'*32,'states':json.dumps([WAVE]),'provider':'image2'}
             self.assertEqual(client.post('/pro/pose-jobs',data=body,files={'psd':('source.psd',self.data)}).status_code,401)
             self.assertEqual(client.post('/pro/pose-jobs/'+'a'*32+'/states/'+WAVE+'/select/'+'b'*32).status_code,401)

@@ -5,6 +5,7 @@ import { downloadBlob, readAsset, saveAsset } from './assets';
 import './batch.css';
 import { LIVE2D_PRO_STATES } from './live2dPro';
 import type { Live2dPrepProvider } from './live2dPrep';
+import { proRequest } from './proQueue';
 
 const PENDING = 'morph.batch-upload.v1';
 const LABELS = { uploading: '待上传', pending: '排队', queued: '排队', running: '拆件中', succeeded: 'PSD 已保存', failed: '失败', 'friendly-queued': '友好图排队', 'friendly-running': '友好化中', uncertain: '结果未知（已停队）' };
@@ -173,6 +174,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
     {active && <>
       <div className="batch-summary">{active.settings.friendly && <b>友好图 {active.friendly_succeeded ?? 0}/{active.total}</b>}<b>基础拆件 {active.succeeded}/{active.total}</b><b>多状态 PSD {active.delivery?.ready ?? 0}/{active.total}</b><span>失败 {active.failed}</span>{!!active.uncertain && <span>结果未知 {active.uncertain}，未重试</span>}<span>MOC3 {runtimeCounts[active.id] ?? 0}/{active.total}</span><span>{active.state === 'paused' ? '基础拆件已暂停' : active.state === 'completed' ? '仅基础拆件结束' : active.state === 'uploading' ? '上传待完成' : '串行处理中'}</span></div>
       {active.delivery && <p><output>可复用基础 PSD {active.delivery.resolved_base_count}/{active.total} · 多状态：{active.delivery.state === 'blocked' ? '服务暂停' : active.delivery.state === 'paused' ? '已暂停新任务' : active.delivery.state === 'completed' ? '本阶段结束（失败项仍保留）' : '服务端接续处理中'} · {active.delivery.needs_attention} 项需处理。{active.delivery.message}</output></p>}
+      {active.delivery && <p>本批已锁定：{active.delivery.provider === 'image2' ? 'Image-2' : '豆包'} · {active.delivery.states.map(id => LIVE2D_PRO_STATES.find(s => s.id === id)?.label ?? id).join('、')}。下方动作选择仅用于新批次或尚未接续的批次。</p>}
       <progress value={active.succeeded + active.failed} max={active.total} />
       <div className="batch-actions">
         {active.state !== 'completed' && <button className="ghost-button" disabled={busy || active.state === 'uploading'} onClick={() => void operate(async () => { await batchRequest(`/${active.id}/${active.state === 'paused' ? 'start' : 'pause'}`, { method: 'POST' }); await load(); })}>{active.state === 'paused' ? '继续拆件' : '暂停后续拆件'}</button>}
@@ -180,6 +182,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
         <button className="ghost-button" disabled={busy || !active.delivery?.ready} onClick={() => void operate(async () => { const zip = await batchRequest<Blob>(`/${active.id}/delivery/output`); downloadBlob(zip, `${active.name}-多状态-psd.zip`); })}>下载已完成多状态 PSD</button>
         {!active.delivery && <button className="primary-button" disabled={busy || !poseIds.length} onClick={() => void operate(async () => { await batchRequest(`/${active.id}/delivery`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ states: poseIds, provider: poseProvider, start: true }) }); await load(); setMessage('已接续多状态队列：只复用现有及随后完成的基础 PSD，不重生基础图，不再逐张 See-Through。部件生图可能计费。'); })}>接续本批多状态 PSD（可能计费）</button>}
         {active.delivery && <button className="ghost-button" disabled={busy || active.delivery.state === 'blocked' || active.delivery.state === 'completed'} onClick={() => void operate(async () => { await batchRequest(`/${active.id}/delivery/${active.delivery?.state === 'paused' ? 'start' : 'pause'}`, { method: 'POST' }); await load(); })}>{active.delivery.state === 'paused' ? '继续多状态队列' : '暂停接收新角色'}</button>}
+        {active.delivery?.state === 'blocked' && <button className="ghost-button" disabled={busy} onClick={() => void operate(async () => { await proRequest('/pose-jobs/provider/resume', new FormData()); await load(); setMessage('已明确解除服务暂停；后续未提交部件可能计费，失败和结果未知的旧任务不会重生。'); })}>上游限制已解除，恢复后续请求（可能计费，不重试失败项）</button>}
         <select aria-label="批量制作模式" value={profile} onChange={e => setProfile(e.target.value as 'standard' | 'pro')}><option value="standard">标准 CMO3 / MOC3</option><option value="pro">Pro CMO3 / MOC3</option></select>
         <button className="primary-button" disabled={busy || !active.succeeded || (profile === 'pro' && !poseIds.length)} onClick={() => void operate(async () => { setMessage(profile === 'pro' ? '从基础 PSD 生成局部部件（可能计费），不再逐张状态拆件；本地建模阶段请保持页面打开。' : '本地制作队列已开始，请保持此页面打开。'); await onProduce(active, profile, poseIds, poseProvider); setMessage('本批已完成项的本地制作结束，可在工作台查看文件与失败原因。'); })}>批量制作已完成的 PSD{profile === 'pro' ? '（部件生图可能计费）' : ''}</button>
       </div>
