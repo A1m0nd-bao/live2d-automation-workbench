@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch, AsyncMock
 
 import httpx
+from worker.psd_test_fixture import layered_psd
 
 spec = importlib.util.spec_from_file_location('relay_test_module', Path(__file__).parent / 'app/main.py')
 relay = importlib.util.module_from_spec(spec)
@@ -111,7 +112,9 @@ class RelayTests(unittest.TestCase):
                 self.assertEqual(asyncio.run(relay.prepare_foreground('test')), target)
                 spawn.assert_not_called()
 
-    def exercise(self, event, download=b'8BPS\x00\x01' + bytes(30), route=None):
+    def exercise(self, event, download=None, route=None):
+        if download is None:
+            download = layered_psd()
         requests = []
         def handler(request):
             requests.append(request)
@@ -161,6 +164,12 @@ class RelayTests(unittest.TestCase):
         job, _, _ = self.exercise('event: complete\ndata: [{"path":"/tmp/test.psd"}]\n\n', b'<html>login required</html>')
         self.assertEqual(job.status, 'failed')
         self.assertIn('download:', job.error)
+
+    def test_local_psd_validation_never_replays_inference(self):
+        job, _, requests = self.exercise('event: complete\ndata: [{"path":"/tmp/test.psd"}]\n\n', b'8BPS\x00\x01'+bytes(32))
+        self.assertEqual(job.status,'failed')
+        self.assertIn('validate-psd:',job.error)
+        self.assertEqual(sum(r.method=='POST' and r.url.path.endswith('/call/inference') for r in requests),1)
 
     def test_null_complete_is_failure(self):
         job, _, _ = self.exercise('event: complete\ndata: null\n\n')

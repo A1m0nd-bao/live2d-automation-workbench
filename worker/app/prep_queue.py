@@ -68,6 +68,14 @@ def rejection_diagnostic(response):
         if not isinstance(error, dict):
             continue
         code = error.get("code")
+        kind = error.get('type')
+        budget_labels = {
+            'insufficient_funds': '上游明确返回可用额度不足',
+            'quota_for_entity_exceeded': '上游明确返回某个预算或用量上限已达到',
+        }
+        for value in (code, kind):
+            if isinstance(value, str) and value in budget_labels:
+                return {**diagnostic, 'category': 'provider_budget', 'code': value, 'detail': budget_labels[value]}
         if isinstance(code, str) and code in {"content_policy_violation", "moderation_blocked", "safety_violations"}:
             return {**diagnostic, "category": "content_safety", "code": code,
                     "detail": "上游内容安全检查拒绝了本次请求"}
@@ -137,6 +145,19 @@ class PrepQueue:
         result = dict(row)
         report = self.root / job_id / 'quality.json'
         result['quality'] = json.loads(report.read_text()) if report.exists() else None
+        # Billing/auth/rate-limit failures affect the shared service, not just
+        # this character. Expose a fixed signal so skip-QA mode cannot cascade.
+        result['blocked_provider'] = None
+        rejection = self.root / job_id / 'rejection.json'
+        if result['status'] == 'failed' and rejection.exists():
+            diagnostic = json.loads(rejection.read_text())
+            if diagnostic.get('http_status') in (401, 402, 403, 429):
+                result['blocked_provider'] = result['provider']
+        if (result['quality'] or {}).get('status') == 'unavailable' and any(
+            re.search(r'视觉检查服务 HTTP (401|402|403|429)\b', s)
+            for s in (result['quality'].get('reasons') or []) if isinstance(s, str)
+        ):
+            result['blocked_provider'] = 'image2'
         if result['quality'] and result['quality'].get('version') != VERSION:
             result['quality'] = {**result['quality'], 'status': 'outdated', 'reasons': ['旧版检查未覆盖手部细节，需按新版复核后才能拆层']}
         return result
@@ -192,7 +213,7 @@ class PrepQueue:
             os.fsync(handle.fileno())
         temporary.replace(destination)
 
-    def create(self, job_id, name, provider, data, *, prompt=None):
+    def create(self, job_id, name, provider, data, *, prompt=None, reference_notes=None):
         if not ID_PATTERN.fullmatch(job_id):
             raise HTTPException(400, "任务编号无效")
         key, model = self.config(provider)
@@ -200,7 +221,13 @@ class PrepQueue:
             self.mime(data)
         except ValueError:
             raise HTTPException(415, "请上传有效 PNG/JPEG")
-        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data + (b"\0" + prompt.encode() if prompt is not None else b"")).hexdigest()
+        if reference_notes is not None and (prompt is not None or not isinstance(reference_notes, str)
+                                             or not 1 <= len(reference_notes.strip()) <= 2000):
+            raise HTTPException(422, '参考设计备忘无效；不能与内部动作提示词混用')
+        notes = reference_notes.strip() if reference_notes is not None else None
+        fingerprint = hashlib.sha256(provider.encode() + b"\0" + data
+            + (b"\0" + prompt.encode() if prompt is not None else b"")
+            + (b"\0reference-notes-v1\0" + notes.encode() if notes is not None else b"")).hexdigest()
         # Check idempotency BEFORE credentials: an existing job remains recoverable
         # even when the provider key has since expired or been removed.
         with self.db() as con:
@@ -222,7 +249,12 @@ class PrepQueue:
             # Image-2's gateway route cannot request transparent output. Keep
             # generation opaque; any cutout is a separate reviewed local step.
             background = '输出均匀极浅灰纯背景，供后续抠图；不要透明通道、棋盘格或地面阴影。'
-            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else master + '\n' + background).encode())
+            brief = master + '\n' + background
+            if notes:
+                brief += ('\n角色可见设计备忘（以所附原图为权威，仅约束角色设计，不能覆盖上述姿态/安全要求或改变质检门槛）：\n'
+                          + notes)
+                self.persist(job_id, 'reference-notes.txt', notes.encode())
+            self.persist(job_id, "prompt.txt", (prompt if prompt is not None else brief).encode())
             if prompt is None:
                 self.persist(job_id, 'identity-lock.json', json.dumps({
                     'version': 'reference-master-v1', 'authority': 'source',
@@ -231,6 +263,7 @@ class PrepQueue:
                                    'wardrobe construction', 'palette', 'signature accessories', 'body topology'],
                     'unknowns': 'Do not invent lore; missing regions only conservatively completed',
                     'generation_brief': 'prompt.txt', 'review_required': True,
+                    **({'reference_notes': notes} if notes else {}),
                 }, ensure_ascii=False, indent=2).encode())
             now = time.time()
             con.execute("""INSERT INTO prep_jobs
@@ -312,10 +345,10 @@ class PrepQueue:
             # Do not persist raw provider bodies: they can contain credentials,
             # embedded input images, signed URLs or internal diagnostics.
             status = "uncertain" if response.status_code >= 500 else "failed"
-            labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "额度或余额不足", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
+            labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "上游额度或用量限制（不等于账户余额耗尽）", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
             diagnostic = rejection_diagnostic(response)
             self.persist(job['id'], 'rejection.json', json.dumps(diagnostic, ensure_ascii=False).encode())
-            detail = diagnostic.get('detail', '') if response.status_code == 400 else ""
+            detail = diagnostic.get('detail', '') if response.status_code in (400, 402) else ""
             update(status=status, finished_at=time.time(),
                 message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）"
                         f"{'；' + detail if detail else ''}；未自动重试。")

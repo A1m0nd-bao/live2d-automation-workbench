@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import importlib.util
 from pathlib import Path
 from urllib.request import getproxies
 
@@ -21,6 +22,10 @@ from psd_tools.api.layers import Group, PixelLayer
 from psd_tools.psd.image_data import ImageData
 from psd_tools.constants import Compression, Tag
 from scipy.ndimage import label, binary_dilation
+
+_gate_spec = importlib.util.spec_from_file_location('morph_pose_export_gates', Path(__file__).with_name('psd_export_gates.py'))
+gates = importlib.util.module_from_spec(_gate_spec)
+_gate_spec.loader.exec_module(gates)
 
 VERSION = 'psd-pose-variants-v1'
 POSES = {
@@ -134,6 +139,11 @@ def review_schema(checks, geometry_fields=()):
             'properties':{name:{'anyOf':[{'type':'array','items':{'type':'number'},'minItems':2,'maxItems':2}, {'type':'null'}]} for name in geometry_fields},
             'required':list(geometry_fields),
         }
+        properties['draw_slot'] = {
+            'type': 'object', 'additionalProperties': False,
+            'properties': {k: {'anyOf': [{'type': 'string'}, {'type': 'null'}]} for k in ('after', 'before')},
+            'required': ['after', 'before'],
+        }
     return {'type':'json_schema','json_schema':{'name':'psd_pose_review','strict':True,
             'schema':{'type':'object','properties':properties,'required':list(properties),'additionalProperties':False}}}
 
@@ -204,11 +214,17 @@ def assemble(source, directory, state, raw, geometry, info):
     candidate = candidate_image(raw)
     orientation_corrected = False
     segment_ratios = []
-    target = np.array(info['arms']['handwear-r']['shoulder'])
+    # The inspection's top-band shoulder is only a prompt hint. Placement uses
+    # explicit source landmarks returned by the geometry review, never a bbox.
+    target = point(geometry.get('source_shoulder'), psd.size)
+    if gates.distance_to_ink(layer_canvas(arms['handwear-r'], psd.size), target) > 12:
+        raise ValueError('原臂肩位不在该侧图层像素上；未猜测连接点')
     shoulder = point(geometry.get('shoulder'), candidate.size)
     if 'crossed_arms' in state:
         other = point(geometry.get('other_shoulder'), candidate.size)
-        target_other = np.array(info['arms']['handwear-l']['shoulder'])
+        target_other = point(geometry.get('source_other_shoulder'), psd.size)
+        if gates.distance_to_ink(layer_canvas(arms['handwear-l'], psd.size), target_other) > 12:
+            raise ValueError('另一侧原肩位不在图层像素上')
         # No mirrored L/R mapping; source semantic names are authoritative.
         if (other[0]-shoulder[0])*(target_other[0]-target[0]) <= 0:
             raise ValueError('生成抱臂肩位左右颠倒；未合层')
@@ -261,12 +277,19 @@ def assemble(source, directory, state, raw, geometry, info):
         raise ValueError('动作部件超出原画布；不移动或缩小角色来掩盖裁切')
     replacement = Image.new('RGBA', psd.size)
     replacement.alpha_composite(piece, (left,top))
-    for layer in arms.values():
-        layer.visible = False
+    placements = {'target_shoulder': target.tolist(), 'shoulder_tolerance': 12}
+    if 'crossed_arms' in state:
+        placements['extra_landmarks'] = [{'role': 'opposite_shoulder', 'target': target_other.tolist(), 'tolerance': 12}]
+        gates.validate_fitted_parts({'handwear': replacement}, placements)
+    else:
+        gates.validate_fitted_parts({'handwear-r': replacement}, {'handwear-r': placements})
     both = 'crossed_arms' in state
     # Render exactly the layer tree we export (including original occlusion
     # order and alpha compositing), not a separately composited approximation.
-    group = add_state(psd, arms, state, replacement)
+    slot = geometry.get('draw_slot')
+    group = add_state(psd, arms, state, replacement, slot)
+    for layer in arms.values():
+        layer.visible = False
     group.visible = True
     preview = psd.composite(force=True, apply_icc=False).convert('RGBA')
     Path(directory).mkdir(parents=True, exist_ok=True)
@@ -289,16 +312,19 @@ def assemble(source, directory, state, raw, geometry, info):
     return {'scale': float(scale), 'offset': [left,top], 'neutralSha256': hashlib.sha256(png(neutral)).hexdigest(),
             'sourceLayers': before, 'oppositeArmReused': not both, 'torsoRepairApplied': False,
             'orientationCorrected': orientation_corrected, 'alignmentPolicy':'semantic-wave-facing-v1',
-            'projectedSegmentRatios': segment_ratios}
+            'projectedSegmentRatios': segment_ratios, 'drawSlot': slot, 'targetShoulder': target.tolist(),
+            'placementPolicy': 'explicit-source-shoulder-and-reviewed-slot-v1'}
 
 
-def add_state(psd, arms, name, replacement):
+def add_state(psd, arms, name, replacement, slot):
+    if psd.channels == 3:
+        psd._record.header.channels = 4
+    if 'crossed_arms' not in name:
+        gates.check_arm(replacement)
+        gates.check_arm(layer_canvas(arms['handwear-l'], psd.size))
     group = Group.new(psd, name)
-    if 'crossed_arms' in name or 'thinking' in name:
-        combined = replacement.copy()
-        if 'thinking' in name:
-            combined.alpha_composite(layer_canvas(arms['handwear-l'], psd.size))
-        PixelLayer.frompil(combined, group, name+'__handwear')
+    if 'crossed_arms' in name:
+        PixelLayer.frompil(replacement, group, name+'__handwear')
     else:
         PixelLayer.frompil(replacement, group, name+'__'+arms['handwear-r'].name)
         original = arms['handwear-l']
@@ -310,6 +336,7 @@ def add_state(psd, arms, name, replacement):
         copied.tagged_blocks.set_data(Tag.LAYER_ID,max(ids,default=0)+1)
         group.append(copied)
     group.visible = False
+    gates.place_group(psd, group, slot)
     return group
 
 
@@ -323,28 +350,21 @@ def export(source, destination, states):
         if any(x.name == name for x in psd):
             raise ValueError(f'原 PSD 已有 {name}；不会覆盖作者的动作组')
         replacement = Image.open(state['replacement']).convert('RGBA')
-        add_state(psd, arms, name, replacement)
+        if not state.get('draw_slot'):
+            raise ValueError('缺少已检查的动作遮挡槽位；不会将所有动作强行放到顶层')
+        add_state(psd, arms, name, replacement, state['draw_slot'])
     if signature(original_layers) != before:
         raise ValueError('导出改动了原图层，已阻止交付')
-    header = psd._record.header
-    header.channels = 4
-    channels = list(neutral.split())
-    psd._record.image_data = ImageData(compression=Compression.RAW)
-    psd._record.image_data.set_data([channel.tobytes() for channel in channels], header)
-    # Negative count declares a merged transparency channel in PSD v1.
+    # Flush added layer records before writing the skill's verified merged RGBA.
     psd._update_record()
-    psd._record.layer_and_mask_information.layer_info.layer_count = -abs(psd._record.layer_and_mask_information.layer_info.layer_count)
-    # Write the compiled record directly, avoiding save() regenerating an
-    # incomplete preview cache in older psd-tools releases.
-    with open(destination, 'wb') as handle:
-        psd._record.write(handle)
-    check = PSDImage.open(destination)
-    if signature(list(check)[:len(original_layers)]) != before:
+    check = gates.save_compatible(psd, destination)
+    if signature([x for x in check if x.name in {l.name for l in original_layers}]) != before:
         raise ValueError('重开 PSD 后原图层发生变化')
     if not np.array_equal(np.asarray(neutral), np.asarray(check.composite(force=True, apply_icc=False).convert('RGBA'))):
         raise ValueError('导出中立像素变化，已阻止交付')
     merged = check._record.image_data.get_data(check._record.header)
-    if len(merged) != 4 or any(len(x) != check.width*check.height for x in merged):
+    if len(merged) != check.channels or any(len(x) != check.width*check.height for x in merged):
         raise ValueError('PSD 合成透明通道不完整')
     return {'version': VERSION, 'neutralPixelsUnchanged': True, 'sourceLayersUnchanged': True,
-            'mergedChannels': 4, 'states': [x['id'] for x in states], 'visualAcceptance': 'pending_human_review'}
+            'mergedChannels': check.channels, 'storedMergedVerified': True,
+            'states': [x['id'] for x in states], 'visualAcceptance': 'pending_human_review'}

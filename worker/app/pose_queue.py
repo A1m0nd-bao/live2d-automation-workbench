@@ -11,6 +11,7 @@ import sqlite3
 import sys
 import time
 import uuid
+import re
 from pathlib import Path
 
 import httpx
@@ -48,6 +49,26 @@ class PoseQueue:
         with self.db() as con:
             con.execute('PRAGMA journal_mode=WAL')
             con.execute('CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, payload TEXT NOT NULL)')
+            con.execute('CREATE TABLE IF NOT EXISTS service_circuit (id INTEGER PRIMARY KEY CHECK(id=1), status INTEGER NOT NULL, message TEXT NOT NULL)')
+
+    def service_blocker(self):
+        with self.db() as con:
+            row = con.execute('SELECT status,message FROM service_circuit WHERE id=1').fetchone()
+        return dict(row) if row else None
+
+    def block_service(self, status):
+        if status not in (401, 402, 403, 429):
+            return
+        message = f'部件生图或视觉服务 HTTP {status}；已暂停全队列的新请求，已有素材保留；需明确恢复，不自动重试'
+        with self.db() as con:
+            con.execute('INSERT OR REPLACE INTO service_circuit VALUES (1,?,?)', (status, message))
+
+    def resume_service(self):
+        # An explicit authenticated action, never an automatic retry. Existing
+        # failed/uncertain states keep their IDs and outcomes.
+        with self.db() as con:
+            con.execute('DELETE FROM service_circuit WHERE id=1')
+        return {'resumed': True, 'failed_jobs_retried': False}
 
     def get(self, jid):
         with self.db() as con:
@@ -99,7 +120,7 @@ class PoseQueue:
                 continue
             parts = {x.removeprefix(sid+'__') for x in layer['parts'] if x.startswith(sid+'__')}
             if not layer['isGroup'] or not ({'handwear-r','handwear-l'} <= parts or
-                (('thinking' in sid or 'crossed_arms' in sid) and 'handwear' in parts)):
+                ('crossed_arms' in sid and 'handwear' in parts)):
                 raise HTTPException(422, f'原 PSD 的 {sid} 部件命名不完整；不会覆盖作者动作或再次收费生成')
             existing.add(sid)
         key, model = self.prep.config(provider)
@@ -161,6 +182,12 @@ class PoseQueue:
                 '_references':[(self.root/run['id']/'arms.png').read_bytes()],
                 '_options':{'size':'1536x2400' if run['provider']=='doubao' else '1024x1536'}}, key)
             if data is None:
+                rejection = self.prep.root/gid/'rejection.json'
+                if rejection.exists():
+                    self.block_service(json.loads(rejection.read_text()).get('http_status'))
+                match = re.search(r'HTTP (401|402|403|429)\b', state.get('message', ''))
+                if match:
+                    self.block_service(int(match[1]))
                 return
             self.persist(directory/'candidate.png', data)
             state.update(status='reviewing', message='部件已保存；定位肩肘腕并校验比例')
@@ -206,13 +233,15 @@ class PoseQueue:
                 '第一张是源角色，第二张是原 PSD 的双臂层，第三张是生成的完整部件。检查第三张仅有指定部件、衣袖/手与源角色一致、解剖正确、姿势正确。'
                 'checks 必须恰好为 '+','.join(pose.PART_CHECKS)+'；值 pass/fail/uncertain，reasons 为中文问题数组。'
                 'geometry 坐标必须是各自图片画布内归一化 [x,y]（0到1），不是裁剪框坐标。'
-                + ('第三张含双臂：返回 shoulder（源 handwear-r 对应侧的肩连接中心）与 other_shoulder（另一侧肩连接中心）。' if both else
+                + ('第三张含双臂：返回 shoulder（源 handwear-r 对应侧的肩连接中心）与 other_shoulder（另一侧肩连接中心）；第二张返回 source_shoulder 与 source_other_shoulder。' if both else
                    '第三张只含源 handwear-r 对应侧手臂：返回 shoulder、elbow、wrist；同时返回第二张该侧原臂的 source_shoulder、source_elbow、source_wrist。'
                    '肩是肩袖与躯干连接的中心，不是抬高的手掌、不是整张图的最高点。')
-                + '\n源层检查信息：'+json.dumps(info['arms'])+'\n要求：'+pose.pose_prompt(state['id'], info))
+                + '\n另返回 draw_slot 的 after/before，值为原 PSD 唯一根层名或 null，至少一项非空。按这个角色实际肩袖遮挡决定动作组位置，必须高于被替换的双臂；不重排原层，不默认放在头发和脸之上。'
+                + '\n原层按后到前的顺序：'+json.dumps([x['name'] for x in info['layers']],ensure_ascii=False)
+                + '\n源层检查信息（肩位仅初步提示，必须按像素核对）：'+json.dumps(info['arms'])+'\n要求：'+pose.pose_prompt(state['id'], info))
             geometry = pose.validate_checks(await pose.vision(key, instruction,
                 [(self.root/run['id']/'neutral.png').read_bytes(), (self.root/run['id']/'arms.png').read_bytes(),data],
-                checks=pose.PART_CHECKS, geometry_fields=('shoulder','other_shoulder') if both else
+                checks=pose.PART_CHECKS, geometry_fields=('shoulder','other_shoulder','source_shoulder','source_other_shoulder') if both else
                 ('shoulder','elbow','wrist','source_shoulder','source_elbow','source_wrist')), pose.PART_CHECKS)
             self.persist(geometry_file, json.dumps(geometry, ensure_ascii=False).encode())
         # Raw canvases differ in scale and facing. Geometry is a localization
@@ -220,7 +249,8 @@ class PoseQueue:
         # then review the normalized part and actual assembly before export.
         state.update(status='assembling', message='按此 PSD 的肩位与骨段长度对齐；另一侧复用原层')
         self.save(run)
-        report = await asyncio.to_thread(pose.assemble, source, directory, state['id'], data, geometry.get('geometry',{}), info)
+        report = await asyncio.to_thread(pose.assemble, source, directory, state['id'], data,
+            {**geometry.get('geometry',{}), 'draw_slot': geometry.get('draw_slot')}, info)
         preview = (directory/'preview.png').read_bytes()
         replacement = (directory/'replacement.png').read_bytes()
         instruction = ('第一张是源角色中立图，第二张是原 PSD 的双臂层，第三张是待替换部件，已按原 PSD 骨长等比例缩放、校正朝向并固定到肩位，'
@@ -249,6 +279,8 @@ class PoseQueue:
                      preview=True)
 
     async def advance(self, run):
+        if self.service_blocker():
+            return
         info = json.loads((self.root/run['id']/'inspection.json').read_text())
         for state in run['states']:
             if state['status'] in TERMINAL:
@@ -264,15 +296,25 @@ class PoseQueue:
                 raise
             except Exception as e:
                 state.update(status='needs-review', message=str(e) if isinstance(e,(ValueError,RuntimeError)) else '本地合层或部件检查中断；已有素材保留，未重新生图')
+                match = re.search(r'HTTP (401|402|403|429)\b', str(e))
+                if match:
+                    self.block_service(int(match[1]))
             self.save(run)
             break
         statuses = [s['status'] for s in run['states']]
         if all(s == 'succeeded' for s in statuses):
             try:
                 directory = self.root/run['id']
-                states = [{'id':s['id'], 'replacement':directory/s['generation_id']/'replacement.png'} for s in run['states'] if not s.get('reused')]
-                report = await asyncio.to_thread(pose.export, directory/'source.psd', directory/'merged.tmp.psd', states)
-                (directory/'merged.tmp.psd').replace(directory/'merged.psd')
+                states = [{'id':s['id'], 'replacement':directory/s['generation_id']/'replacement.png',
+                           'draw_slot':json.loads((directory/s['generation_id']/'aligned-part-review.json').read_text())['assembly']['drawSlot']}
+                          for s in run['states'] if not s.get('reused')]
+                temporary = directory/('merged-'+uuid.uuid4().hex+'.tmp.psd')
+                report = await asyncio.to_thread(pose.export, directory/'source.psd', temporary, states)
+                report['requestedStates'] = [s['id'] for s in run['states']]
+                report['reusedStates'] = [s['id'] for s in run['states'] if s.get('reused')]
+                report['sourceSha256'] = hashlib.sha256((directory/'source.psd').read_bytes()).hexdigest()
+                report['outputSha256'] = hashlib.sha256(temporary.read_bytes()).hexdigest()
+                temporary.replace(directory/'merged.psd')
                 self.persist(directory/'report.json', json.dumps(report, ensure_ascii=False).encode())
                 run.update(status='ready', message='多状态 PSD 已生成并重开校验；原层/中立像素不变，动作组默认隐藏。仍需人工验收')
             except Exception as e:
@@ -360,12 +402,23 @@ class PoseQueue:
                 rows = con.execute('SELECT payload FROM runs ORDER BY rowid').fetchall()
             for row in rows:
                 run = json.loads(row[0])
-                if run['status']=='running':
-                    await self.advance(run)
+                if run['status']=='running' and not self.service_blocker():
+                    # Share the generation slot with neutral preparation.
+                    slot = getattr(self.prep, 'execution_slots', None)
+                    if slot is None:
+                        await self.advance(run)
+                    else:
+                        async with slot:
+                            await self.advance(run)
                     break
             await asyncio.sleep(2)
 
     def routes(self):
+        @self.router.post('/provider/resume')
+        async def resume_provider(x_relay_token: str|None=Header(None), x_morph_device_token: str|None=Header(None)):
+            self.authorize(x_relay_token,x_morph_device_token)
+            return self.resume_service()
+
         @self.router.post('', status_code=202)
         async def create(job_id: str=Form(...), states: str=Form(...), provider: str=Form(...), psd: UploadFile=File(...),
                          x_relay_token: str|None=Header(None), x_morph_device_token: str|None=Header(None)):

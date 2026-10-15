@@ -43,7 +43,8 @@ def candidate():
 
 def geometry():
     return {'shoulder':[.3,65/300],'elbow':[.175,.35],'wrist':[.125,65/300],
-            'source_shoulder':[.3,65/300],'source_elbow':[.3,105/300],'source_wrist':[.3,145/300]}
+            'source_shoulder':[.3,65/300],'source_elbow':[.3,105/300],'source_wrist':[.3,145/300],
+            'draw_slot': {'after': 'handwear-l', 'before': None}}
 
 
 class FakePrep:
@@ -71,7 +72,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
     def create(self,states=None): return self.queue.create('a'*32,states or [WAVE],'image2',self.data)
     async def vision(self,key,instruction,images,**kwargs):
         checks=pose.PART_CHECKS if len(images)==3 else pose.PREVIEW_CHECKS
-        return {'checks':{x:'pass' for x in checks},'reasons':[],'geometry':geometry()}
+        return {'checks':{x:'pass' for x in checks},'reasons':[],'geometry':geometry(), 'draw_slot': geometry()['draw_slot']}
 
     async def test_full_flow_without_splitting_preserves_layers_pixels_alpha(self):
         run=self.create()
@@ -158,6 +159,40 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('背景设置',run['states'][0]['message'])
         self.assertEqual(len(self.prep.calls),1)
         self.assertFalse((self.queue.root/run['id']/'merged.psd').exists())
+
+    async def test_402_stops_other_characters_and_remaining_states(self):
+        async def rejected(job,key):
+            self.prep.calls.append(job)
+            job['_update'](status='failed',message='HTTP 402；未自动重试')
+            return None
+        first = self.create([WAVE,'action_05_thinking_arms_only'])
+        second = self.queue.create('b'*32,[WAVE],'image2',self.data)
+        with patch.object(self.prep,'generate',rejected):
+            await self.queue.advance(first)
+            await self.queue.advance(first)
+            await self.queue.advance(second)
+        self.assertEqual(len(self.prep.calls),1)
+        self.assertEqual(self.queue.service_blocker()['status'],402)
+        self.assertEqual(first['states'][1]['status'],'queued')
+        self.queue.resume_service()
+        self.assertEqual(self.queue.get(first['id'])['states'][0]['status'],'failed')
+        self.assertEqual(len(self.prep.calls),1)
+
+    async def test_thinking_exports_independent_arms_and_stored_alpha(self):
+        run=self.create(['action_05_thinking_arms_only'])
+        with patch.object(pose,'vision',self.vision): await self.queue.advance(run)
+        self.assertEqual(run['status'],'ready',run)
+        path=self.queue.root/run['id']/'merged.psd'
+        check=PSDImage.open(path)
+        group=next(layer for layer in check if layer.name=='action_05_thinking_arms_only')
+        self.assertEqual([part.name for part in group], [group.name+'__handwear-r',group.name+'__handwear-l'])
+        pose.gates.validate_merged_preview(check,check.composite(force=True).convert('RGBA'))
+
+    def test_missing_draw_slot_stops_export(self):
+        info=pose.inspect(self.root/'source.psd',self.root)
+        points=geometry();points.pop('draw_slot')
+        with self.assertRaisesRegex(ValueError,'draw slot'):
+            pose.assemble(self.root/'source.psd',self.root/'no-slot',WAVE,candidate(),points,info)
 
     async def test_visual_review_requires_strict_schema_and_rejects_refusal(self):
         import httpx
@@ -268,6 +303,7 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
     def test_api_auth_idempotence_and_validation(self):
         app=FastAPI();app.include_router(self.queue.router)
         with TestClient(app) as client:
+            self.assertEqual(client.post('/pro/pose-jobs/provider/resume').status_code,401)
             body={'job_id':'a'*32,'states':json.dumps([WAVE]),'provider':'image2'}
             self.assertEqual(client.post('/pro/pose-jobs',data=body,files={'psd':('source.psd',self.data)}).status_code,401)
             self.assertEqual(client.post('/pro/pose-jobs/'+'a'*32+'/states/'+WAVE+'/select/'+'b'*32).status_code,401)

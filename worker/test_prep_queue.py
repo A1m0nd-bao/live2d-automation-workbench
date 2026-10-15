@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -71,6 +72,29 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.queue.root / JOB / 'candidate-2').exists())
         self.assertEqual((self.queue.root / JOB / 'prompt.txt').read_bytes(), (self.queue.root / JOB / 'prompt-1.txt').read_bytes())
         self.assertEqual((self.queue.root / JOB / 'source').read_bytes(), PNG)
+
+    async def test_reference_notes_are_snapshot_and_idempotency_bound(self):
+        self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='保留半指手套及戒指；短外套不能变长大衣。')
+        directory = self.queue.root / JOB
+        self.assertIn('保留半指手套及戒指', (directory / 'prompt.txt').read_text())
+        self.assertTrue((directory / 'prompt.txt').read_text().startswith('最高优先级：'))
+        self.assertTrue(json.loads((directory / 'identity-lock.json').read_text())['review_required'])
+        self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='保留半指手套及戒指；短外套不能变长大衣。')
+        with self.assertRaises(HTTPException):
+            self.queue.create(JOB, 'repair', 'image2', PNG, reference_notes='换一套衣服')
+        with self.assertRaises(HTTPException):
+            self.queue.create('b'*32, 'repair', 'image2', PNG, prompt='action', reference_notes='notes')
+
+    async def test_shared_provider_failures_are_not_character_failures(self):
+        self.create()
+        self.queue.update(JOB,status='failed')
+        for code in (401,402,403,429):
+            self.queue.persist(JOB,'rejection.json',json.dumps({'http_status':code}).encode())
+            self.assertEqual(self.queue.get(JOB)['blocked_provider'],'image2')
+        self.queue.persist(JOB,'rejection.json',b'{"http_status":400}')
+        self.assertIsNone(self.queue.get(JOB)['blocked_provider'])
+        self.queue.persist(JOB,'quality.json',json.dumps({'version':prep.VERSION,'status':'unavailable','reasons':['视觉检查服务 HTTP 402，结果保留，未放行拆层']}).encode())
+        self.assertEqual(self.queue.get(JOB)['blocked_provider'],'image2')
 
     async def test_review_unavailable_does_not_regenerate_or_pass(self):
         self.create()
@@ -253,6 +277,15 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertIn('402', result['message'])
         self.assertNotIn('test-key-not-real', str(result))
+
+    def test_402_reason_is_whitelisted_not_assumed_from_balance(self):
+        for field,code in [('type','quota_for_entity_exceeded'),('code','insufficient_funds')]:
+            response=httpx.Response(402,json={'error':{field:code,'message':'private input and key'}})
+            diagnostic=prep.rejection_diagnostic(response)
+            self.assertEqual(diagnostic['code'],code)
+            self.assertEqual(diagnostic['category'],'provider_budget')
+            self.assertNotIn('private',str(diagnostic))
+        self.assertEqual(prep.rejection_diagnostic(httpx.Response(402,json={'error':{'message':'unknown'}}))['category'],'unknown_rejection')
 
     async def test_400_identifies_parameter_without_leaking_or_retrying(self):
         self.create()

@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 import zipfile
+import importlib.util
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -32,6 +33,7 @@ class BatchItem(BaseModel):
     id: str
     name: str = Field(min_length=1, max_length=200)
     sha256: str
+    reference_notes: str | None = Field(default=None, min_length=1, max_length=2000)
 
 
 class BatchInput(BaseModel):
@@ -39,6 +41,13 @@ class BatchInput(BaseModel):
     name: str = Field(default="批量拆件", min_length=1, max_length=120)
     settings: SplitSettings = Field(default_factory=SplitSettings)
     items: list[BatchItem] = Field(min_length=1, max_length=100)
+
+
+class PosePlanInput(BaseModel):
+    states: list[str] = Field(min_length=1, max_length=6)
+    provider: str = Field(default='image2', pattern='^(doubao|image2)$')
+    start: bool = False
+    base_jobs: dict[str, str] = Field(default_factory=dict, max_length=100)
 
 
 class BatchRouteInput(BaseModel):
@@ -50,7 +59,7 @@ class BatchPolicyInput(BaseModel):
 
 
 class BatchQueue:
-    def __init__(self, root, authorize, split_create, split_get, prep=None):
+    def __init__(self, root, authorize, split_create, split_get, prep=None, poses=None):
         self.root = Path(root) / "batches"
         self.authorize = authorize
         self.split_create = split_create
@@ -58,6 +67,10 @@ class BatchQueue:
         self.prep = prep
         self.router = APIRouter(prefix="/batches")
         self.task = None
+        spec = importlib.util.spec_from_file_location('morph_batch_delivery', Path(__file__).with_name('batch_delivery.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.delivery = module.BatchDelivery(self, poses)
         self.routes()
 
     @contextmanager
@@ -71,6 +84,9 @@ class BatchQueue:
                 con.execute("CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, batch_id TEXT NOT NULL, position INTEGER NOT NULL, uploaded INTEGER NOT NULL DEFAULT 0)")
                 con.execute("CREATE TABLE IF NOT EXISTS route_changes (batch_id TEXT NOT NULL, before_route TEXT NOT NULL, after_route TEXT NOT NULL, changed REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS batch_policies (batch_id TEXT PRIMARY KEY, on_confirmed_failure TEXT NOT NULL, changed REAL NOT NULL)")
+                con.execute("CREATE TABLE IF NOT EXISTS service_failure_acks (batch_id TEXT NOT NULL, job_id TEXT NOT NULL, PRIMARY KEY(batch_id,job_id))")
+                con.execute('CREATE TABLE IF NOT EXISTS pose_deliveries (batch_id TEXT PRIMARY KEY, plan TEXT NOT NULL, state TEXT NOT NULL)')
+                con.execute('CREATE TABLE IF NOT EXISTS pose_delivery_items (batch_id TEXT NOT NULL, item_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, PRIMARY KEY(batch_id,item_id))')
                 yield con
         finally:
             con.close()
@@ -82,7 +98,7 @@ class BatchQueue:
         for item in data.items:
             if not re.fullmatch(r"[a-f0-9]{64}", item.sha256) or not re.search(r"\.(png|jpe?g)$", item.name, re.I):
                 raise HTTPException(422, "仅接受 PNG/JPEG，且必须提供原图校验值")
-        manifest = json.dumps(data.model_dump(), ensure_ascii=False, sort_keys=True)
+        manifest = json.dumps(data.model_dump(exclude_none=True), ensure_ascii=False, sort_keys=True)
         with self.db() as con:
             con.execute("BEGIN IMMEDIATE")
             old = con.execute("SELECT manifest FROM batches WHERE id=?", (data.id,)).fetchone()
@@ -93,7 +109,7 @@ class BatchQueue:
                     current['settings'].pop('upstream_route', None)
                     manifest = json.dumps(current, ensure_ascii=False, sort_keys=True)
                 if 'friendly' not in previous['settings'] and 'friendly' not in data.settings.model_fields_set:
-                    legacy = data.model_dump()
+                    legacy = data.model_dump(exclude_none=True)
                     legacy['settings'].pop('friendly', None)
                     legacy['settings'].pop('provider', None)
                     legacy['settings'].pop('upstream_route', None)
@@ -161,6 +177,7 @@ class BatchQueue:
         data['friendly_succeeded'] = sum(item['friendly_ready'] for item in items)
         data['uncertain'] = sum(item['status'] == 'uncertain' for item in items)
         data['on_confirmed_failure'] = policy['on_confirmed_failure'] if policy else 'pause'
+        data['delivery'] = self.delivery.summary(batch_id)
         return data
 
     def upload(self, batch_id, item_id, data):
@@ -190,8 +207,12 @@ class BatchQueue:
             return batch
         if action == "start" and any(not item["uploaded"] for item in batch["items"]):
             raise HTTPException(409, "请先完成所有图片上传")
+        acknowledged = [self.prep_id(item['id']) for item in batch['items']
+                        if action == 'start' and (job := self.friendly_job(item['id']))
+                        and job.get('blocked_provider')]
         with self.db() as con:
             con.execute("UPDATE batches SET state=? WHERE id=?", ("active" if action == "start" else "paused", batch_id))
+            con.executemany('INSERT OR IGNORE INTO service_failure_acks VALUES (?,?)', [(batch_id, jid) for jid in acknowledged])
         return self.read(batch_id)
 
     def change_route(self, batch_id, route):
@@ -259,6 +280,27 @@ class BatchQueue:
         with self.db() as con:
             ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state='active' ORDER BY created,id")]
             all_ids = [row["id"] for row in con.execute("SELECT id FROM batches WHERE state!='completed'")]
+            acknowledged = {(row['batch_id'], row['job_id']) for row in con.execute('SELECT * FROM service_failure_acks')}
+        active = {bid:self.read(bid) for bid in ids}
+        blocked = {job['blocked_provider'] for bid,batch in active.items() for item in batch['items']
+                   if (bid,self.prep_id(item['id'])) not in acknowledged
+                   and (job := self.friendly_job(item['id'])) and job.get('blocked_provider')}
+        if blocked:
+            if self.delivery.poses:
+                for batch in active.values():
+                    for item in batch['items']:
+                        job = self.friendly_job(item['id'])
+                        match = re.search(r'HTTP (401|402|403|429)\b', (job or {}).get('message', ''))
+                        if job and job.get('blocked_provider') and match:
+                            self.delivery.poses.block_service(int(match[1]))
+            # All friendly generation uses Image2 for review, even when its
+            # image generator is Doubao. Never reinterpret a service outage as
+            # a skippable character QA failure. Running work is not cancelled.
+            paused = [bid for bid,batch in active.items() if batch['settings'].get('friendly',False)
+                      and ('image2' in blocked or batch['settings']['provider'] in blocked)]
+            with self.db() as con:
+                con.executemany("UPDATE batches SET state='paused' WHERE id=?",[(bid,) for bid in paused])
+            return
         # Pausing future submissions does not make an in-flight/unknown job safe to overlap.
         if any(item["status"] in {"running", "queued", 'friendly-queued', 'friendly-running', 'uncertain'} for batch_id in all_ids for item in self.read(batch_id)["items"]):
             return
@@ -284,7 +326,8 @@ class BatchQueue:
                     if batch['settings'].get('friendly', False):
                         friendly = self.friendly_job(item['id'])
                         if not friendly:
-                            self.prep.create(self.prep_id(item['id']), item['name'], batch['settings']['provider'], source.read_bytes())
+                            notes = {'reference_notes': item['reference_notes']} if item.get('reference_notes') else {}
+                            self.prep.create(self.prep_id(item['id']), item['name'], batch['settings']['provider'], source.read_bytes(), **notes)
                             return
                         if not item['friendly_ready']:
                             return
@@ -304,6 +347,7 @@ class BatchQueue:
             while True:
                 try:
                     await self.advance()
+                    await self.delivery.advance()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -336,6 +380,9 @@ class BatchQueue:
                     if not output.is_file() or output.read_bytes()[:6] != b"8BPS\x00\x01":
                         raise HTTPException(409, "成功记录缺少有效PSD，请检查服务端文件")
                     archive.write(output, item["filename"])
+                    for report in ('psd-delivery.json', 'psd-delivery-upgrade.json'):
+                        if (output.parent / report).is_file():
+                            archive.write(output.parent / report, f'quality/{item["id"]}/{report}')
                     if item.get('friendly_ready'):
                         friendly_dir = self.prep.root / self.prep_id(item['id'])
                         suffix = '.png' if (friendly_dir / 'output').read_bytes().startswith(b'\x89PNG') else '.jpg'
@@ -396,6 +443,21 @@ class BatchQueue:
         async def policy(batch_id: str, data: BatchPolicyInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
             auth(x_relay_token, x_morph_device_token)
             return self.set_policy(batch_id, data.on_confirmed_failure)
+
+        @router.post('/{batch_id}/delivery')
+        async def configure_delivery(batch_id: str, data: PosePlanInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.delivery.configure(batch_id, data.states, data.provider, data.start, data.base_jobs)
+
+        @router.post('/{batch_id}/delivery/{action}')
+        async def control_delivery(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.delivery.control(batch_id, action)
+
+        @router.get('/{batch_id}/delivery/output')
+        async def delivery_output(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return FileResponse(self.delivery.archive(batch_id), media_type='application/zip', filename=f'batch-{batch_id[:8]}-multi-state.zip')
 
         @router.post("/{batch_id}/{action}")
         async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
