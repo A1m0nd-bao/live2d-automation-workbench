@@ -68,6 +68,14 @@ def rejection_diagnostic(response):
         if not isinstance(error, dict):
             continue
         code = error.get("code")
+        kind = error.get('type')
+        budget_labels = {
+            'insufficient_funds': '上游明确返回可用额度不足',
+            'quota_for_entity_exceeded': '上游明确返回某个预算或用量上限已达到',
+        }
+        for value in (code, kind):
+            if isinstance(value, str) and value in budget_labels:
+                return {**diagnostic, 'category': 'provider_budget', 'code': value, 'detail': budget_labels[value]}
         if isinstance(code, str) and code in {"content_policy_violation", "moderation_blocked", "safety_violations"}:
             return {**diagnostic, "category": "content_safety", "code": code,
                     "detail": "上游内容安全检查拒绝了本次请求"}
@@ -337,10 +345,10 @@ class PrepQueue:
             # Do not persist raw provider bodies: they can contain credentials,
             # embedded input images, signed URLs or internal diagnostics.
             status = "uncertain" if response.status_code >= 500 else "failed"
-            labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "额度或余额不足", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
+            labels = {401: "生图凭据无效", 403: "无模型使用权限", 402: "上游额度或用量限制（不等于账户余额耗尽）", 429: "达到服务限流或额度限制", 400: "模型拒绝了请求参数或输入"}
             diagnostic = rejection_diagnostic(response)
             self.persist(job['id'], 'rejection.json', json.dumps(diagnostic, ensure_ascii=False).encode())
-            detail = diagnostic.get('detail', '') if response.status_code == 400 else ""
+            detail = diagnostic.get('detail', '') if response.status_code in (400, 402) else ""
             update(status=status, finished_at=time.time(),
                 message=f"{labels.get(response.status_code, '上游生图服务异常')}（HTTP {response.status_code}）"
                         f"{'；' + detail if detail else ''}；未自动重试。")

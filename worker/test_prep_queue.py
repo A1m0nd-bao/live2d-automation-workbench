@@ -278,6 +278,15 @@ class PrepTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('402', result['message'])
         self.assertNotIn('test-key-not-real', str(result))
 
+    def test_402_reason_is_whitelisted_not_assumed_from_balance(self):
+        for field,code in [('type','quota_for_entity_exceeded'),('code','insufficient_funds')]:
+            response=httpx.Response(402,json={'error':{field:code,'message':'private input and key'}})
+            diagnostic=prep.rejection_diagnostic(response)
+            self.assertEqual(diagnostic['code'],code)
+            self.assertEqual(diagnostic['category'],'provider_budget')
+            self.assertNotIn('private',str(diagnostic))
+        self.assertEqual(prep.rejection_diagnostic(httpx.Response(402,json={'error':{'message':'unknown'}}))['category'],'unknown_rejection')
+
     async def test_400_identifies_parameter_without_leaking_or_retrying(self):
         self.create()
         calls = []

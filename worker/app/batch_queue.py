@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 import zipfile
+import importlib.util
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -42,6 +43,13 @@ class BatchInput(BaseModel):
     items: list[BatchItem] = Field(min_length=1, max_length=100)
 
 
+class PosePlanInput(BaseModel):
+    states: list[str] = Field(min_length=1, max_length=6)
+    provider: str = Field(default='image2', pattern='^(doubao|image2)$')
+    start: bool = False
+    base_jobs: dict[str, str] = Field(default_factory=dict, max_length=100)
+
+
 class BatchRouteInput(BaseModel):
     upstream_route: str = Field(pattern='^(default|yangzxo)$')
 
@@ -51,7 +59,7 @@ class BatchPolicyInput(BaseModel):
 
 
 class BatchQueue:
-    def __init__(self, root, authorize, split_create, split_get, prep=None):
+    def __init__(self, root, authorize, split_create, split_get, prep=None, poses=None):
         self.root = Path(root) / "batches"
         self.authorize = authorize
         self.split_create = split_create
@@ -59,6 +67,10 @@ class BatchQueue:
         self.prep = prep
         self.router = APIRouter(prefix="/batches")
         self.task = None
+        spec = importlib.util.spec_from_file_location('morph_batch_delivery', Path(__file__).with_name('batch_delivery.py'))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.delivery = module.BatchDelivery(self, poses)
         self.routes()
 
     @contextmanager
@@ -73,6 +85,8 @@ class BatchQueue:
                 con.execute("CREATE TABLE IF NOT EXISTS route_changes (batch_id TEXT NOT NULL, before_route TEXT NOT NULL, after_route TEXT NOT NULL, changed REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS batch_policies (batch_id TEXT PRIMARY KEY, on_confirmed_failure TEXT NOT NULL, changed REAL NOT NULL)")
                 con.execute("CREATE TABLE IF NOT EXISTS service_failure_acks (batch_id TEXT NOT NULL, job_id TEXT NOT NULL, PRIMARY KEY(batch_id,job_id))")
+                con.execute('CREATE TABLE IF NOT EXISTS pose_deliveries (batch_id TEXT PRIMARY KEY, plan TEXT NOT NULL, state TEXT NOT NULL)')
+                con.execute('CREATE TABLE IF NOT EXISTS pose_delivery_items (batch_id TEXT NOT NULL, item_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL, PRIMARY KEY(batch_id,item_id))')
                 yield con
         finally:
             con.close()
@@ -163,6 +177,7 @@ class BatchQueue:
         data['friendly_succeeded'] = sum(item['friendly_ready'] for item in items)
         data['uncertain'] = sum(item['status'] == 'uncertain' for item in items)
         data['on_confirmed_failure'] = policy['on_confirmed_failure'] if policy else 'pause'
+        data['delivery'] = self.delivery.summary(batch_id)
         return data
 
     def upload(self, batch_id, item_id, data):
@@ -271,6 +286,13 @@ class BatchQueue:
                    if (bid,self.prep_id(item['id'])) not in acknowledged
                    and (job := self.friendly_job(item['id'])) and job.get('blocked_provider')}
         if blocked:
+            if self.delivery.poses:
+                for batch in active.values():
+                    for item in batch['items']:
+                        job = self.friendly_job(item['id'])
+                        match = re.search(r'HTTP (401|402|403|429)\b', (job or {}).get('message', ''))
+                        if job and job.get('blocked_provider') and match:
+                            self.delivery.poses.block_service(int(match[1]))
             # All friendly generation uses Image2 for review, even when its
             # image generator is Doubao. Never reinterpret a service outage as
             # a skippable character QA failure. Running work is not cancelled.
@@ -325,6 +347,7 @@ class BatchQueue:
             while True:
                 try:
                     await self.advance()
+                    await self.delivery.advance()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -420,6 +443,21 @@ class BatchQueue:
         async def policy(batch_id: str, data: BatchPolicyInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
             auth(x_relay_token, x_morph_device_token)
             return self.set_policy(batch_id, data.on_confirmed_failure)
+
+        @router.post('/{batch_id}/delivery')
+        async def configure_delivery(batch_id: str, data: PosePlanInput, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.delivery.configure(batch_id, data.states, data.provider, data.start, data.base_jobs)
+
+        @router.post('/{batch_id}/delivery/{action}')
+        async def control_delivery(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return self.delivery.control(batch_id, action)
+
+        @router.get('/{batch_id}/delivery/output')
+        async def delivery_output(batch_id: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):
+            auth(x_relay_token, x_morph_device_token)
+            return FileResponse(self.delivery.archive(batch_id), media_type='application/zip', filename=f'batch-{batch_id[:8]}-multi-state.zip')
 
         @router.post("/{batch_id}/{action}")
         async def control(batch_id: str, action: str, x_relay_token: str | None = Header(None), x_morph_device_token: str | None = Header(None)):

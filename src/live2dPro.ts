@@ -31,7 +31,7 @@ export const LIVE2D_PRO_STATES: ProState[] = [
   },
   {
     id: 'action_05_thinking_arms_only', label: '思考', kind: 'action',
-    slotTargets: ['handwear'],
+    slotTargets: ['handwear-r', 'handwear-l'],
     direction: '仅改变双臂为轻微思考姿势；不得遮住脸，不得改变身体比例。',
   },
   {

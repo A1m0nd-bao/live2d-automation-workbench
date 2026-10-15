@@ -772,11 +772,17 @@ function WorkbenchApp() {
   }
   async function produceSplitBatch(batch: SplitBatch, mode: 'standard' | 'pro', stateIds: string[], provider: Live2dPrepProvider) {
     const files: File[] = [];
-    for (const item of batch.items.filter(item => item.status === 'succeeded')) {
-      const bytes = await serviceRequest<ArrayBuffer>('output', { jobId: item.id });
+    const delivery = mode === 'pro' ? batch.delivery : null;
+    if (delivery && !delivery.ready) throw new Error('本批多状态 PSD 尚未就绪；不会用基础 PSD 冒充完成。');
+    const variants = new Map(delivery?.items.filter(entry => entry.status === 'ready').map(entry => [entry.item_id, entry]) ?? []);
+    for (const item of batch.items.filter(item => delivery ? variants.has(item.id) : item.status === 'succeeded')) {
+      const variant = variants.get(item.id);
+      const bytes = variant
+        ? await proRequest<ArrayBuffer>(`/pose-jobs/${variant.run_id}/output`)
+        : await serviceRequest<ArrayBuffer>('output', { jobId: item.id });
       files.push(new File([bytes], item.filename, { type: 'image/vnd.adobe.photoshop' }));
     }
-    const imported = await importPsdBatch(files, batch.id, mode, stateIds, provider);
+    const imported = await importPsdBatch(files, delivery ? `${batch.id}-multi-state` : batch.id, mode, delivery?.states ?? stateIds, delivery?.provider ?? provider);
     await produceBatch(imported, batch.name);
   }
   async function proStatePsd(t: Task, stateId: string) {
