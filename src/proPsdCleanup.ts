@@ -14,8 +14,8 @@ function simple(layer: CleanupLayer) {
     !['mask','vectorMask','clipping','effects','adjustment','blendClippendElements', 'knockout']
       .some(k => !!l[k]);
 }
-export function cleanupProOrder(layers: CleanupLayer[] = []) {
-  const result = applyPsdQuality({width:Infinity,height:Infinity,children:layers},'pro');
+export function cleanupProOrder(layers: CleanupLayer[] = [], options: { preserveOrder?: boolean } = {}) {
+  const result = applyPsdQuality({width:Infinity,height:Infinity,children:layers},'pro',options);
   return {...result, warnings:[...result.warnings,...result.issues]};
 }
 export function proBaseLeaves(layers: CleanupLayer[] = []): CleanupLayer[] {

@@ -1,4 +1,5 @@
 import type { CleanupLayer } from './proPsdCleanup';
+import { repairSemanticOrder } from './psdSemanticOrder.ts';
 
 // Observed back-to-front order in seethrough_output (3).psd. This is an
 // ordinary humanoid profile, NOT a universal ordering for props/front hair.
@@ -14,6 +15,9 @@ function overlap(a:CleanupLayer,b:CleanupLayer){
 }
 export function applyPsdQuality(document:{width:number;height:number;children?:CleanupLayer[]},mode:'ordinary'|'pro'='ordinary',options:{preserveOrder?:boolean}={}) {
  const changed:string[]=[],warnings:string[]=[],issues:string[]=[];
+ const semanticOrder = repairSemanticOrder(document.children ?? []);
+ changed.push(...semanticOrder.movedLayers.map(name => `中立语义排序纠正：${name}（像素与位置不变）`));
+ issues.push(...semanticOrder.errors);
  const rank=new Map(ORDINARY_PSD_STANDARD.order.map((s,i)=>[key(s),i]));
  let nonEmpty=0;const seen:string[]=[];
  function walk(items:CleanupLayer[],path:string){
@@ -40,6 +44,7 @@ export function applyPsdQuality(document:{width:number;height:number;children?:C
    if(ra!==rb)edges.push(ra<rb?[a,b]:[b,a]);
   }
   const inverted=edges.filter(([a,b])=>items.indexOf(a)>items.indexOf(b));
+  if(semanticOrder.errors.length)return;
   if(!inverted.length)return;
   if(options.preserveOrder){warnings.push(`${path}: 模板排序建议与源 PSD 不同；已保留源顺序，需人工确认遮挡，不自动重排`);return;}
   if(!safe||candidates.length!==ordinary.length){issues.push(`${path}: 存在遮挡顺序冲突及复杂依赖，保留待修，不退回生成`);return;}
@@ -51,7 +56,7 @@ export function applyPsdQuality(document:{width:number;height:number;children?:C
  walk(document.children??[],'base');
  for(const required of ['face','mouth','neck','topwear'])if(!seen.includes(required))issues.push(`缺少可见 ${required}：保留现有素材待修`);
  if(mode==='pro')for(const s of ['legwear','footwear'])if(seen.includes(s))warnings.push(`${s}: Pro 需确认左右可独立绑定；不因合层退回生成`);
- return {policy:ORDINARY_PSD_STANDARD.id,mode,changed,warnings,issues,nonEmptyLayers:nonEmpty,
+ return {policy:ORDINARY_PSD_STANDARD.id,mode,changed,warnings,issues,semanticOrder,nonEmptyLayers:nonEmpty,
   status:nonEmpty===0?'unusable':issues.length?'needs_repair':changed.length?'repaired':'structure_checked',
   automaticRegeneration:false,nativeRigVerified:false,visualOcclusionVerified:false};
 }

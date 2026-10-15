@@ -191,7 +191,7 @@ export default function BatchPanel({ onProduce, runtimeCounts, seedFiles }: Prop
       <fieldset className="pro-state-picker"><legend>PSD 局部动作 · 供自动接续与 Pro 制作使用</legend>
         <div>{LIVE2D_PRO_STATES.filter(s => s.kind === 'action').map(s => <label key={s.id}><input type="checkbox" disabled={busy} checked={poseIds.includes(s.id)} onChange={e => setPoseIds(ids => e.target.checked ? [...ids,s.id] : ids.filter(id => id !== s.id))} />{s.label}</label>)}</div>
         <label>部件生图提供方<select value={poseProvider} disabled={busy} onChange={e => setPoseProvider(e.target.value as Live2dPrepProvider)}><option value="doubao">豆包</option><option value="image2">Image-2</option></select></label>
-        <small>整臂替换、另一侧复用、源层不变。嘴部与表情不改动；失败或未知结果不自动重生。</small>
+        <small>整臂替换、另一侧复用；原像素和位置不变，仅纠正同侧虹膜/眼白、脸/脖子/上衣的强制顺序。嘴部与表情不改动；失败或未知结果不自动重生。</small>
       </fieldset>
     {active && <>
       <small>暂停仅停止后续提交，当前拆件会继续。拆件由常驻 Relay 跟踪；本地建模时保持此页打开。</small>

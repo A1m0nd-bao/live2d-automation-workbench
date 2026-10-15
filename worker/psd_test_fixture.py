@@ -7,7 +7,9 @@ from psd_tools.api.layers import PixelLayer
 def layered_psd():
     psd = PSDImage.new('RGBA', (32,32))
     for name,box,color in [('handwear-r',(3,8,8,23),(160,100,60,128)),
-                           ('topwear',(8,8,24,28),(30,40,80,255))]:
+                           ('topwear',(8,8,24,28),(30,40,80,255)),
+                           ('neck',(13,5,18,12),(180,130,90,255)),
+                           ('face',(10,1,21,7),(210,160,120,255))]:
         image=Image.new('RGBA',psd.size)
         ImageDraw.Draw(image).rectangle(box,fill=color)
         PixelLayer.frompil(image,psd,name)

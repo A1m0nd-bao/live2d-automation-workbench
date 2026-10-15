@@ -29,6 +29,7 @@ import { applyPsdQuality } from '../../../psdQuality.ts';
 export function importPsd(buffer) {
   const psd = readPsd(buffer, { skipLayerImageData: false, useImageData: true });
   const quality = applyPsdQuality(psd, psd.children?.some(l => /^(action|expression)_/.test(l.name || '')) ? 'pro' : 'ordinary', { preserveOrder: true });
+  if (quality.semanticOrder.errors.length) throw new Error(`PSD 中立语义顺序需复核：${quality.semanticOrder.errors.join('；')}。原文件未改写，不会退回生图。`);
 
   const layers = [];
 

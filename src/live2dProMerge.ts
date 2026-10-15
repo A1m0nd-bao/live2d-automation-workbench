@@ -1,5 +1,6 @@
 import { readPsd, writePsd } from 'ag-psd';
 import { cleanupProOrder, proBaseLeaves, identicalProSlot } from './proPsdCleanup';
+import { semanticOrderReport } from './psdSemanticOrder';
 import {
   type ProLayerProbe,
   type ProState,
@@ -32,6 +33,7 @@ export type ProMergeReport = {
   baseCanvas: [number, number];
   mouth: ReturnType<typeof locateProMouth>;
   cleanup: ReturnType<typeof cleanupProOrder>;
+  semanticOrderVerified?: boolean;
   states: Array<{
     id: string;
     source: string;
@@ -182,9 +184,10 @@ export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[], op
   const preserveOrder = options.preserveOrder !== false;
   const document = readPsd(base, { useImageData: true, skipCompositeImageData: true }) as unknown as PsdDocument;
   const inspectOrder = (layers: PsdLayer[] | undefined) => {
-    const report = cleanupProOrder(preserveOrder ? structuredClone(layers ?? []) : layers);
-    return preserveOrder ? { ...report, status: 'needs_review', changed: [], warnings: [...report.warnings,
-      '自动队列保留源图层顺序，未套用模板排序；仍需视觉遮挡验收。'] } : report;
+    const report = cleanupProOrder(layers, { preserveOrder });
+    if (report.semanticOrder.errors.length) throw new Error(`PSD 中立排序无法安全纠正：${report.semanticOrder.errors.join('；')}`);
+    return preserveOrder ? { ...report, status: 'needs_review', warnings: [...report.warnings,
+      '仅纠正同侧虹膜/眼白和脸/脖子/上衣的强制关系，其余保留源顺序；仍需视觉遮挡验收。'] } : report;
   };
   const cleanup = inspectOrder(document.children);
   const baseRaster = proBaseLeaves(document.children);
@@ -229,6 +232,12 @@ export function mergeLive2dProPsd(base: ArrayBuffer, inputs: ProMergeInput[], op
       warnings: [...plan.warnings, ...stateCleanup.warnings, ...(!children.length ? ['所有目标槽位与基础层完全一致，未生成空动作组。'] : [])],
     });
   }
+  const orderBeforeExport = semanticOrderReport(document.children ?? []);
+  if (orderBeforeExport.errors.length) throw new Error(orderBeforeExport.errors.join('；'));
   const data = writePsd(document as never, { noBackground: true, trimImageData: false });
+  const reopened = readPsd(data, { skipLayerImageData: true, skipCompositeImageData: true });
+  const orderAfterExport = semanticOrderReport(reopened.children ?? []);
+  if (orderAfterExport.errors.length) throw new Error(`导出后中立排序校验失败：${orderAfterExport.errors.join('；')}`);
+  report.semanticOrderVerified = true;
   return { psd: new Blob([data], { type: 'image/vnd.adobe.photoshop' }), report };
 }
