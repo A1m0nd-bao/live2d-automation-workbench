@@ -156,8 +156,12 @@ class BatchDelivery:
         with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as archive:
             for entry in ready:
                 directory = self.poses.root / entry['run_id']
+                self.poses.checked_output(entry['run_id'])
                 report = json.loads((directory / 'report.json').read_text())
-                if (not report.get('sourceLayersUnchanged') or not report.get('neutralPixelsUnchanged') or
+                correction_ok = (report.get('sourceArtworkUnchanged') and report.get('semanticOrderVerified') and
+                                 report.get('neutralMatchesCorrectedBaseline'))
+                unchanged = report.get('sourceLayersUnchanged') and report.get('neutralPixelsUnchanged')
+                if (not (correction_ok or unchanged) or
                     report.get('outputSha256') != hashlib.sha256((directory/'merged.psd').read_bytes()).hexdigest() or
                     set(report.get('requestedStates', [])) != set(delivery['states'])):
                     raise HTTPException(409, '多状态交付校验与文件或请求动作不一致；未将其打包交付')

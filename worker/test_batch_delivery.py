@@ -25,6 +25,7 @@ class FakePoses:
         self.input_slot = asyncio.Semaphore(1)
         self.runs, self.calls, self.blocker = {}, [], None
     def service_blocker(self): return self.blocker
+    def checked_output(self, jid): return self.root/jid/'merged.psd'
     def get(self, jid):
         if jid not in self.runs: raise HTTPException(404)
         return self.runs[jid]

@@ -33,7 +33,7 @@ jobs:
       - name: Test PSD-first pose and durable batch queues (no provider requests)
         run: |
           pip install -r worker/requirements.txt fastapi
-          python -m unittest worker/test_psd_pose.py worker/test_pro_queue.py worker/test_prep_queue.py worker/test_batch_queue.py worker/test_batch_delivery.py worker/test_batch_friendly.py worker/test_batch_recovery.py worker/test_pro_native_export.py worker/test_relay.py -q
+          python -m unittest worker/test_psd_pose.py worker/test_semantic_order.py worker/test_pro_queue.py worker/test_prep_queue.py worker/test_batch_queue.py worker/test_batch_delivery.py worker/test_batch_friendly.py worker/test_batch_recovery.py worker/test_pro_native_export.py worker/test_relay.py -q
       # PR code gets no deployment credentials or service secrets.
       - name: Build Pages without deploying
         run: npm run build:pages

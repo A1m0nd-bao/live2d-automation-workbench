@@ -30,6 +30,6 @@ async function check(bytes){
  assert.equal(merged.report.cleanup.changed.length,0);
 }
 test('ordinary import and default Pro merge preserve artist order instead of template rank',async()=>{
- await check(psd.writePsd({width:1,height:1,children:[layer('neck'),layer('face'),layer('back hair')]},{noBackground:true}));
+ await check(psd.writePsd({width:1,height:1,children:[layer('topwear'),layer('neck'),layer('face'),layer('back hair')]},{noBackground:true}));
 });
 test('user long-hair PSD preserves order through actual importer and Pro roundtrip',{skip:!process.env.PSD_ORDER_FIXTURE},async()=>check(fs.readFileSync(process.env.PSD_ORDER_FIXTURE)));

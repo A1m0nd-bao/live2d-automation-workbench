@@ -82,6 +82,16 @@ class PoseQueue:
         with self.db() as con:
             con.execute('UPDATE runs SET payload=? WHERE id=?', (json.dumps(run, ensure_ascii=False), run['id']))
 
+    def checked_output(self, jid):
+        if self.get(jid)['status'] != 'ready':
+            raise HTTPException(409, '多状态 PSD 尚未通过导出检查')
+        output = self.root/jid/'merged.psd'
+        try:
+            pose.gates.validate_semantic_order(pose.PSDImage.open(output))
+        except Exception:
+            raise HTTPException(409, '已保存 PSD 不满足新版中立排序规则；保留原文件，需人工复核，未自动改写或重生') from None
+        return output
+
     @staticmethod
     def persist(path, data):
         path = Path(path)
@@ -282,6 +292,10 @@ class PoseQueue:
         if self.service_blocker():
             return
         info = json.loads((self.root/run['id']/'inspection.json').read_text())
+        if (info.get('semanticOrder') or {}).get('policy') != pose.order.POLICY:
+            run.update(status='needs_attention', message='中立语义排序规则已更新；旧任务的参考图与遮挡槽位需复核，未重生部件或改写原 PSD')
+            self.save(run)
+            return
         for state in run['states']:
             if state['status'] in TERMINAL:
                 continue
@@ -316,7 +330,9 @@ class PoseQueue:
                 report['outputSha256'] = hashlib.sha256(temporary.read_bytes()).hexdigest()
                 temporary.replace(directory/'merged.psd')
                 self.persist(directory/'report.json', json.dumps(report, ensure_ascii=False).encode())
-                run.update(status='ready', message='多状态 PSD 已生成并重开校验；原层/中立像素不变，动作组默认隐藏。仍需人工验收')
+                message = ('多状态 PSD 已生成并重开校验；已纠正强制语义顺序，图层像素和位置不变，按纠正后的中立基准验收。'
+                           if report['semanticOrder']['changed'] else '多状态 PSD 已生成并重开校验；原层/中立像素不变。')
+                run.update(status='ready', message=message+'动作组默认隐藏，仍需人工验收')
             except Exception as e:
                 run.update(status='needs_attention', message=str(e) if isinstance(e,ValueError) else '多状态 PSD 导出检查未通过；原 PSD 与部件保留')
         elif all(s in TERMINAL for s in statuses):
@@ -461,6 +477,7 @@ class PoseQueue:
                 raise HTTPException(404,'文件类型不存在')
             if self.get(jid)['status']!='ready':
                 raise HTTPException(409,'多状态 PSD 尚未通过导出检查')
+            await asyncio.to_thread(self.checked_output, jid)
             return FileResponse(self.root/jid/('merged.psd' if kind=='output' else 'report.json'),
                                 media_type='image/vnd.adobe.photoshop' if kind=='output' else 'application/json',
                                 filename='psd-pose-variants.psd' if kind=='output' else 'psd-pose-report.json')

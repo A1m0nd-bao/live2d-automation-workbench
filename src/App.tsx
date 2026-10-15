@@ -819,7 +819,7 @@ function WorkbenchApp() {
       const source = await proStatePsd(t, state.id);
       return { state, ...source };
     }));
-    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs, { preserveOrder: !!t.proRunId });
+    const result = mergeLive2dProPsd(await base.arrayBuffer(), inputs, { preserveOrder: true });
     const filename = `${t.name}-live2d-pro-merged.psd`;
     const reportName = `${t.name}-live2d-pro-merge-report.json`;
     await saveAsset(`${t.id}:pro-merged-psd`, result.psd);

@@ -26,6 +26,9 @@ from scipy.ndimage import label, binary_dilation
 _gate_spec = importlib.util.spec_from_file_location('morph_pose_export_gates', Path(__file__).with_name('psd_export_gates.py'))
 gates = importlib.util.module_from_spec(_gate_spec)
 _gate_spec.loader.exec_module(gates)
+_order_spec = importlib.util.spec_from_file_location('morph_pose_semantic', Path(__file__).with_name('psd_semantic_order.py'))
+order = importlib.util.module_from_spec(_order_spec)
+_order_spec.loader.exec_module(order)
 
 VERSION = 'psd-pose-variants-v1'
 POSES = {
@@ -61,26 +64,27 @@ def signature(layers):
             for layer in layers for x in [layer, *(layer.descendants() if layer.is_group() else [])]]
 
 
-def open_source(source):
+def open_source(source, *, with_report=False):
     psd = PSDImage.open(source)
     if psd.depth != 8 or psd.color_mode.name != 'RGB' or psd.width * psd.height > 16_777_216:
         raise ValueError('请使用 8 位 RGB、画布不超过 1600 万像素的 PSD')
     if any(x.visible and x.name.startswith(('action_', 'expression_')) for x in psd):
         raise ValueError('请先将已有 action/expression 组隐藏，保留中立状态再上传')
+    correction = order.repair(psd)
     arms = {}
     for name in ('handwear-r', 'handwear-l'):
         matches = [x for x in psd if x.name == name and not x.is_group()]
         if len(matches) != 1 or not matches[0].visible:
-            raise ValueError(f'基础 PSD 必须有唯一且可见的根图层 {name}；不会猜左右或重排原图层')
+            raise ValueError(f'基础 PSD 必须有唯一且可见的根图层 {name}；不会猜左右或全局重排图层')
         layer = matches[0]
         if layer.opacity != 255 or layer.blend_mode.name != 'NORMAL' or layer.has_mask() or layer.clipping:
             raise ValueError(f'{name} 的遮罩/剪贴/混合设置需先整理，不能只复制像素后丢失效果')
         arms[name] = layer
-    return psd, arms
+    return (psd, arms, correction) if with_report else (psd, arms)
 
 
 def inspect(source, directory):
-    psd, arms = open_source(source)
+    psd, arms, correction = open_source(source, with_report=True)
     neutral = psd.composite(force=True, apply_icc=False).convert('RGBA')
     directory = Path(directory)
     neutral.save(directory / 'neutral.png')
@@ -100,7 +104,7 @@ def inspect(source, directory):
         info[name] = {'bounds': [int(xx.min()), top, int(xx.max()+1), int(yy.max()+1)],
                       'shoulder': [float(np.median(bx)), float(np.median(by))], 'layerName': layer.name}
     parts.save(directory / 'arms.png')
-    return {'version': VERSION, 'canvas': list(psd.size), 'arms': info,
+    return {'version': VERSION, 'canvas': list(psd.size), 'arms': info, 'semanticOrder': correction,
             'layers': [{'name': x.name, 'visible': x.visible, 'bounds': list(x.bbox), 'isGroup': x.is_group(),
                         'parts': [y.name for y in x] if x.is_group() else []} for x in psd],
             'sourceSha256': hashlib.sha256(Path(source).read_bytes()).hexdigest()}
@@ -341,7 +345,7 @@ def add_state(psd, arms, name, replacement, slot):
 
 
 def export(source, destination, states):
-    psd, arms = open_source(source)
+    psd, arms, correction = open_source(source, with_report=True)
     original_layers = list(psd)
     before = signature(original_layers)
     neutral = psd.composite(force=True, apply_icc=False).convert('RGBA')
@@ -365,6 +369,9 @@ def export(source, destination, states):
     merged = check._record.image_data.get_data(check._record.header)
     if len(merged) != check.channels or any(len(x) != check.width*check.height for x in merged):
         raise ValueError('PSD 合成透明通道不完整')
-    return {'version': VERSION, 'neutralPixelsUnchanged': True, 'sourceLayersUnchanged': True,
+    return {'version': VERSION, 'neutralPixelsUnchanged': not correction['changed'],
+            'neutralMatchesCorrectedBaseline': True, 'sourceArtworkUnchanged': True,
+            'sourceLayersUnchanged': not correction['changed'], 'semanticOrderVerified': True,
+            'semanticOrder': correction,
             'mergedChannels': check.channels, 'storedMergedVerified': True,
             'states': [x['id'] for x in states], 'visualAcceptance': 'pending_human_review'}

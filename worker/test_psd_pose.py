@@ -30,6 +30,10 @@ def fixture(path):
         arm=Image.new('RGBA',psd.size)
         ImageDraw.Draw(arm).rectangle((x,60,x+10,150),fill='#dca090')
         PixelLayer.frompil(arm,psd,name)
+    for name,box in [('neck',(90,45,110,70)),('face',(80,10,120,50))]:
+        part=Image.new('RGBA',psd.size)
+        ImageDraw.Draw(part).rectangle(box,fill='#dca090')
+        PixelLayer.frompil(part,psd,name)
     psd.save(path)
     return path.read_bytes()
 
@@ -87,12 +91,12 @@ class PoseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings['background_strategy'],'local_cutout')
         before=PSDImage.open(io.BytesIO(self.data))
         after=PSDImage.open(self.queue.root/run['id']/'merged.psd')
-        self.assertEqual(pose.signature(list(before)),pose.signature(list(after)[:3]))
+        self.assertEqual(pose.signature(list(before)),pose.signature([l for l in after if l.name!=WAVE]))
         self.assertTrue(np.array_equal(np.asarray(before.composite(force=True)),np.asarray(after.composite(force=True))))
-        group=list(after)[-1]
+        group=next(l for l in after if l.name==WAVE)
         self.assertEqual(group.name,WAVE)
         self.assertFalse(group.visible)
-        base=list(before)[-1];copied=list(group)[-1]
+        base=next(l for l in before if l.name=='handwear-l');copied=list(group)[-1]
         self.assertEqual(base.bbox,copied.bbox)
         self.assertEqual([x.data for x in base._channels],[x.data for x in copied._channels])
         self.assertEqual(len(after._record.image_data.get_data(after._record.header)),4)

@@ -20,6 +20,57 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def semantic_order_report(psd):
+    """Audit neutral semantic layers without changing the document.
+
+    Photoshop's Layers panel is front-to-back; psd-tools iterates the reverse.
+    Absent semantic families are not certified (e.g. an isolated arm fixture).
+    Present families must have unique, root-level members; do not guess aliases
+    or flatten nested parts, masks or clipping groups automatically.
+    """
+    names = [layer.name for layer in psd]
+    report = {'root_order_back_to_front': names, 'checked_constraints': [], 'errors': []}
+    relevant = {'face', 'neck', 'topwear'}
+    for suffix in ('', '-r', '-l'):
+        relevant.update(('eyewhite' + suffix, 'irides' + suffix))
+
+    def nested_parts(group):
+        for child in group:
+            if child.name.startswith('action_'):
+                continue
+            if child.name in relevant:
+                report['errors'].append('semantic order needs reviewed root-level parts: ' + child.name)
+            if child.is_group():
+                nested_parts(child)
+
+    for layer in psd:
+        if layer.is_group() and not layer.name.startswith('action_'):
+            nested_parts(layer)
+
+    def family(parts):
+        if not any(name in names for name in parts):
+            return
+        invalid = [name for name in parts if names.count(name) != 1]
+        if invalid:
+            report['errors'].append('semantic order requires unique root layers: ' + ', '.join(invalid))
+            return
+        for behind, front in zip(parts, parts[1:]):
+            report['checked_constraints'].append({'behind': behind, 'front': front})
+            if names.index(behind) >= names.index(front):
+                report['errors'].append('semantic order: ' + front + ' must be above ' + behind)
+
+    for suffix in ('', '-r', '-l'):
+        family(('eyewhite' + suffix, 'irides' + suffix))
+    family(('topwear', 'neck', 'face'))
+    return report
+
+
+def validate_semantic_order(psd):
+    report = semantic_order_report(psd)
+    require(not report['errors'], '; '.join(report['errors']))
+    return report
+
+
 def check_arm(image):
     image = image.convert('RGBA')
     alpha = np.asarray(image.getchannel('A'))
@@ -167,6 +218,7 @@ def save_compatible(psd, path):
     """
     path = Path(path)
     require(not path.exists(), 'refusing to overwrite output: ' + str(path))
+    validate_semantic_order(psd)
     header = psd._record.header
     require(header.depth == 8 and int(header.color_mode) == 3, 'export helper supports only 8-bit RGB PSD')
     require(header.channels >= 3, 'invalid RGB channel count')
@@ -199,6 +251,7 @@ def save_compatible(psd, path):
     with path.open('xb') as stream:
         psd._record.write(stream)
     reopened = PSDImage.open(path)
+    validate_semantic_order(reopened)
     decoded = reopened._record.image_data.get_data(reopened._record.header)
     require(len(decoded) == reopened.channels, 'exported merged image is truncated')
     require(reopened.topil(apply_icc=False).mode == 'RGBA', 'exported merged transparency is unavailable')
@@ -224,6 +277,8 @@ def inspect(path, strict_thinking=True, require_thinking=True):
     result = {'file': str(path), 'errors': []}
     try:
         psd = PSDImage.open(path)
+        result['semantic_order'] = semantic_order_report(psd)
+        result['errors'].extend(result['semantic_order']['errors'])
         channels = psd._record.image_data.get_data(psd._record.header)
         require(len(channels) == psd.channels, 'merged image channel count mismatch')
         require(psd.depth == 8 and all(len(c) == psd.width*psd.height for c in channels),
@@ -233,8 +288,8 @@ def inspect(path, strict_thinking=True, require_thinking=True):
         validate_merged_preview(psd, psd.composite(force=True, apply_icc=False).convert('RGBA'))
         groups = [l for l in psd if l.name == THINKING]
         if not require_thinking and not groups:
-            result['passed'] = True
-            result['scope'] = 'neutral_merged_export_only'
+            result['passed'] = not result['errors']
+            result['scope'] = 'neutral_merged_export_and_present_semantic_order'
             result['visual_approval'] = 'not_automatically_proven'
             return result
         require(len(groups) == 1, 'missing/duplicate thinking group')
